@@ -15,8 +15,7 @@
   ],
   "scripts": {
     "test": "node --test",
-    "test:integration": "node --test test/cli.test.js",
-    "prepack": "pnpm test"
+    "test:integration": "node --test test/cli.test.js"
   },
   "engines": {
     "node": ">=20"
