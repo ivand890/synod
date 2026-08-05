@@ -1,0 +1,44 @@
+{
+  "name": "synod-cli",
+  "version": "0.3.0",
+  "description": "Install the Synod persistent advisor loop in Codex projects.",
+  "type": "module",
+  "bin": {
+    "synod": "./bin/synod.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "templates/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "test:integration": "node --test test/cli.test.js",
+    "prepack": "pnpm test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "codex",
+    "agents",
+    "multi-agent",
+    "advisor",
+    "workflow"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ivand890/synod.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ivand890/synod/issues"
+  },
+  "homepage": "https://github.com/ivand890/synod#readme",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "packageManager": "pnpm@10.15.1"
+}
