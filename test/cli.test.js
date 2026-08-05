@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { packageVersion } from "../src/package.js";
 
 const bin = path.resolve("bin/synod.js");
 
@@ -28,7 +29,7 @@ test("prints version and help", () => {
   const help = spawnSync(process.execPath, [bin, "--help"], { encoding: "utf8" });
 
   assert.equal(version.status, 0);
-  assert.equal(version.stdout.trim(), "0.3.0");
+  assert.equal(version.stdout.trim(), packageVersion);
   assert.equal(help.status, 0);
   assert.match(help.stdout, /synod init/);
   assert.match(help.stdout, /synod usage/);

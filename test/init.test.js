@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { initProject } from "../src/init.js";
+import { packageVersion } from "../src/package.js";
 
 const temporaryDirectories = new Set();
 
@@ -37,7 +38,7 @@ test("initializes a fresh project with durable state, agents, and skill", async 
 
   const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
   assert.equal(manifest.schemaVersion, 1);
-  assert.equal(manifest.templateVersion, "0.3.0");
+  assert.equal(manifest.templateVersion, packageVersion);
 
   const config = await readFile(path.join(directory, ".codex/config.toml"), "utf8");
   assert.match(config, /default_subagent_model = "gpt-5\.6-luna"/);

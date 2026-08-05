@@ -4,25 +4,23 @@ Synod installs a persistent, reviewed advisor loop for Codex projects. Sol owns 
 
 ## Install
 
-Directly from the public GitHub repository:
+Install from npm:
 
 ```bash
-pnpm add --global github:ivand890/synod
-```
-
-After publishing `synod-cli` to npm:
-
-```bash
-pnpm add --global synod-cli
+pnpm add --global @ivand890/synod
 ```
 
 Or run it without a global installation:
 
 ```bash
-pnpm dlx github:ivand890/synod init
+pnpm dlx @ivand890/synod init
 ```
 
-Once the package is published to npm, `pnpm dlx synod-cli init` will work as well.
+You can also install directly from the public GitHub repository:
+
+```bash
+pnpm add --global github:ivand890/synod
+```
 
 ## Initialize a project
 
@@ -73,5 +71,8 @@ Sol does not perform routine implementation. It may make only a minimal integrat
 
 ```bash
 pnpm test
+pnpm test:package
 pnpm pack --pack-destination dist
 ```
+
+Every change lands through a pull request with required CI. Releases are published from protected `vX.Y.Z` tags using npm trusted publishing; see [RELEASING.md](RELEASING.md).

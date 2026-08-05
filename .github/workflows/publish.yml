@@ -1,0 +1,68 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  npm:
+    name: npm
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Verify release identity
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
+          test "$RELEASE_TAG" = "v$package_version"
+          tagged_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          git merge-base --is-ancestor "$tagged_commit" origin/main
+          npm_version="$(npm --version)"
+          node -e "const [major, minor, patch] = process.argv[1].split('.').map(Number); if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) process.exit(1)" "$npm_version"
+      - name: Run tests
+        run: pnpm test
+      - name: Test the published package shape
+        run: pnpm test:package
+      - name: Ensure the version is unpublished
+        run: |
+          package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
+          if npm view "@ivand890/synod@$package_version" version >/dev/null 2>&1; then
+            echo "@ivand890/synod@$package_version is already published." >&2
+            exit 1
+          fi
+      - name: Publish to npm
+        run: npm publish --access public
+      - name: Verify registry availability
+        run: |
+          package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
+          for attempt in 1 2 3 4 5 6; do
+            if npm view "@ivand890/synod@$package_version" version --prefer-online >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "The package was published but is not readable from the registry yet." >&2
+          exit 1
