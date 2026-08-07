@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { WARNING_CODES } from "../src/contracts.js";
+import { ERROR_CODES } from "../src/errors.js";
+import { run } from "../src/cli.js";
 import { packageVersion } from "../src/package.js";
 
 const bin = path.resolve("bin/synod.js");
@@ -33,4 +36,48 @@ test("prints version and help", () => {
   assert.equal(help.status, 0);
   assert.match(help.stdout, /synod init/);
   assert.match(help.stdout, /synod usage/);
+});
+
+test("init emits versioned JSON for success and conflicts", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-json-test-"));
+  const messages = [];
+  const output = { log: message => messages.push(message), warn() {}, error() {} };
+
+  try {
+    const successStatus = await run(["init", directory, "--json"], output);
+    const success = JSON.parse(messages.shift());
+    assert.equal(successStatus, 0);
+    assert.equal(success.schemaVersion, 1);
+    assert.equal(success.ok, true);
+    assert.ok(success.data.created.includes("AGENTS.md"));
+
+    await writeFile(path.join(directory, "docs/synod/GOAL.md"), "user-owned goal\n", "utf8");
+    const warningStatus = await run(["init", directory, "--force", "--json"], output);
+    const warned = JSON.parse(messages.shift());
+    assert.equal(warningStatus, 0);
+    assert.equal(warned.ok, true);
+    assert.ok(warned.warnings.some(item => item.code === WARNING_CODES.DURABLE_STATE_PRESERVED));
+
+    await writeFile(path.join(directory, ".codex/agents/synod-reviewer.toml"), "conflict\n", "utf8");
+    const conflictStatus = await run(["init", directory, "--json"], output);
+    const conflict = JSON.parse(messages.shift());
+    assert.equal(conflictStatus, 1);
+    assert.equal(conflict.ok, false);
+    assert.equal(conflict.error.code, ERROR_CODES.INIT_CONFLICT);
+    assert.deepEqual(conflict.error.details.paths, [".codex/agents/synod-reviewer.toml"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("unknown commands emit stable JSON errors when requested", async () => {
+  const messages = [];
+  const output = { log: message => messages.push(message), warn() {}, error() {} };
+
+  const status = await run(["unknown", "--json"], output);
+  const envelope = JSON.parse(messages[0]);
+
+  assert.equal(status, 1);
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error.code, ERROR_CODES.UNKNOWN_COMMAND);
 });

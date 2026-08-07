@@ -2,6 +2,7 @@ import { createReadStream } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { CodexAppServerClient } from "./app-server.js";
+import { ERROR_CODES, SynodError, asSynodError } from "./errors.js";
 
 const ALL_SOURCE_KINDS = [
   "cli",
@@ -115,6 +116,13 @@ async function listPages(client, params) {
   let cursor;
   do {
     const response = await client.request("thread/list", { ...params, cursor, limit: 100 });
+    if (!response || !Array.isArray(response.data)) {
+      throw new SynodError(
+        ERROR_CODES.APP_SERVER_UNSUPPORTED,
+        "Codex App Server returned an invalid thread/list response.",
+        { details: { capability: "thread/list" } }
+      );
+    }
     threads.push(...response.data);
     cursor = response.nextCursor || undefined;
   } while (cursor);
@@ -122,22 +130,35 @@ async function listPages(client, params) {
 }
 
 async function findLatestRoot(client, cwd) {
-  let cursor;
-  do {
-    const response = await client.request("thread/list", {
-      cwd,
-      archived: false,
-      sortKey: "updated_at",
-      sortDirection: "desc",
-      sourceKinds: INTERACTIVE_SOURCE_KINDS,
-      cursor,
-      limit: 100
-    });
-    const root = response.data.find(thread => thread.parentThreadId == null);
-    if (root) return root;
-    cursor = response.nextCursor || undefined;
-  } while (cursor);
-  return undefined;
+  const query = {
+    cwd,
+    sortKey: "updated_at",
+    sortDirection: "desc",
+    sourceKinds: INTERACTIVE_SOURCE_KINDS
+  };
+  const [active, archived] = await Promise.all([
+    listPages(client, { ...query, archived: false }),
+    listPages(client, { ...query, archived: true })
+  ]);
+  const roots = new Map();
+  for (const thread of [...active, ...archived]) {
+    if (thread.parentThreadId == null) roots.set(thread.id, thread);
+  }
+
+  return [...roots.values()].sort((left, right) => {
+    const updated = comparableTime(right.updatedAt) - comparableTime(left.updatedAt);
+    if (updated !== 0) return updated;
+    const created = comparableTime(right.createdAt) - comparableTime(left.createdAt);
+    if (created !== 0) return created;
+    return String(left.id).localeCompare(String(right.id));
+  })[0];
+}
+
+function comparableTime(value) {
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return Math.abs(numeric) < 1_000_000_000_000 ? numeric * 1_000 : numeric;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
 }
 
 async function findRoot(client, threadId) {
@@ -146,7 +167,11 @@ async function findRoot(client, threadId) {
   const visited = new Set();
 
   while (thread.parentThreadId) {
-    if (visited.has(thread.id)) throw new Error(`Cycle detected in Codex thread tree at ${thread.id}.`);
+    if (visited.has(thread.id)) {
+      throw new SynodError(ERROR_CODES.SESSION_CYCLE, `Cycle detected in Codex thread tree at ${thread.id}.`, {
+        details: { threadId: thread.id }
+      });
+    }
     visited.add(thread.id);
     response = await client.request("thread/read", {
       threadId: thread.parentThreadId,
@@ -194,15 +219,22 @@ export async function collectUsage({
   clientFactory = () => new CodexAppServerClient()
 } = {}) {
   const client = clientFactory();
+  let report;
+  let failure;
   try {
     await client.start();
+    if (typeof client.probeCapabilities === "function") await client.probeCapabilities();
     const resolvedCwd = path.resolve(cwd);
     const root = threadId
       ? await findRoot(client, threadId)
       : await findLatestRoot(client, resolvedCwd);
 
     if (!root) {
-      throw new Error(`No Codex session found for ${resolvedCwd}. Use --session <thread-id> to select one.`);
+      throw new SynodError(
+        ERROR_CODES.SESSION_NOT_FOUND,
+        `No Codex session found for ${resolvedCwd}. Use --session <thread-id> to select one.`,
+        { details: { cwd: resolvedCwd } }
+      );
     }
 
     const threads = await findDescendants(client, root);
@@ -210,7 +242,11 @@ export async function collectUsage({
 
     for (const thread of threads) {
       if (!thread.path) {
-        throw new Error(`Codex did not expose a rollout path for thread ${thread.id}.`);
+        throw new SynodError(
+          ERROR_CODES.ROLLOUT_PATH_MISSING,
+          `Codex did not expose a rollout path for thread ${thread.id}.`,
+          { details: { threadId: thread.id } }
+        );
       }
 
       const threadUsage = await readRolloutUsage(thread.path);
@@ -228,7 +264,7 @@ export async function collectUsage({
     const total = { threads: threads.length, ...emptyUsage() };
     for (const row of models) addUsage(total, row);
 
-    return {
+    report = {
       session: {
         threadId: root.id,
         cwd: root.cwd,
@@ -239,9 +275,25 @@ export async function collectUsage({
       models,
       total
     };
+  } catch (error) {
+    failure = asSynodError(error);
   } finally {
-    await client.close();
+    try {
+      await client.close();
+    } catch (error) {
+      if (!failure) failure = asSynodError(error);
+    }
   }
+
+  const diagnostics = typeof client.getDiagnostics === "function" ? client.getDiagnostics() : {};
+  const warnings = typeof client.getWarnings === "function" ? client.getWarnings() : [];
+  if (failure) {
+    failure.diagnostics = diagnostics;
+    failure.warnings = warnings;
+    throw failure;
+  }
+
+  return { ...report, warnings, diagnostics };
 }
 
 function formatNumber(value) {
