@@ -100,7 +100,7 @@ function printInitResult(result, output) {
   for (const path of result.created) output.log(`${prefix || "Created"}${prefix ? " create" : ""} ${path}`);
   for (const path of result.updated) output.log(`${prefix || "Updated"}${prefix ? " update" : ""} ${path}`);
   for (const path of result.unchanged) output.log(`Unchanged ${path}`);
-  for (const item of result.warnings) output.warn(`Warning [${item.code}]: ${item.message}`);
+  printWarnings(result.warnings, output);
 
   if (result.conflicts.length > 0) {
     output.error("Synod found conflicting files and made no changes:");
@@ -111,6 +111,10 @@ function printInitResult(result, output) {
 
   const action = result.dryRun ? "plan is valid" : "initialized";
   output.log(`Synod ${action} in ${result.targetDirectory}`);
+}
+
+function printWarnings(warnings, output) {
+  for (const item of warnings) output.warn(`Warning [${item.code}]: ${item.message}`);
 }
 
 export async function run(args, output = console, dependencies = {}) {
@@ -140,6 +144,7 @@ export async function run(args, output = console, dependencies = {}) {
         output.log(JSON.stringify(successEnvelope("usage", data, { warnings, diagnostics }), null, 2));
       } else {
         output.log(formatUsageReport(report));
+        printWarnings(report.warnings, output);
       }
       return 0;
     }

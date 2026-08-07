@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { run } from "../src/cli.js";
+import { WARNING_CODES, warning } from "../src/contracts.js";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
 import { collectUsage, formatUsageReport, readRolloutUsage } from "../src/usage.js";
 
@@ -190,4 +191,45 @@ test("usage JSON errors use a stable versioned contract", async () => {
   assert.equal(envelope.ok, false);
   assert.equal(envelope.error.code, ERROR_CODES.APP_SERVER_SPAWN_FAILED);
   assert.equal(envelope.diagnostics.codexVersion, "0.142.0");
+});
+
+test("usage text output surfaces App Server cleanup warnings", async () => {
+  const directory = await temporaryDirectory();
+  const rootPath = await rollout(directory, "root", []);
+  const root = {
+    id: "root", parentThreadId: null, path: rootPath, cwd: directory,
+    createdAt: 1, updatedAt: 2
+  };
+  const fakeClient = {
+    async start() {},
+    async close() {},
+    async request(_method, params) {
+      if (params.parentThreadId) return { data: [], nextCursor: null };
+      return { data: params.archived ? [] : [root], nextCursor: null };
+    },
+    getDiagnostics() { return {}; },
+    getWarnings() {
+      return [warning(
+        WARNING_CODES.APP_SERVER_FORCE_KILLED,
+        "Codex App Server required SIGKILL."
+      )];
+    }
+  };
+  const messages = [];
+  const warnings = [];
+  const output = {
+    log: message => messages.push(message),
+    warn: message => warnings.push(message),
+    error() {}
+  };
+
+  const status = await run(["usage", "--cwd", directory], output, {
+    clientFactory: () => fakeClient
+  });
+
+  assert.equal(status, 0);
+  assert.match(messages[0], /Session: root/);
+  assert.deepEqual(warnings, [
+    `Warning [${WARNING_CODES.APP_SERVER_FORCE_KILLED}]: Codex App Server required SIGKILL.`
+  ]);
 });
