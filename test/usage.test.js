@@ -233,3 +233,34 @@ test("usage text output surfaces App Server cleanup warnings", async () => {
     `Warning [${WARNING_CODES.APP_SERVER_FORCE_KILLED}]: Codex App Server required SIGKILL.`
   ]);
 });
+
+test("usage text errors still surface App Server cleanup warnings", async () => {
+  const warnings = [];
+  const errors = [];
+  const output = {
+    log() {},
+    warn: message => warnings.push(message),
+    error: message => errors.push(message)
+  };
+  const fakeClient = {
+    async start() {
+      throw new SynodError(ERROR_CODES.APP_SERVER_TIMEOUT, "Initialize timed out.");
+    },
+    async close() {},
+    getDiagnostics() { return {}; },
+    getWarnings() {
+      return [warning(
+        WARNING_CODES.APP_SERVER_EXIT_UNCONFIRMED,
+        "Codex App Server exit could not be confirmed."
+      )];
+    }
+  };
+
+  const status = await run(["usage"], output, { clientFactory: () => fakeClient });
+
+  assert.equal(status, 1);
+  assert.deepEqual(warnings, [
+    `Warning [${WARNING_CODES.APP_SERVER_EXIT_UNCONFIRMED}]: Codex App Server exit could not be confirmed.`
+  ]);
+  assert.match(errors[0], new RegExp(ERROR_CODES.APP_SERVER_TIMEOUT));
+});

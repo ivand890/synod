@@ -187,6 +187,7 @@ export async function run(args, output = console, dependencies = {}) {
       }), null, 2));
       return 1;
     }
+    printWarnings(synodError.warnings || [], output);
     output.error(`Error [${synodError.code}]: ${synodError.message}`);
     output.error("Run `synod --help` for usage.");
     return 1;
