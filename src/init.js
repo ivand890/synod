@@ -1,6 +1,8 @@
 import { lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { WARNING_CODES, warning } from "./contracts.js";
+import { ERROR_CODES, SynodError } from "./errors.js";
 import { packageVersion } from "./package.js";
 
 const templatesDirectory = fileURLToPath(new URL("../templates", import.meta.url));
@@ -68,25 +70,80 @@ function normalizeText(content) {
   return content.replaceAll("\r\n", "\n");
 }
 
-function findManagedAgentsBlock(content) {
-  const start = content.indexOf(agentsStart);
-  const end = content.indexOf(agentsEnd);
+function findManagedAgentsBlocks(content) {
+  const markerPattern = /<!-- synod:(start|end) -->/g;
+  const blocks = [];
+  let openStart;
+  let match;
 
-  if (start === -1 && end === -1) return null;
-  if (start === -1 || end === -1 || end < start) {
-    throw new Error("AGENTS.md contains an incomplete Synod managed block.");
+  while ((match = markerPattern.exec(content)) !== null) {
+    const marker = match[1];
+    if (marker === "start") {
+      if (openStart !== undefined) {
+        throw new SynodError(
+          ERROR_CODES.AGENTS_BLOCK_MALFORMED,
+          "AGENTS.md contains nested or duplicate Synod start markers. Resolve the managed block manually.",
+          { details: { path: "AGENTS.md", reason: "nested_start" } }
+        );
+      }
+      openStart = match.index;
+      continue;
+    }
+
+    if (openStart === undefined) {
+      throw new SynodError(
+        ERROR_CODES.AGENTS_BLOCK_MALFORMED,
+        "AGENTS.md contains a Synod end marker without a matching start marker. Resolve the managed block manually.",
+        { details: { path: "AGENTS.md", reason: "orphan_end" } }
+      );
+    }
+
+    blocks.push({ start: openStart, end: match.index + match[0].length });
+    openStart = undefined;
   }
 
-  return { start, end: end + agentsEnd.length };
+  if (openStart !== undefined) {
+    throw new SynodError(
+      ERROR_CODES.AGENTS_BLOCK_MALFORMED,
+      "AGENTS.md contains an incomplete Synod managed block. Resolve the managed block manually.",
+      { details: { path: "AGENTS.md", reason: "missing_end" } }
+    );
+  }
+
+  return blocks;
 }
 
 function mergeAgentsFile(existing, block, force) {
-  const managed = findManagedAgentsBlock(existing);
-  if (!managed) {
+  const managedBlocks = findManagedAgentsBlocks(existing);
+  if (managedBlocks.length === 0) {
     const separator = existing.length === 0 || existing.endsWith("\n\n") ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
     return { content: `${existing}${separator}${block}\n`, changed: true };
   }
 
+  if (managedBlocks.length > 1) {
+    if (!force) return { conflict: true, reason: "duplicate_managed_blocks" };
+
+    let content = "";
+    let cursor = 0;
+    for (const [index, managed] of managedBlocks.entries()) {
+      content += existing.slice(cursor, managed.start);
+      if (index === 0) content += block.trimEnd();
+      cursor = managed.end;
+    }
+    content += existing.slice(cursor);
+
+    return {
+      content,
+      changed: true,
+      warning: warning(
+        WARNING_CODES.AGENTS_BLOCK_DUPLICATES_REPAIRED,
+        `Repaired ${managedBlocks.length} complete Synod managed blocks in AGENTS.md and preserved surrounding content.`,
+        { path: "AGENTS.md", blocksFound: managedBlocks.length }
+      )
+    };
+  }
+
+  const [managed] = managedBlocks;
   const current = existing.slice(managed.start, managed.end);
   const next = block.trimEnd();
   if (normalizeText(current) === normalizeText(next)) {
@@ -110,9 +167,14 @@ async function planAgentsFile(targetDirectory, force) {
   const existing = type === "file" ? await readFile(targetPath, "utf8") : "";
   const merged = mergeAgentsFile(existing, block, force);
 
-  if (merged.conflict) return { path: "AGENTS.md", conflict: true };
+  if (merged.conflict) return { path: "AGENTS.md", conflict: true, reason: merged.reason };
   if (!merged.changed) return { path: "AGENTS.md", action: "unchanged" };
-  return { path: "AGENTS.md", action: type === "missing" ? "create" : "update", content: merged.content };
+  return {
+    path: "AGENTS.md",
+    action: type === "missing" ? "create" : "update",
+    content: merged.content,
+    warning: merged.warning
+  };
 }
 
 async function planTemplateFile(targetDirectory, relativePath, force) {
@@ -134,7 +196,11 @@ async function planTemplateFile(targetDirectory, relativePath, force) {
     return {
       path: relativePath,
       action: "unchanged",
-      warning: `Preserved durable project state in ${relativePath}. Synod never overwrites project memory.`
+      warning: warning(
+        WARNING_CODES.DURABLE_STATE_PRESERVED,
+        `Preserved durable project state in ${relativePath}. Synod never overwrites project memory.`,
+        { path: relativePath }
+      )
     };
   }
 
@@ -142,7 +208,11 @@ async function planTemplateFile(targetDirectory, relativePath, force) {
     return {
       path: relativePath,
       action: "unchanged",
-      warning: "Preserved the existing user-owned .codex/config.toml. Merge Synod model and [agents] defaults manually if desired."
+      warning: warning(
+        WARNING_CODES.USER_CONFIG_PRESERVED,
+        "Preserved the existing user-owned .codex/config.toml. Merge Synod model and [agents] defaults manually if desired.",
+        { path: relativePath }
+      )
     };
   }
 
@@ -153,8 +223,16 @@ async function planTemplateFile(targetDirectory, relativePath, force) {
 export async function initProject({ directory = ".", dryRun = false, force = false } = {}) {
   const targetDirectory = path.resolve(directory);
   const targetType = await pathType(targetDirectory);
-  if (targetType === "missing") throw new Error(`Target directory does not exist: ${targetDirectory}`);
-  if (targetType !== "directory") throw new Error(`Target is not a real directory: ${targetDirectory}`);
+  if (targetType === "missing") {
+    throw new SynodError(ERROR_CODES.TARGET_NOT_FOUND, `Target directory does not exist: ${targetDirectory}`, {
+      details: { targetDirectory }
+    });
+  }
+  if (targetType !== "directory") {
+    throw new SynodError(ERROR_CODES.TARGET_NOT_DIRECTORY, `Target is not a real directory: ${targetDirectory}`, {
+      details: { targetDirectory, actualType: targetType }
+    });
+  }
 
   const templateFiles = await listTemplateFiles();
   const operations = [await planAgentsFile(targetDirectory, force)];

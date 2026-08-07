@@ -3,6 +3,8 @@ import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { WARNING_CODES } from "../src/contracts.js";
+import { ERROR_CODES } from "../src/errors.js";
 import { initProject } from "../src/init.js";
 import { packageVersion } from "../src/package.js";
 
@@ -100,7 +102,7 @@ test("force replaces Synod infrastructure but preserves config and durable state
 
   assert.equal(result.conflicts.length, 0);
   assert.ok(result.unchanged.includes("docs/synod/GOAL.md"));
-  assert.equal(result.warnings.filter(warning => warning.includes("Preserved")).length, 2);
+  assert.equal(result.warnings.filter(item => item.message.includes("Preserved")).length, 2);
   assert.equal(await readFile(configPath, "utf8"), "model = \"custom-model\"\n");
   assert.equal(await readFile(goalPath, "utf8"), "stale generated content\n");
 });
@@ -152,4 +154,41 @@ test("keeps Sol supervisory and delegates routine implementation to Luna Max", a
   assert.match(skill, /synod_implementer.*Luna Max/);
   assert.match(agents, /Do not use Sol as the default implementation worker\./);
   assert.match(decisions, /Cost-efficient agents perform implementation/);
+});
+
+test("rejects duplicate complete AGENTS.md blocks unless force repairs them", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory });
+  const agentsPath = path.join(directory, "AGENTS.md");
+  const canonical = await readFile(agentsPath, "utf8");
+  const duplicated = `${canonical}\n# User guidance between blocks\n\n${canonical}`;
+  await writeFile(agentsPath, duplicated, "utf8");
+
+  const rejected = await initProject({ directory });
+
+  assert.deepEqual(rejected.conflicts, ["AGENTS.md"]);
+  assert.equal(await readFile(agentsPath, "utf8"), duplicated);
+
+  const repaired = await initProject({ directory, force: true });
+  const agents = await readFile(agentsPath, "utf8");
+
+  assert.equal(repaired.conflicts.length, 0);
+  assert.equal(agents.match(/<!-- synod:start -->/g).length, 1);
+  assert.equal(agents.match(/<!-- synod:end -->/g).length, 1);
+  assert.match(agents, /# User guidance between blocks/);
+  assert.ok(repaired.warnings.some(item => item.code === WARNING_CODES.AGENTS_BLOCK_DUPLICATES_REPAIRED));
+});
+
+test("rejects incomplete AGENTS.md blocks even with force and makes no changes", async () => {
+  const directory = await temporaryProject();
+  const agentsPath = path.join(directory, "AGENTS.md");
+  const malformed = "# User guidance\n\n<!-- synod:start -->\nmanaged or user content?\n";
+  await writeFile(agentsPath, malformed, "utf8");
+
+  await assert.rejects(
+    initProject({ directory, force: true }),
+    error => error.code === ERROR_CODES.AGENTS_BLOCK_MALFORMED && error.details.reason === "missing_end"
+  );
+  assert.equal(await readFile(agentsPath, "utf8"), malformed);
+  await assert.rejects(readFile(path.join(directory, ".synod/manifest.json"), "utf8"), { code: "ENOENT" });
 });

@@ -15,7 +15,7 @@ Synod publishes `@ivand890/synod` from GitHub Actions with npm trusted publishin
 Update local `main`, then create a signed annotated tag for the exact release commit:
 
 ```bash
-release_version=0.3.1
+release_version=0.3.2
 git switch main
 git pull --ff-only origin main
 git tag -s "v$release_version" -m "v$release_version"
@@ -27,7 +27,7 @@ The tag must match the version in `package.json`. The protected `Publish` workfl
 Approve the `npm` environment deployment in GitHub, then verify the release:
 
 ```bash
-release_version=0.3.1
+release_version=0.3.2
 npm view @ivand890/synod version dist-tags --json
 pnpm dlx "@ivand890/synod@$release_version" --version
 ```

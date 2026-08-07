@@ -19,6 +19,7 @@ const synodExecutable = path.join(
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
+    shell: process.platform === "win32",
     stdio: options.capture ? "pipe" : "inherit",
     ...options,
   });
@@ -61,10 +62,14 @@ try {
     throw new Error(`Expected version ${expectedVersion}, received ${installedVersion}.`);
   }
 
-  run(synodExecutable, ["init", targetDirectory, "--dry-run"], {
+  const initOutput = run(synodExecutable, ["init", targetDirectory, "--dry-run", "--json"], {
     cwd: consumerDirectory,
     capture: true,
   });
+  const envelope = JSON.parse(initOutput);
+  if (envelope.schemaVersion !== 1 || envelope.ok !== true || envelope.command !== "init") {
+    throw new Error(`Installed CLI returned an invalid JSON contract: ${initOutput}`);
+  }
   console.log(`Package smoke test passed for @ivand890/synod@${expectedVersion}.`);
 } finally {
   rmSync(temporaryDirectory, { recursive: true, force: true });

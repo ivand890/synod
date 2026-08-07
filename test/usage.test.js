@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { run } from "../src/cli.js";
+import { WARNING_CODES, warning } from "../src/contracts.js";
+import { ERROR_CODES, SynodError } from "../src/errors.js";
 import { collectUsage, formatUsageReport, readRolloutUsage } from "../src/usage.js";
 
 const temporaryDirectories = new Set();
@@ -132,5 +134,133 @@ test("usage command supports JSON output", async () => {
   });
 
   assert.equal(status, 0);
-  assert.equal(JSON.parse(messages[0]).models[0].model, "gpt-5.6-sol");
+  const envelope = JSON.parse(messages[0]);
+  assert.equal(envelope.schemaVersion, 1);
+  assert.equal(envelope.ok, true);
+  assert.equal(envelope.command, "usage");
+  assert.equal(envelope.data.models[0].model, "gpt-5.6-sol");
+  assert.deepEqual(envelope.warnings, []);
+  assert.equal(typeof envelope.diagnostics.synodVersion, "string");
+});
+
+test("selects the newest root across active and archived sessions", async () => {
+  const directory = await temporaryDirectory();
+  const activePath = await rollout(directory, "active", []);
+  const archivedPath = await rollout(directory, "archived", []);
+  const active = {
+    id: "active-root", parentThreadId: null, path: activePath, cwd: directory,
+    createdAt: 100, updatedAt: 200
+  };
+  const archived = {
+    id: "archived-root", parentThreadId: null, path: archivedPath, cwd: directory,
+    createdAt: "1970-01-01T00:02:30.000Z", updatedAt: "1970-01-01T00:05:00.000Z"
+  };
+  const fakeClient = {
+    async start() {},
+    async close() {},
+    async request(method, params) {
+      assert.equal(method, "thread/list");
+      if (params.parentThreadId) return { data: [], nextCursor: null };
+      return { data: params.archived ? [archived] : [active], nextCursor: null };
+    }
+  };
+
+  const report = await collectUsage({ cwd: directory, clientFactory: () => fakeClient });
+
+  assert.equal(report.session.threadId, "archived-root");
+});
+
+test("usage JSON errors use a stable versioned contract", async () => {
+  const messages = [];
+  const output = { log: message => messages.push(message), warn() {}, error() {} };
+  const fakeClient = {
+    async start() {
+      throw new SynodError(ERROR_CODES.APP_SERVER_SPAWN_FAILED, "Codex is unavailable.");
+    },
+    async close() {},
+    getDiagnostics() { return { codexVersion: "0.142.0" }; },
+    getWarnings() { return []; }
+  };
+
+  const status = await run(["usage", "--json"], output, { clientFactory: () => fakeClient });
+  const envelope = JSON.parse(messages[0]);
+
+  assert.equal(status, 1);
+  assert.equal(messages.length, 1);
+  assert.equal(envelope.schemaVersion, 1);
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error.code, ERROR_CODES.APP_SERVER_SPAWN_FAILED);
+  assert.equal(envelope.diagnostics.codexVersion, "0.142.0");
+});
+
+test("usage text output surfaces App Server cleanup warnings", async () => {
+  const directory = await temporaryDirectory();
+  const rootPath = await rollout(directory, "root", []);
+  const root = {
+    id: "root", parentThreadId: null, path: rootPath, cwd: directory,
+    createdAt: 1, updatedAt: 2
+  };
+  const fakeClient = {
+    async start() {},
+    async close() {},
+    async request(_method, params) {
+      if (params.parentThreadId) return { data: [], nextCursor: null };
+      return { data: params.archived ? [] : [root], nextCursor: null };
+    },
+    getDiagnostics() { return {}; },
+    getWarnings() {
+      return [warning(
+        WARNING_CODES.APP_SERVER_FORCE_KILLED,
+        "Codex App Server required SIGKILL."
+      )];
+    }
+  };
+  const messages = [];
+  const warnings = [];
+  const output = {
+    log: message => messages.push(message),
+    warn: message => warnings.push(message),
+    error() {}
+  };
+
+  const status = await run(["usage", "--cwd", directory], output, {
+    clientFactory: () => fakeClient
+  });
+
+  assert.equal(status, 0);
+  assert.match(messages[0], /Session: root/);
+  assert.deepEqual(warnings, [
+    `Warning [${WARNING_CODES.APP_SERVER_FORCE_KILLED}]: Codex App Server required SIGKILL.`
+  ]);
+});
+
+test("usage text errors still surface App Server cleanup warnings", async () => {
+  const warnings = [];
+  const errors = [];
+  const output = {
+    log() {},
+    warn: message => warnings.push(message),
+    error: message => errors.push(message)
+  };
+  const fakeClient = {
+    async start() {
+      throw new SynodError(ERROR_CODES.APP_SERVER_TIMEOUT, "Initialize timed out.");
+    },
+    async close() {},
+    getDiagnostics() { return {}; },
+    getWarnings() {
+      return [warning(
+        WARNING_CODES.APP_SERVER_EXIT_UNCONFIRMED,
+        "Codex App Server exit could not be confirmed."
+      )];
+    }
+  };
+
+  const status = await run(["usage"], output, { clientFactory: () => fakeClient });
+
+  assert.equal(status, 1);
+  assert.deepEqual(warnings, [
+    `Warning [${WARNING_CODES.APP_SERVER_EXIT_UNCONFIRMED}]: Codex App Server exit could not be confirmed.`
+  ]);
+  assert.match(errors[0], new RegExp(ERROR_CODES.APP_SERVER_TIMEOUT));
 });

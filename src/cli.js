@@ -1,4 +1,6 @@
 import process from "node:process";
+import { errorEnvelope, successEnvelope } from "./contracts.js";
+import { ERROR_CODES, SynodError, asSynodError } from "./errors.js";
 import { initProject } from "./init.js";
 import { packageVersion } from "./package.js";
 import { collectUsage, formatUsageReport } from "./usage.js";
@@ -8,7 +10,7 @@ const HELP = `Synod ${packageVersion}
 Install and operate a persistent, reviewed advisor loop for Codex projects.
 
 Usage:
-  synod init [directory] [--dry-run] [--force]
+  synod init [directory] [--dry-run] [--force] [--json]
   synod usage [--session <thread-id>] [--cwd <directory>] [--by-model] [--json]
   synod --help
   synod --version
@@ -23,7 +25,7 @@ Options:
   --session   Select any thread in a session tree. Defaults to the latest session in --cwd.
   --cwd       Select the project directory used to find the latest session.
   --by-model  Group consumption by model (the default and currently supported view).
-  --json      Print a machine-readable usage report.
+  --json      Print a versioned machine-readable success, warning, or error envelope.
   -h, --help  Show help.
   -v, --version
               Show the installed version.
@@ -34,25 +36,32 @@ function parseInitArgs(args) {
   let hasDirectory = false;
   let dryRun = false;
   let force = false;
+  let json = false;
 
   for (const arg of args) {
     if (arg === "--dry-run") {
       dryRun = true;
     } else if (arg === "--force") {
       force = true;
+    } else if (arg === "--json") {
+      json = true;
     } else if (arg === "-h" || arg === "--help") {
       return { help: true };
     } else if (arg.startsWith("-")) {
-      throw new Error(`Unknown option: ${arg}`);
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, {
+        details: { option: arg }
+      });
     } else if (hasDirectory) {
-      throw new Error(`Unexpected argument: ${arg}`);
+      throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, {
+        details: { argument: arg }
+      });
     } else {
       directory = arg;
       hasDirectory = true;
     }
   }
 
-  return { directory, dryRun, force };
+  return { directory, dryRun, force, json };
 }
 
 function parseUsageArgs(args) {
@@ -68,11 +77,17 @@ function parseUsageArgs(args) {
       continue;
     } else if (arg === "--session" || arg === "--cwd") {
       const value = args[index + 1];
-      if (!value || value.startsWith("-")) throw new Error(`Missing value for ${arg}.`);
+      if (!value || value.startsWith("-")) {
+        throw new SynodError(ERROR_CODES.MISSING_OPTION_VALUE, `Missing value for ${arg}.`, {
+          details: { option: arg }
+        });
+      }
       options[arg === "--session" ? "threadId" : "cwd"] = value;
       index += 1;
     } else {
-      throw new Error(`Unknown option: ${arg}`);
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, {
+        details: { option: arg }
+      });
     }
   }
 
@@ -85,7 +100,7 @@ function printInitResult(result, output) {
   for (const path of result.created) output.log(`${prefix || "Created"}${prefix ? " create" : ""} ${path}`);
   for (const path of result.updated) output.log(`${prefix || "Updated"}${prefix ? " update" : ""} ${path}`);
   for (const path of result.unchanged) output.log(`Unchanged ${path}`);
-  for (const warning of result.warnings) output.warn(`Warning: ${warning}`);
+  printWarnings(result.warnings, output);
 
   if (result.conflicts.length > 0) {
     output.error("Synod found conflicting files and made no changes:");
@@ -98,7 +113,13 @@ function printInitResult(result, output) {
   output.log(`Synod ${action} in ${result.targetDirectory}`);
 }
 
+function printWarnings(warnings, output) {
+  for (const item of warnings) output.warn(`Warning [${item.code}]: ${item.message}`);
+}
+
 export async function run(args, output = console, dependencies = {}) {
+  const jsonRequested = args.includes("--json");
+  const command = args[0] && !args[0].startsWith("-") ? args[0] : null;
   try {
     if (args.length === 0 || args[0] === "-h" || args[0] === "--help") {
       output.log(HELP);
@@ -118,12 +139,20 @@ export async function run(args, output = console, dependencies = {}) {
       }
 
       const report = await collectUsage({ ...options, clientFactory: dependencies.clientFactory });
-      output.log(options.json ? JSON.stringify(report, null, 2) : formatUsageReport(report));
+      if (options.json) {
+        const { warnings, diagnostics, ...data } = report;
+        output.log(JSON.stringify(successEnvelope("usage", data, { warnings, diagnostics }), null, 2));
+      } else {
+        output.log(formatUsageReport(report));
+        printWarnings(report.warnings, output);
+      }
       return 0;
     }
 
     if (args[0] !== "init") {
-      throw new Error(`Unknown command: ${args[0]}`);
+      throw new SynodError(ERROR_CODES.UNKNOWN_COMMAND, `Unknown command: ${args[0]}`, {
+        details: { command: args[0] }
+      });
     }
 
     const options = parseInitArgs(args.slice(1));
@@ -133,10 +162,33 @@ export async function run(args, output = console, dependencies = {}) {
     }
 
     const result = await initProject(options);
+    if (options.json) {
+      const { warnings, ...data } = result;
+      if (result.conflicts.length > 0) {
+        const error = new SynodError(
+          ERROR_CODES.INIT_CONFLICT,
+          "Synod found conflicting files and made no changes.",
+          { details: { paths: result.conflicts } }
+        );
+        output.log(JSON.stringify(errorEnvelope("init", error, { warnings }), null, 2));
+        return 1;
+      }
+      output.log(JSON.stringify(successEnvelope("init", data, { warnings }), null, 2));
+      return 0;
+    }
     printInitResult(result, output);
     return result.conflicts.length > 0 ? 1 : 0;
   } catch (error) {
-    output.error(`Error: ${error.message}`);
+    const synodError = asSynodError(error);
+    if (jsonRequested) {
+      output.log(JSON.stringify(errorEnvelope(command, synodError, {
+        warnings: synodError.warnings,
+        diagnostics: synodError.diagnostics
+      }), null, 2));
+      return 1;
+    }
+    printWarnings(synodError.warnings || [], output);
+    output.error(`Error [${synodError.code}]: ${synodError.message}`);
     output.error("Run `synod --help` for usage.");
     return 1;
   }
