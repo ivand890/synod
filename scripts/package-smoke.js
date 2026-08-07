@@ -19,6 +19,7 @@ const synodExecutable = path.join(
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
+    shell: process.platform === "win32",
     stdio: options.capture ? "pipe" : "inherit",
     ...options,
   });
