@@ -308,6 +308,25 @@ export class CodexAppServerClient {
         "Codex App Server exit could not be confirmed after SIGKILL.",
         { forceKillTimeoutMs: this.forceKillTimeoutMs }
       ));
+      cleanup.detached = true;
+      cleanup.detachErrors = [];
+      for (const [name, stream] of [
+        ["stdin", child.stdin],
+        ["stdout", child.stdout],
+        ["stderr", child.stderr]
+      ]) {
+        try {
+          stream?.destroy?.();
+        } catch (error) {
+          cleanup.detachErrors.push({ stream: name, message: error.message });
+        }
+      }
+      try {
+        child.unref?.();
+      } catch (error) {
+        cleanup.detachErrors.push({ stream: "process", message: error.message });
+      }
+      if (cleanup.detachErrors.length === 0) delete cleanup.detachErrors;
     }
 
     cleanup.code = this.exitInfo?.code ?? child.exitCode ?? undefined;

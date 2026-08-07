@@ -18,7 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 
 - Latest-session discovery now compares active and archived root sessions deterministically.
-- App Server cleanup now sends `SIGTERM`, waits for a bounded interval, and falls back to `SIGKILL` with diagnostics.
+- App Server cleanup now sends `SIGTERM`, waits for a bounded interval, falls back to `SIGKILL`, and detaches unresponsive process handles with diagnostics.
 - `synod init --force` now consolidates duplicate complete managed blocks while preserving surrounding user content.
 
 ### Security

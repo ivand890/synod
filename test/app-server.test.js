@@ -14,6 +14,7 @@ class FakeChild extends EventEmitter {
     this.exitCode = null;
     this.signalCode = null;
     this.signals = [];
+    this.unreferenced = false;
     this.stdin = new Writable({
       write: (chunk, _encoding, callback) => {
         for (const line of String(chunk).trimEnd().split("\n")) {
@@ -42,6 +43,10 @@ class FakeChild extends EventEmitter {
       queueMicrotask(() => this.exit(null, signal));
     }
     return true;
+  }
+
+  unref() {
+    this.unreferenced = true;
   }
 }
 
@@ -173,6 +178,11 @@ test("cleanup remains bounded when exit cannot be confirmed", async () => {
 
   assert.deepEqual(child.signals, ["SIGTERM", "SIGKILL"]);
   assert.equal(cleanup.exitConfirmed, false);
+  assert.equal(cleanup.detached, true);
+  assert.equal(child.unreferenced, true);
+  assert.equal(child.stdin.destroyed, true);
+  assert.equal(child.stdout.destroyed, true);
+  assert.equal(child.stderr.destroyed, true);
   assert.ok(client.getWarnings().some(item => item.code === WARNING_CODES.APP_SERVER_EXIT_UNCONFIRMED));
 });
 
