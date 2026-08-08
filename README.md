@@ -216,4 +216,4 @@ pnpm pack --pack-destination dist
 
 CI runs the installed-package smoke on Ubuntu, macOS, and Windows.
 
-Every change lands through a pull request with required CI. Releases are published from protected `vX.Y.Z` tags using npm trusted publishing; see [RELEASING.md](RELEASING.md).
+Every change lands through a pull request with required CI. Protected `vX.Y.Z` tags publish both npm and GitHub releases, with exact-commit and `latest` parity enforced before the workflow succeeds; see [RELEASING.md](RELEASING.md).

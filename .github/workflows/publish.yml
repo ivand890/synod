@@ -6,7 +6,7 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 concurrency:
@@ -37,6 +37,7 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
+          node -e "if (!/^\\d+\\.\\d+\\.\\d+$/.test(process.argv[1])) process.exit(1)" "$package_version"
           test "$RELEASE_TAG" = "v$package_version"
           tagged_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
           git merge-base --is-ancestor "$tagged_commit" origin/main
@@ -46,23 +47,148 @@ jobs:
         run: pnpm test
       - name: Test the published package shape
         run: pnpm test:package
-      - name: Ensure the version is unpublished
+      - name: Inspect existing npm publication
+        id: npm_state
         run: |
           package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
-          if npm view "@ivand890/synod@$package_version" version >/dev/null 2>&1; then
-            echo "@ivand890/synod@$package_version is already published." >&2
+          tagged_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          set +e
+          view_output="$(npm view "@ivand890/synod@$package_version" version --prefer-online 2>&1)"
+          view_status=$?
+          set -e
+          if [ "$view_status" -eq 0 ]; then
+            published_git_head="$(npm view "@ivand890/synod@$package_version" gitHead --prefer-online)"
+            if [ "$published_git_head" != "$tagged_commit" ]; then
+              echo "The existing npm version does not belong to the tagged commit." >&2
+              exit 1
+            fi
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$view_output" | grep -q 'E404'; then
+            npm_latest="$(npm view @ivand890/synod dist-tags.latest --prefer-online)"
+            node -e "const parse = value => value.split('.').map(Number); const left = parse(process.argv[1]); const right = parse(process.argv[2]); for (let index = 0; index < 3; index += 1) { if (left[index] > right[index]) process.exit(0); if (left[index] < right[index]) process.exit(1); } process.exit(1)" "$package_version" "$npm_latest" || {
+              echo "Refusing to publish $package_version over npm latest $npm_latest." >&2
+              exit 1
+            }
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "$view_output" >&2
+            echo "Could not determine whether the npm version already exists." >&2
             exit 1
           fi
-      - name: Publish to npm
-        run: npm publish --access public
-      - name: Verify registry availability
+      - name: Wait for durable release turn
+        if: steps.npm_state.outputs.published != 'true'
+        timeout-minutes: 30
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
-          for attempt in 1 2 3 4 5 6; do
-            if npm view "@ivand890/synod@$package_version" version --prefer-online >/dev/null 2>&1; then
+          for attempt in $(seq 1 100); do
+            release_state_ready=true
+            npm_latest=""
+            github_latest_tag=""
+            next_release_tag=""
+            if ! git fetch --force --tags origin; then release_state_ready=false; fi
+            if ! npm_latest="$(npm view @ivand890/synod dist-tags.latest --prefer-online)"; then release_state_ready=false; fi
+            if [ "$release_state_ready" = "true" ] && ! github_latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"; then release_state_ready=false; fi
+            if [ "$release_state_ready" = "true" ] && ! next_release_tag="$(node scripts/next-release-tag.js "$npm_latest")"; then release_state_ready=false; fi
+            if [ "$release_state_ready" = "true" ] && [ "$github_latest_tag" = "v$npm_latest" ] && [ "$RELEASE_TAG" = "$next_release_tag" ]; then
               exit 0
             fi
-            sleep 10
+            if [ "$release_state_ready" = "true" ]; then
+              echo "$RELEASE_TAG is waiting: npm latest is v$npm_latest, GitHub Latest is $github_latest_tag, and the next tag is ${next_release_tag:-none}."
+            else
+              echo "$RELEASE_TAG could not read the complete release state on attempt $attempt; retrying."
+            fi
+            if [ "$attempt" -lt 100 ]; then sleep 15; fi
           done
-          echo "The package was published but is not readable from the registry yet." >&2
+          echo "$RELEASE_TAG did not acquire the durable release turn." >&2
+          exit 1
+      - name: Prepare GitHub Release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NPM_PUBLISHED: ${{ steps.npm_state.outputs.published }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            release_is_draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+            if [ "$release_is_draft" = "false" ] && [ "$NPM_PUBLISHED" != "true" ]; then
+              echo "A published GitHub Release exists before its npm version." >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --generate-notes \
+              --title "$RELEASE_TAG" \
+              --verify-tag
+          fi
+      - name: Publish to npm
+        if: steps.npm_state.outputs.published != 'true'
+        run: npm publish --access public
+      - name: Verify registry publication
+        run: |
+          package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
+          tagged_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          for attempt in 1 2 3 4 5 6; do
+            published_version="$(npm view "@ivand890/synod@$package_version" version --prefer-online 2>/dev/null || true)"
+            published_git_head="$(npm view "@ivand890/synod@$package_version" gitHead --prefer-online 2>/dev/null || true)"
+            if [ "$published_version" = "$package_version" ] && [ "$published_git_head" = "$tagged_commit" ]; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 6 ]; then sleep 10; fi
+          done
+          echo "The exact tagged package is not readable from the npm registry." >&2
+          exit 1
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
+          npm_latest="$(npm view @ivand890/synod dist-tags.latest --prefer-online)"
+          if [ "$package_version" = "$npm_latest" ]; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          else
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+          fi
+      - name: Verify npm and GitHub release parity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
+          tagged_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          for attempt in 1 2 3 4 5 6; do
+            verification_ready=true
+            current_npm_git_head=""
+            current_release_draft=""
+            current_release_prerelease=""
+            npm_latest=""
+            github_latest_tag=""
+            latest_release_draft=""
+            latest_tagged_commit=""
+            latest_npm_git_head=""
+            if ! current_npm_git_head="$(npm view "@ivand890/synod@$package_version" gitHead --prefer-online)"; then verification_ready=false; fi
+            if ! current_release_draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"; then verification_ready=false; fi
+            if ! current_release_prerelease="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)"; then verification_ready=false; fi
+            if ! npm_latest="$(npm view @ivand890/synod dist-tags.latest --prefer-online)"; then verification_ready=false; fi
+            expected_latest_tag="v$npm_latest"
+            if [ "$verification_ready" = "true" ] && ! github_latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"; then verification_ready=false; fi
+            if [ "$verification_ready" = "true" ] && ! latest_release_draft="$(gh release view "$expected_latest_tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"; then verification_ready=false; fi
+            if [ "$verification_ready" = "true" ] && ! latest_tagged_commit="$(git rev-parse "$expected_latest_tag^{commit}")"; then verification_ready=false; fi
+            if [ "$verification_ready" = "true" ] && ! latest_npm_git_head="$(npm view "@ivand890/synod@$npm_latest" gitHead --prefer-online)"; then verification_ready=false; fi
+            if [ "$verification_ready" = "true" ] \
+              && [ "$current_npm_git_head" = "$tagged_commit" ] \
+              && [ "$current_release_draft" = "false" ] \
+              && [ "$current_release_prerelease" = "false" ] \
+              && [ "$github_latest_tag" = "$expected_latest_tag" ] \
+              && [ "$latest_release_draft" = "false" ] \
+              && [ "$latest_npm_git_head" = "$latest_tagged_commit" ]; then
+              exit 0
+            fi
+            echo "Release parity is not yet readable on attempt $attempt; retrying."
+            if [ "$attempt" -lt 6 ]; then sleep 5; fi
+          done
+          echo "npm and GitHub release parity could not be verified." >&2
           exit 1
