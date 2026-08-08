@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -245,6 +245,53 @@ test("checkpoint fingerprints include the exact staged index content", async () 
   assert.ok(drifted.drift.reasons.some(item => item.field === "git.worktree"));
 });
 
+test("checkpoint fingerprints hash raw binary worktree bytes", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-binary-test-"));
+  temporaryDirectories.add(directory);
+  await git(directory, "init");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "user.email", "synod@example.invalid");
+  await git(directory, "config", "commit.gpgsign", "false");
+  const binaryPath = path.join(directory, "binary.dat");
+  await writeFile(binaryPath, Buffer.from([0]));
+  await git(directory, "add", "binary.dat");
+  await git(directory, "commit", "-m", "initial");
+  await initProject({ directory });
+
+  await writeFile(binaryPath, Buffer.from([0xff]));
+  await recordCheckpoint({ directory, message: "Record binary work" });
+  assert.equal((await orchestrationStatus({ directory })).healthy, true);
+  await writeFile(binaryPath, Buffer.from([0xfe]));
+  assert.equal((await orchestrationStatus({ directory })).healthy, false);
+});
+
+test("checkpoint fingerprints hash exact symlink targets", {
+  skip: process.platform === "win32" ? "Symlink creation is privilege-dependent on Windows." : false
+}, async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-symlink-test-"));
+  temporaryDirectories.add(directory);
+  await git(directory, "init");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "user.email", "synod@example.invalid");
+  await git(directory, "config", "commit.gpgsign", "false");
+  const linkPath = path.join(directory, "pointer");
+  for (const name of ["target-one", "target-two", "target-three"]) {
+    await writeFile(path.join(directory, name), `${name}\n`, "utf8");
+  }
+  await symlink("target-one", linkPath);
+  await git(directory, "add", ".");
+  await git(directory, "commit", "-m", "initial");
+  await initProject({ directory });
+
+  await unlink(linkPath);
+  await symlink("target-two", linkPath);
+  await recordCheckpoint({ directory, message: "Record symlink target" });
+  assert.equal((await orchestrationStatus({ directory })).healthy, true);
+  await unlink(linkPath);
+  await symlink("target-three", linkPath);
+  assert.equal((await orchestrationStatus({ directory })).healthy, false);
+});
+
 test("stale orchestration locks are reclaimed while live locks fail closed", async () => {
   const directory = await temporaryProject();
   const lockPath = path.join(directory, ".synod/orchestration.lock");
@@ -271,6 +318,30 @@ test("stale orchestration locks are reclaimed while live locks fail closed", asy
     error => error.code === ERROR_CODES.ORCHESTRATION_LOCKED && error.details.pid === process.pid
   );
   assert.equal(await readFile(lockPath, "utf8"), liveLock);
+});
+
+test("status holds one lock across its canonical snapshot", async () => {
+  const directory = await temporaryProject();
+  let signalCheckpoint;
+  let releaseCheckpoint;
+  const checkpointStarted = new Promise(resolve => { signalCheckpoint = resolve; });
+  const checkpointGate = new Promise(resolve => { releaseCheckpoint = resolve; });
+  const statusPromise = orchestrationStatus({ directory }, {
+    async gitRunner(_directory, args) {
+      assert.deepEqual(args, ["rev-parse", "--is-inside-work-tree"]);
+      signalCheckpoint();
+      await checkpointGate;
+      return "false\n";
+    }
+  });
+
+  await checkpointStarted;
+  await assert.rejects(
+    addDefaultTask(directory),
+    error => error.code === ERROR_CODES.ORCHESTRATION_LOCKED
+  );
+  releaseCheckpoint();
+  assert.equal((await statusPromise).healthy, true);
 });
 
 test("event log mutations append without rewriting the prior prefix", async () => {

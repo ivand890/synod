@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { open, readFile, unlink } from "node:fs/promises";
+import { link, lstat, open, readFile, readlink, unlink } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { ERROR_CODES, SynodError } from "./errors.js";
@@ -72,6 +72,10 @@ function sha256(value) {
   return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
 }
 
+function sha256Bytes(value) {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
 function serializeJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
@@ -107,6 +111,33 @@ async function optionalGit(gitRunner, directory, args) {
   }
 }
 
+async function checkpointPath(directory, relativePath, gitRunner) {
+  const absolutePath = path.resolve(directory, relativePath);
+  let stats;
+  try {
+    stats = await lstat(absolutePath);
+    if (stats.isSymbolicLink()) {
+      return { type: "symlink", contentHash: sha256Bytes(await readlink(absolutePath, { encoding: "buffer" })) };
+    }
+    if (stats.isDirectory()) {
+      const gitHead = await optionalGit(gitRunner, absolutePath, ["rev-parse", "HEAD"]);
+      return { type: "directory", ...(gitHead ? { gitHead } : {}) };
+    }
+    if (!stats.isFile()) return { type: "other" };
+    const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0);
+    const handle = await open(absolutePath, flags);
+    try {
+      if (!(await handle.stat()).isFile()) return { type: "other" };
+      return { type: "file", contentHash: sha256Bytes(await handle.readFile()) };
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    if (error.code === "ENOENT") return { type: "missing" };
+    throw error;
+  }
+}
+
 function indexRecords(indexOutput) {
   const records = new Map();
   for (const field of indexOutput.split("\0")) {
@@ -122,7 +153,7 @@ function indexRecords(indexOutput) {
   return records;
 }
 
-async function worktreeRecords(directory, porcelain, indexOutput, overlay = new Map()) {
+async function worktreeRecords(directory, porcelain, indexOutput, overlay, gitRunner) {
   const stagedIndex = indexRecords(indexOutput);
   const fields = porcelain.split("\0");
   const records = [];
@@ -137,13 +168,14 @@ async function worktreeRecords(directory, porcelain, indexOutput, overlay = new 
 
     const inspected = isIgnoredCheckpointPath(relativePath)
       ? { type: "ignored" }
-      : await inspectPath(path.resolve(directory, relativePath));
+      : await checkpointPath(directory, relativePath, gitRunner);
     records.push({
       status,
       path: relativePath,
       ...(sourcePath ? { sourcePath } : {}),
       type: inspected.type,
-      ...(inspected.hash ? { contentHash: inspected.hash } : {}),
+      ...(inspected.contentHash ? { contentHash: inspected.contentHash } : {}),
+      ...(inspected.gitHead ? { gitHead: inspected.gitHead } : {}),
       ...(stagedIndex.has(relativePath) ? { index: stagedIndex.get(relativePath) } : {})
     });
   }
@@ -155,7 +187,7 @@ async function worktreeRecords(directory, porcelain, indexOutput, overlay = new 
       status: "??",
       path: relativePath,
       type: "file",
-      contentHash: contentHash(content)
+      contentHash: sha256Bytes(Buffer.from(content, "utf8"))
     });
   }
   return records.sort((left, right) => `${left.path}\0${left.sourcePath || ""}`.localeCompare(`${right.path}\0${right.sourcePath || ""}`));
@@ -184,7 +216,7 @@ export async function captureGitCheckpoint(directory, {
     gitRunner(directory, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]),
     gitRunner(directory, ["ls-files", "--stage", "-z", "--", "."])
   ]);
-  const records = await worktreeRecords(directory, porcelain, index, checkpointOverlay);
+  const records = await worktreeRecords(directory, porcelain, index, checkpointOverlay, gitRunner);
   return {
     capturedAt,
     available: true,
@@ -593,6 +625,50 @@ async function inspectLock(lockPath) {
   }
 }
 
+async function reclaimStaleLock(targetDirectory, lockPath, existing) {
+  const claimId = sha256Bytes(Buffer.from(existing.content, "utf8")).slice("sha256:".length);
+  const claimPath = resolveProjectPath(
+    targetDirectory,
+    `.synod/orchestration-reclaim-${claimId}.lock`
+  );
+  let claimed = false;
+  try {
+    await link(lockPath, claimPath);
+    claimed = true;
+  } catch (error) {
+    if (error.code === "ENOENT") return true;
+    if (error.code === "EEXIST") return false;
+    throw error;
+  }
+
+  try {
+    const [claim, current] = await Promise.all([
+      inspectLock(claimPath),
+      inspectLock(lockPath)
+    ]);
+    if (
+      claim.type !== "file"
+      || claim.content !== existing.content
+      || current.type !== "file"
+      || current.content !== existing.content
+    ) return false;
+    try {
+      await unlink(lockPath);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    return true;
+  } finally {
+    if (claimed) {
+      try {
+        await unlink(claimPath);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+  }
+}
+
 async function acquireLock(targetDirectory) {
   const lockPath = resolveProjectPath(targetDirectory, ORCHESTRATION_LOCK_PATH);
   const unsafe = await unsafeAncestor(targetDirectory, lockPath);
@@ -633,14 +709,7 @@ async function acquireLock(targetDirectory) {
         });
       }
 
-      const confirmed = await inspectLock(lockPath);
-      if (confirmed.type === "missing") continue;
-      if (confirmed.type !== "file" || confirmed.content !== existing.content) continue;
-      try {
-        await unlink(lockPath);
-      } catch (unlinkError) {
-        if (unlinkError.code !== "ENOENT") throw unlinkError;
-      }
+      await reclaimStaleLock(targetDirectory, lockPath, existing);
     }
   }
 
@@ -1093,8 +1162,19 @@ export async function recordCheckpoint({ directory = ".", actor = "supervisor", 
 
 export async function orchestrationStatus({ directory = "." } = {}, dependencies = {}) {
   const targetDirectory = path.resolve(directory);
-  const { state, events } = await readOrchestration(targetDirectory);
-  const markdown = await readRecord(targetDirectory, ORCHESTRATION_STATUS_PATH);
+  const release = await acquireLock(targetDirectory);
+  let state;
+  let events;
+  let markdown;
+  let currentCheckpoint;
+  try {
+    await recoverPendingMutation(targetDirectory);
+    ({ state, events } = await readOrchestrationRaw(targetDirectory));
+    markdown = await readRecord(targetDirectory, ORCHESTRATION_STATUS_PATH);
+    currentCheckpoint = await captureGitCheckpoint(targetDirectory, dependencies);
+  } finally {
+    await release();
+  }
   const expectedMarkdown = renderStatusMarkdown(state);
   if (contentHash(markdown) !== contentHash(expectedMarkdown)) {
     throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, "Generated Markdown status does not match canonical orchestration state.", {
@@ -1105,7 +1185,6 @@ export async function orchestrationStatus({ directory = "." } = {}, dependencies
       }
     });
   }
-  const currentCheckpoint = await captureGitCheckpoint(targetDirectory, dependencies);
   const drift = checkpointDrift(state.checkpoint, currentCheckpoint);
   const counts = Object.fromEntries(TASK_STATES.map(taskState => [taskState, 0]));
   for (const task of taskList(state)) counts[task.state] += 1;
