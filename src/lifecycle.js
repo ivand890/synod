@@ -90,6 +90,30 @@ function resultFromPlan(targetDirectory, dryRun, operations, states, warnings, c
   };
 }
 
+async function applyPlannedTransaction(targetDirectory, operations, dependencies, result) {
+  const transaction = await applyTransaction(targetDirectory, operations, dependencies);
+  for (const failure of transaction.cleanupFailures) {
+    result.warnings.push(warning(
+      WARNING_CODES.BACKUP_CLEANUP_FAILED,
+      `Synod committed the transaction but could not remove a backup for ${failure.path}: ${failure.message}`,
+      failure
+    ));
+  }
+}
+
+async function pruneCommittedDirectories(targetDirectory, states, dependencies, result) {
+  const prune = dependencies.pruneEmptyDirectories || pruneEmptyDirectories;
+  try {
+    await prune(targetDirectory, states.filter(item => item.action === "remove").map(item => item.path));
+  } catch (error) {
+    result.warnings.push(warning(
+      WARNING_CODES.DIRECTORY_PRUNE_FAILED,
+      `Synod committed the lifecycle changes but could not remove every empty directory: ${error.message}`,
+      { targetDirectory, message: error.message }
+    ));
+  }
+}
+
 function addManifestEntry(entries, pathValue, ownership, hash, provenance = "installed", extra = {}) {
   entries.set(pathValue, { path: pathValue, ownership, contentHash: hash, provenance, ...extra });
 }
@@ -184,7 +208,10 @@ export async function initProject(
       "shared",
       contentHash(templates.agentsBlock),
       previous.get("AGENTS.md")?.provenance || "installed",
-      agentsPlan.separatorBefore === undefined ? {} : { separatorBefore: agentsPlan.separatorBefore }
+      {
+        ...(agentsPlan.separatorBefore === undefined ? {} : { separatorBefore: agentsPlan.separatorBefore }),
+        ...(previous.get("AGENTS.md")?.separatorAmbiguous ? { separatorAmbiguous: true } : {})
+      }
     );
   }
   if (agentsPlan.warning) warnings.push(agentsPlan.warning);
@@ -286,7 +313,7 @@ export async function initProject(
     profile: profile.id
   });
   if (!dryRun && conflicts.length === 0) {
-    await applyTransaction(targetDirectory, operations, dependencies);
+    await applyPlannedTransaction(targetDirectory, operations, dependencies, result);
   }
   return result;
 }
@@ -325,7 +352,10 @@ export async function upgradeProject(
       "shared",
       contentHash(templates.agentsBlock),
       previous.get("AGENTS.md")?.provenance || "installed",
-      agentsPlan.separatorBefore === undefined ? {} : { separatorBefore: agentsPlan.separatorBefore }
+      {
+        ...(agentsPlan.separatorBefore === undefined ? {} : { separatorBefore: agentsPlan.separatorBefore }),
+        ...(previous.get("AGENTS.md")?.separatorAmbiguous ? { separatorAmbiguous: true } : {})
+      }
     );
   }
   if (agentsPlan.warning) warnings.push(agentsPlan.warning);
@@ -422,8 +452,8 @@ export async function upgradeProject(
     migrations: applied
   });
   if (!dryRun && conflicts.length === 0) {
-    await applyTransaction(targetDirectory, operations, dependencies);
-    await pruneEmptyDirectories(targetDirectory, states.filter(item => item.action === "remove").map(item => item.path));
+    await applyPlannedTransaction(targetDirectory, operations, dependencies, result);
+    await pruneCommittedDirectories(targetDirectory, states, dependencies, result);
   }
   return result;
 }
@@ -526,6 +556,11 @@ export async function uninstallProject(
         conflicts.push(entry.path);
         continue;
       }
+      if (entry.separatorAmbiguous && !force) {
+        states.push({ path: entry.path, conflict: true });
+        conflicts.push(entry.path);
+        continue;
+      }
       const managed = extractManagedAgentsBlock(inspected.content);
       const matches = managed.content && contentHash(managed.content) === entry.contentHash;
       if (!matches && !force) {
@@ -567,8 +602,8 @@ export async function uninstallProject(
     profile: manifest.profile
   });
   if (!dryRun && conflicts.length === 0) {
-    await applyTransaction(targetDirectory, operations, dependencies);
-    await pruneEmptyDirectories(targetDirectory, states.filter(item => item.action === "remove").map(item => item.path));
+    await applyPlannedTransaction(targetDirectory, operations, dependencies, result);
+    await pruneCommittedDirectories(targetDirectory, states, dependencies, result);
   }
   return result;
 }

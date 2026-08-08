@@ -7,14 +7,21 @@ export const CODEX_COMPATIBILITY = Object.freeze({
 
 export function parseVersion(value) {
   if (typeof value !== "string") return undefined;
-  const match = value.trim().match(/^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
+  const match = value.trim().match(
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/
+  );
   if (!match) return undefined;
+  const prerelease = match[4];
+  if (prerelease?.split(".").some(identifier => /^\d+$/.test(identifier) && identifier.length > 1 && identifier.startsWith("0"))) {
+    return undefined;
+  }
   return {
     raw: value.trim(),
     major: Number(match[1]),
     minor: Number(match[2]),
     patch: Number(match[3]),
-    prerelease: match[4]
+    prerelease,
+    build: match[5]
   };
 }
 
@@ -28,7 +35,27 @@ export function compareVersions(left, right) {
   if (a.prerelease === b.prerelease) return 0;
   if (a.prerelease === undefined) return 1;
   if (b.prerelease === undefined) return -1;
-  return a.prerelease.localeCompare(b.prerelease);
+  const leftIdentifiers = a.prerelease.split(".");
+  const rightIdentifiers = b.prerelease.split(".");
+  const length = Math.max(leftIdentifiers.length, rightIdentifiers.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftIdentifier = leftIdentifiers[index];
+    const rightIdentifier = rightIdentifiers[index];
+    if (leftIdentifier === undefined) return -1;
+    if (rightIdentifier === undefined) return 1;
+    if (leftIdentifier === rightIdentifier) continue;
+    const leftNumeric = /^\d+$/.test(leftIdentifier);
+    const rightNumeric = /^\d+$/.test(rightIdentifier);
+    if (leftNumeric && rightNumeric) {
+      if (leftIdentifier.length !== rightIdentifier.length) {
+        return leftIdentifier.length < rightIdentifier.length ? -1 : 1;
+      }
+      return leftIdentifier < rightIdentifier ? -1 : 1;
+    }
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftIdentifier < rightIdentifier ? -1 : 1;
+  }
+  return 0;
 }
 
 export function classifyCodexVersion(version) {
@@ -42,7 +69,7 @@ export function classifyCodexVersion(version) {
   if (compareVersions(parsed, CODEX_COMPATIBILITY.maximumExclusive) >= 0) {
     return { status: "unsupported", reason: "above_tested_range" };
   }
-  if (CODEX_COMPATIBILITY.knownGood.includes(parsed.raw)) {
+  if (CODEX_COMPATIBILITY.knownGood.some(versionValue => compareVersions(parsed, versionValue) === 0)) {
     return { status: "known-good", reason: "tested_in_ci" };
   }
   return { status: "supported", reason: "inside_supported_range" };

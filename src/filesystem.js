@@ -189,7 +189,8 @@ export async function applyTransaction(targetDirectory, operations, { beforeMuta
             { details: { path: operation.path, expected: operation.expected, actual: { type: beforeMutation.type, hash: beforeMutation.hash } } }
           );
         }
-        if (actual.type === "file") {
+        if (beforeMutation.type === "file") {
+          if (beforeMutation.mode !== actual.mode) await chmod(entry.temporaryPath, beforeMutation.mode);
           entry.backupPath = path.join(path.dirname(targetPath), `.synod-backup-${randomUUID()}`);
           await rename(targetPath, entry.backupPath);
           entry.targetMutated = true;
@@ -230,9 +231,16 @@ export async function applyTransaction(targetDirectory, operations, { beforeMuta
     );
   }
 
+  const cleanupFailures = [];
   for (const entry of journal) {
-    if (entry.backupPath && await pathType(entry.backupPath) === "file") await unlink(entry.backupPath);
+    if (!entry.backupPath) continue;
+    try {
+      if (await pathType(entry.backupPath) === "file") await unlink(entry.backupPath);
+    } catch (error) {
+      cleanupFailures.push({ path: entry.relativePath, message: error.message });
+    }
   }
+  return { cleanupFailures };
 }
 
 export async function pruneEmptyDirectories(targetDirectory, relativePaths) {

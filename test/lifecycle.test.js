@@ -3,8 +3,9 @@ import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { WARNING_CODES } from "../src/contracts.js";
 import { ERROR_CODES } from "../src/errors.js";
-import { contentHash } from "../src/filesystem.js";
+import { applyTransaction, contentHash } from "../src/filesystem.js";
 import { checkProject, initProject, uninstallProject, upgradeProject } from "../src/lifecycle.js";
 import { migrateManifest } from "../src/migrations/index.js";
 import { LEGACY_V1_HASHES } from "../src/migrations/legacy-v1-hashes.js";
@@ -72,6 +73,28 @@ test("rollback preserves content changed after an earlier transaction write", as
   );
 
   assert.equal(await readFile(agentsPath, "utf8"), "concurrent owner\n");
+});
+
+test("a fresh mutation recheck backs up a concurrently created file", async () => {
+  const directory = await temporaryProject();
+  const concurrentPath = path.join(directory, "concurrent.txt");
+
+  await assert.rejects(
+    applyTransaction(directory, [
+      { action: "write", path: "concurrent.txt", content: "managed\n" },
+      { action: "write", path: "later.txt", content: "later\n" }
+    ], {
+      async beforeMutationHook(_operation, index) {
+        if (index === 0) await writeFile(concurrentPath, "concurrent owner\n", "utf8");
+      },
+      transactionHook(_operation, index) {
+        if (index === 1) throw new Error("injected later failure");
+      }
+    }),
+    error => error.code === ERROR_CODES.TRANSACTION_FAILED
+  );
+
+  assert.equal(await readFile(concurrentPath, "utf8"), "concurrent owner\n");
 });
 
 test("check permits user drift and rejects Synod-owned drift", async () => {
@@ -154,6 +177,21 @@ test("uninstall refuses modified Synod-owned files without removing anything", a
   assert.equal(typeof JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8")).profile, "string");
 });
 
+test("uninstall reports directory-prune failures after committing removals", async () => {
+  const directory = await temporaryProject();
+  const manifestPath = path.join(directory, ".synod/manifest.json");
+  await initProject({ directory, profile: "portable" });
+
+  const result = await uninstallProject({ directory }, {
+    async pruneEmptyDirectories() {
+      throw new Error("injected prune failure");
+    }
+  });
+
+  assert.ok(result.warnings.some(item => item.code === WARNING_CODES.DIRECTORY_PRUNE_FAILED));
+  await assert.rejects(readFile(manifestPath, "utf8"), { code: "ENOENT" });
+});
+
 test("schema 1 migration uses published hashes instead of adopting managed drift", async () => {
   const directory = await temporaryProject();
   const configPath = path.join(directory, ".codex/config.toml");
@@ -169,6 +207,37 @@ test("schema 1 migration uses published hashes instead of adopting managed drift
   assert.equal(entry.contentHash, LEGACY_V1_HASHES["0.3.2"][".codex/config.toml"]);
   assert.notEqual(entry.contentHash, contentHash(modified));
   assert.equal(entry.provenance, "legacy-baseline");
+});
+
+test("schema 1 migration records exact or ambiguous AGENTS separators safely", async () => {
+  const exactDirectory = await temporaryProject();
+  const ambiguousDirectory = await temporaryProject();
+  const block = "<!-- synod:start -->\nlegacy\n<!-- synod:end -->";
+  await writeFile(path.join(exactDirectory, "AGENTS.md"), `# User\n\n\n${block}\n`, "utf8");
+  await writeFile(path.join(ambiguousDirectory, "AGENTS.md"), `# User\n\n${block}\n`, "utf8");
+  const legacy = { schemaVersion: 1, templateVersion: "0.3.2", method: "advisor-loop" };
+
+  const exact = await migrateManifest(exactDirectory, legacy);
+  const ambiguous = await migrateManifest(ambiguousDirectory, legacy);
+
+  assert.equal(exact.manifest.files.find(item => item.path === "AGENTS.md").separatorBefore, "");
+  assert.equal(ambiguous.manifest.files.find(item => item.path === "AGENTS.md").separatorAmbiguous, true);
+});
+
+test("uninstall fails closed when a migrated AGENTS separator is ambiguous", async () => {
+  const directory = await temporaryProject();
+  const manifestPath = path.join(directory, ".synod/manifest.json");
+  await initProject({ directory, profile: "portable" });
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const agentsEntry = manifest.files.find(item => item.path === "AGENTS.md");
+  delete agentsEntry.separatorBefore;
+  agentsEntry.separatorAmbiguous = true;
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+  const result = await uninstallProject({ directory });
+
+  assert.ok(result.conflicts.includes("AGENTS.md"));
+  assert.equal(JSON.parse(await readFile(manifestPath, "utf8")).schemaVersion, 2);
 });
 
 test("check refuses a manifest reached through a symbolic-link ancestor", async () => {

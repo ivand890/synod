@@ -34,7 +34,7 @@ Prefer these project agents:
 - `synod_verifier` for an independent attempt to refute completion.
 - `synod_mechanical` for clear, repetitive, high-volume read-only checks.
 
-Escalate implementation to the configured higher-capability profile only after the task proves insufficiently specified, the worker returns a justified capability blocker, or two focused correction rounds fail. If a named model is unavailable, run `synod doctor`, select a compatible profile, and record the substitution in `STATE.md`.
+Escalate implementation to the configured higher-capability profile only after the task proves insufficiently specified, the worker returns a justified capability blocker, or two focused correction rounds fail. If a named model is unavailable, run `synod doctor`, select a compatible profile, apply it with `synod upgrade [directory] --profile <id>` so the generated `.codex` configuration and agents are updated, and then record the substitution in `STATE.md`.
 
 ## Delegate with a contract
 

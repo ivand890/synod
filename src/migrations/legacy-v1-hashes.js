@@ -16,17 +16,17 @@ const common = {
 export const LEGACY_V1_HASHES = Object.freeze({
   "0.3.0": Object.freeze({
     ...common,
-    "docs/synod/STATE.md": "sha256:6620c742a28805a1b8d515ccd8825ab91f494b60a002af45e7bfd4de4d0d6a7a",
-    "docs/synod/WORKLOG.md": "sha256:0028cadbec3445797ea507c26a3bc8adca66ba89c37b549c8a4604ae9dcf63fc"
+    "docs/synod/STATE.md": "sha256:3008bc27d19cf51f2876748e35b03f78b136568bf81c041c94c04650a1e23300",
+    "docs/synod/WORKLOG.md": "sha256:6096f69b04f17b9e7500967148d92c55bf18f26ccb54edf8c25b4b0f4529a38e"
   }),
   "0.3.1": Object.freeze({
     ...common,
-    "docs/synod/STATE.md": "sha256:1cf10b08fe2a02009d015d7c045638ae3b67294b47245d3fcae7ce45ae9bf41f",
-    "docs/synod/WORKLOG.md": "sha256:2521f9fd35de15ae6d3d3d2da5c637d2e4a88c39a4b9aa32a01b2208aee563db"
+    "docs/synod/STATE.md": "sha256:3008bc27d19cf51f2876748e35b03f78b136568bf81c041c94c04650a1e23300",
+    "docs/synod/WORKLOG.md": "sha256:6096f69b04f17b9e7500967148d92c55bf18f26ccb54edf8c25b4b0f4529a38e"
   }),
   "0.3.2": Object.freeze({
     ...common,
-    "docs/synod/STATE.md": "sha256:19a508908130c6a0a43419d24e6da31a9c541037d7ea734acdff2fc0e496a36c",
-    "docs/synod/WORKLOG.md": "sha256:3bc347a0a743ca7a4d8dd1a20116234ff230440ff9308fc59541889c3d9c4d61"
+    "docs/synod/STATE.md": "sha256:3008bc27d19cf51f2876748e35b03f78b136568bf81c041c94c04650a1e23300",
+    "docs/synod/WORKLOG.md": "sha256:6096f69b04f17b9e7500967148d92c55bf18f26ccb54edf8c25b4b0f4529a38e"
   })
 });

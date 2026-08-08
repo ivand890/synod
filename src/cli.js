@@ -218,7 +218,14 @@ export async function run(args, output = console, dependencies = {}) {
       const result = await checkProject(options);
       if (options.json) {
         const { warnings, ...data } = result;
-        output.log(JSON.stringify(successEnvelope("check", data, { warnings }), null, 2));
+        const envelope = result.healthy
+          ? successEnvelope("check", data, { warnings })
+          : errorEnvelope("check", new SynodError(
+              ERROR_CODES.CHECK_FAILED,
+              "Synod project integrity check failed.",
+              { details: data }
+            ), { warnings });
+        output.log(JSON.stringify(envelope, null, 2));
       } else {
         output.log(textCheck(result));
         printWarnings(result.warnings, output);
@@ -231,7 +238,14 @@ export async function run(args, output = console, dependencies = {}) {
       const result = await doctorProject(options, { clientFactory: dependencies.doctorClientFactory || dependencies.clientFactory });
       if (options.json) {
         const { warnings, diagnostics, ...data } = result;
-        output.log(JSON.stringify(successEnvelope("doctor", data, { warnings, diagnostics }), null, 2));
+        const envelope = result.healthy
+          ? successEnvelope("doctor", data, { warnings, diagnostics })
+          : errorEnvelope("doctor", new SynodError(
+              ERROR_CODES.DOCTOR_FAILED,
+              "Synod doctor found an unsupported or unhealthy runtime.",
+              { details: data }
+            ), { warnings, diagnostics });
+        output.log(JSON.stringify(envelope, null, 2));
       } else {
         output.log(textDoctor(result));
         printWarnings(result.warnings, output);

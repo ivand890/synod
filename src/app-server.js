@@ -149,16 +149,42 @@ export class CodexAppServerClient {
   }
 
   async listModels() {
-    const response = await this.request("model/list", { includeHidden: false, limit: 100 });
-    if (!response || !Array.isArray(response.data)) {
-      throw new SynodError(
-        ERROR_CODES.APP_SERVER_UNSUPPORTED,
-        "Codex App Server does not expose the required model/list response contract.",
-        { details: { capability: "model/list" } }
-      );
-    }
+    const models = [];
+    const seenCursors = new Set();
+    let cursor;
+    do {
+      const response = await this.request("model/list", {
+        includeHidden: false,
+        limit: 100,
+        ...(cursor === undefined ? {} : { cursor })
+      });
+      if (
+        !response
+        || !Array.isArray(response.data)
+        || (response.nextCursor !== null && typeof response.nextCursor !== "string")
+        || response.nextCursor === ""
+      ) {
+        throw new SynodError(
+          ERROR_CODES.APP_SERVER_UNSUPPORTED,
+          "Codex App Server does not expose the required model/list response contract.",
+          { details: { capability: "model/list", reason: "malformed_page" } }
+        );
+      }
+      models.push(...response.data);
+      cursor = response.nextCursor;
+      if (cursor !== null) {
+        if (seenCursors.has(cursor)) {
+          throw new SynodError(
+            ERROR_CODES.APP_SERVER_UNSUPPORTED,
+            "Codex App Server repeated a model/list cursor.",
+            { details: { capability: "model/list", reason: "repeated_cursor", cursor } }
+          );
+        }
+        seenCursors.add(cursor);
+      }
+    } while (cursor !== null);
     this.diagnostics.appServer.capabilities.modelList = true;
-    return response.data;
+    return models;
   }
 
   request(method, params = {}) {

@@ -48,7 +48,9 @@ export async function doctorProject(
     ...evaluateProfile(profile, models),
     description: profile.description,
     minimumCodexVersion: profile.minimumCodexVersion,
-    versionEligible: Boolean(parseVersion(codexVersion)) && compareVersions(codexVersion, profile.minimumCodexVersion) >= 0
+    versionEligible: compatibility.status !== "unsupported"
+      && Boolean(parseVersion(codexVersion))
+      && compareVersions(codexVersion, profile.minimumCodexVersion) >= 0
   })).map(value => ({ ...value, compatible: value.compatible && value.versionEligible }));
   const recommendedProfile = profileChecks.find(item => item.id === "synod-5.6" && item.compatible)?.id
     || profileChecks.find(item => item.compatible)?.id

@@ -3,6 +3,14 @@ import { createManifest } from "../manifest.js";
 import { extractManagedAgentsBlock, generatedConfigMarker, ownershipFor } from "../templates.js";
 import { LEGACY_V1_HASHES } from "./legacy-v1-hashes.js";
 
+function legacyAgentsSeparator(content, blockStart) {
+  const prefix = content.slice(0, blockStart);
+  if (prefix.length === 0) return { separatorBefore: "" };
+  const trailingNewlines = prefix.match(/\n+$/)?.[0].length || 0;
+  if (trailingNewlines >= 3) return { separatorBefore: "" };
+  return { separatorAmbiguous: true };
+}
+
 export async function migrateManifest1To2(targetDirectory, legacy) {
   const baseline = LEGACY_V1_HASHES[legacy.templateVersion];
   const baselinePaths = baseline
@@ -42,12 +50,14 @@ export async function migrateManifest1To2(targetDirectory, legacy) {
   const agents = await inspectLegacyPath(targetDirectory, "AGENTS.md");
   if (agents.type === "file") {
     const managed = extractManagedAgentsBlock(agents.content);
-    if (managed.content || baseline?.["AGENTS.md#synod-block"]) {
+    const trustedBlock = baseline?.["AGENTS.md#synod-block"];
+    if (managed.content || trustedBlock) {
       files.push({
         path: "AGENTS.md",
         ownership: "shared",
-        contentHash: baseline?.["AGENTS.md#synod-block"] || (managed.content ? contentHash(managed.content) : undefined),
-        provenance: baseline ? "legacy-baseline" : "legacy-adopted"
+        contentHash: trustedBlock || (managed.content ? contentHash(managed.content) : undefined),
+        provenance: trustedBlock ? "legacy-baseline" : "legacy-adopted",
+        ...legacyAgentsSeparator(agents.content, managed.blocks[0]?.start || 0)
       });
     }
   }

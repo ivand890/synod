@@ -93,6 +93,12 @@ export function validateManifest(manifest, { allowLegacy = true } = {}) {
     ) {
       throw new SynodError(ERROR_CODES.MANIFEST_INVALID, `Invalid managed separator for ${entry.path}.`);
     }
+    if (
+      entry.separatorAmbiguous !== undefined
+      && (entry.path !== "AGENTS.md" || entry.separatorAmbiguous !== true)
+    ) {
+      throw new SynodError(ERROR_CODES.MANIFEST_INVALID, `Invalid managed separator state for ${entry.path}.`);
+    }
     seen.add(entry.path);
   }
   return manifest;

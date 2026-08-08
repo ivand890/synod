@@ -63,8 +63,12 @@ function respondingChild(options) {
   return new FakeChild((message, child) => {
     if (message.method === "initialize") child.respond(message.id, initializedResponse());
     if (message.method === "thread/list") child.respond(message.id, { data: [], nextCursor: null });
-    if (message.method === "model/list") child.respond(message.id, {
+    if (message.method === "model/list" && message.params.cursor === undefined) child.respond(message.id, {
       data: [{ id: "gpt-test", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }],
+      nextCursor: "models-page-2"
+    });
+    if (message.method === "model/list" && message.params.cursor === "models-page-2") child.respond(message.id, {
+      data: [{ id: "gpt-second", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] }],
       nextCursor: null
     });
     if (message.method === "echo") child.respond(message.id, message.params);
@@ -95,12 +99,27 @@ test("spawns, initializes, probes, and resolves App Server responses", async () 
     options: { stdio: ["pipe", "pipe", "pipe"] }
   }]);
   assert.deepEqual(response, { value: 42 });
-  assert.equal(models[0].id, "gpt-test");
+  assert.deepEqual(models.map(model => model.id), ["gpt-test", "gpt-second"]);
   assert.equal(diagnostics.codexVersion, "0.142.0");
   assert.equal(diagnostics.appServer.capabilities.initialize, true);
   assert.equal(diagnostics.appServer.capabilities.threadList, true);
   assert.equal(diagnostics.appServer.capabilities.modelList, true);
   assert.deepEqual(child.signals, ["SIGTERM"]);
+});
+
+test("rejects repeated model pagination cursors", async () => {
+  const child = new FakeChild((message, value) => {
+    if (message.method === "initialize") value.respond(message.id, initializedResponse());
+    if (message.method === "model/list") value.respond(message.id, { data: [], nextCursor: "repeat" });
+  });
+  const client = new CodexAppServerClient({ spawnProcess: () => child });
+  await client.start();
+
+  await assert.rejects(
+    client.listModels(),
+    error => error.code === ERROR_CODES.APP_SERVER_UNSUPPORTED && error.details.reason === "repeated_cursor"
+  );
+  await client.close();
 });
 
 test("rejects timed out App Server requests with a stable code", async () => {

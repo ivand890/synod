@@ -49,6 +49,8 @@ test("doctor fails closed above the tested Codex range", async () => {
 
   assert.equal(result.healthy, false);
   assert.equal(result.codex.reason, "above_tested_range");
+  assert.equal(result.recommendedProfile, null);
+  assert.ok(result.profiles.every(profile => profile.compatible === false));
   assert.ok(result.warnings.some(item => item.code === WARNING_CODES.CODEX_VERSION_UNSUPPORTED));
 });
 
