@@ -86,7 +86,7 @@ function isIgnoredCheckpointPath(relativePath) {
   return normalized === "AGENTS.md"
     || normalized === ".codex/config.toml"
     || normalized.startsWith(".synod/")
-    || normalized.startsWith("docs/synod/")
+    || normalized === ORCHESTRATION_STATUS_PATH
     || normalized.startsWith(".codex/agents/synod-")
     || normalized.startsWith(".agents/skills/synod-advisor/");
 }
@@ -107,16 +107,32 @@ async function optionalGit(gitRunner, directory, args) {
   }
 }
 
-async function worktreeRecords(directory, porcelain) {
+function indexRecords(indexOutput) {
+  const records = new Map();
+  for (const field of indexOutput.split("\0")) {
+    if (!field) continue;
+    const separator = field.indexOf("\t");
+    if (separator < 0) continue;
+    const [mode, objectId, stage] = field.slice(0, separator).split(" ");
+    const relativePath = field.slice(separator + 1);
+    const entries = records.get(relativePath) || [];
+    entries.push({ mode, objectId, stage: Number(stage) });
+    records.set(relativePath, entries);
+  }
+  return records;
+}
+
+async function worktreeRecords(directory, porcelain, indexOutput, overlay = new Map()) {
+  const stagedIndex = indexRecords(indexOutput);
   const fields = porcelain.split("\0");
   const records = [];
-  for (let index = 0; index < fields.length; index += 1) {
-    const field = fields[index];
+  for (let cursor = 0; cursor < fields.length; cursor += 1) {
+    const field = fields[cursor];
     if (!field) continue;
     const status = field.slice(0, 2);
     const relativePath = field.slice(3);
     let sourcePath;
-    if (status.includes("R") || status.includes("C")) sourcePath = fields[++index] || undefined;
+    if (status.includes("R") || status.includes("C")) sourcePath = fields[++cursor] || undefined;
     if (isIgnoredCheckpointPath(relativePath) && (!sourcePath || isIgnoredCheckpointPath(sourcePath))) continue;
 
     const inspected = isIgnoredCheckpointPath(relativePath)
@@ -127,13 +143,29 @@ async function worktreeRecords(directory, porcelain) {
       path: relativePath,
       ...(sourcePath ? { sourcePath } : {}),
       type: inspected.type,
-      ...(inspected.hash ? { contentHash: inspected.hash } : {})
+      ...(inspected.hash ? { contentHash: inspected.hash } : {}),
+      ...(stagedIndex.has(relativePath) ? { index: stagedIndex.get(relativePath) } : {})
+    });
+  }
+  const recordedPaths = new Set(records.map(record => record.path));
+  for (const [relativePath, content] of overlay) {
+    if (isIgnoredCheckpointPath(relativePath) || recordedPaths.has(relativePath)) continue;
+    if (await pathType(path.resolve(directory, relativePath)) !== "missing") continue;
+    records.push({
+      status: "??",
+      path: relativePath,
+      type: "file",
+      contentHash: contentHash(content)
     });
   }
   return records.sort((left, right) => `${left.path}\0${left.sourcePath || ""}`.localeCompare(`${right.path}\0${right.sourcePath || ""}`));
 }
 
-export async function captureGitCheckpoint(directory, { clock, gitRunner = defaultGitRunner } = {}) {
+export async function captureGitCheckpoint(directory, {
+  clock,
+  gitRunner = defaultGitRunner,
+  checkpointOverlay = new Map()
+} = {}) {
   const capturedAt = nowIso(clock);
   const inside = await optionalGit(gitRunner, directory, ["rev-parse", "--is-inside-work-tree"]);
   if (inside !== "true") {
@@ -146,12 +178,13 @@ export async function captureGitCheckpoint(directory, { clock, gitRunner = defau
     };
   }
 
-  const [head, branch, porcelain] = await Promise.all([
+  const [head, branch, porcelain, index] = await Promise.all([
     optionalGit(gitRunner, directory, ["rev-parse", "HEAD"]),
     optionalGit(gitRunner, directory, ["symbolic-ref", "--short", "-q", "HEAD"]),
-    gitRunner(directory, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."])
+    gitRunner(directory, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]),
+    gitRunner(directory, ["ls-files", "--stage", "-z", "--", "."])
   ]);
-  const records = await worktreeRecords(directory, porcelain);
+  const records = await worktreeRecords(directory, porcelain, index, checkpointOverlay);
   return {
     capturedAt,
     available: true,
@@ -523,31 +556,97 @@ export async function readOrchestration(targetDirectory) {
   }
 }
 
+function parseLockOwner(content) {
+  try {
+    const parsed = JSON.parse(content);
+    if (
+      Number.isSafeInteger(parsed?.pid)
+      && parsed.pid > 0
+      && typeof parsed.token === "string"
+      && parsed.token.length > 0
+    ) {
+      return { pid: parsed.pid, token: parsed.token };
+    }
+  } catch {}
+  const legacyPid = Number(content.trim());
+  if (Number.isSafeInteger(legacyPid) && legacyPid > 0) {
+    return { pid: legacyPid, token: null };
+  }
+  return undefined;
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code !== "ESRCH";
+  }
+}
+
+async function inspectLock(lockPath) {
+  try {
+    return await inspectPath(lockPath);
+  } catch (error) {
+    if (error.code === "ENOENT") return { type: "missing" };
+    throw error;
+  }
+}
+
 async function acquireLock(targetDirectory) {
   const lockPath = resolveProjectPath(targetDirectory, ORCHESTRATION_LOCK_PATH);
   const unsafe = await unsafeAncestor(targetDirectory, lockPath);
   if (unsafe) throw new SynodError(ERROR_CODES.UNSAFE_PATH, `Refusing to lock orchestration through unsafe path: ${unsafe}`);
-  let handle;
-  try {
-    handle = await open(lockPath, "wx", 0o600);
-    await handle.writeFile(`${process.pid}\n`, "utf8");
-    await handle.sync();
-  } catch (error) {
-    await handle?.close().catch(() => {});
-    if (error.code === "EEXIST") {
-      throw new SynodError(ERROR_CODES.ORCHESTRATION_LOCKED, "Another Synod orchestration mutation holds the project lock.", {
-        details: { path: ORCHESTRATION_LOCK_PATH }
-      });
+  const token = randomUUID();
+  const lockContent = serializeJson({ pid: process.pid, token, createdAt: nowIso() });
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let handle;
+    try {
+      handle = await open(lockPath, "wx", 0o600);
+      await handle.writeFile(lockContent, "utf8");
+      await handle.sync();
+      await handle.close();
+      return async () => {
+        const current = await inspectLock(lockPath);
+        if (current.type === "missing") return;
+        if (current.type === "file" && current.content === lockContent) await unlink(lockPath);
+      };
+    } catch (error) {
+      await handle?.close().catch(() => {});
+      if (error.code === "ENOENT") {
+        throw new SynodError(ERROR_CODES.ORCHESTRATION_NOT_INITIALIZED, "Synod orchestration is not initialized in this project.");
+      }
+      if (error.code !== "EEXIST") throw error;
+
+      const existing = await inspectLock(lockPath);
+      if (existing.type === "missing") continue;
+      if (existing.type !== "file") {
+        throw new SynodError(ERROR_CODES.UNSAFE_PATH, "Synod orchestration lock is not a regular file.", {
+          details: { path: ORCHESTRATION_LOCK_PATH, type: existing.type }
+        });
+      }
+      const owner = parseLockOwner(existing.content);
+      if (!owner || processIsAlive(owner.pid)) {
+        throw new SynodError(ERROR_CODES.ORCHESTRATION_LOCKED, "Another Synod orchestration mutation holds the project lock.", {
+          details: { path: ORCHESTRATION_LOCK_PATH, ...(owner ? { pid: owner.pid } : {}) }
+        });
+      }
+
+      const confirmed = await inspectLock(lockPath);
+      if (confirmed.type === "missing") continue;
+      if (confirmed.type !== "file" || confirmed.content !== existing.content) continue;
+      try {
+        await unlink(lockPath);
+      } catch (unlinkError) {
+        if (unlinkError.code !== "ENOENT") throw unlinkError;
+      }
     }
-    if (error.code === "ENOENT") {
-      throw new SynodError(ERROR_CODES.ORCHESTRATION_NOT_INITIALIZED, "Synod orchestration is not initialized in this project.");
-    }
-    throw error;
   }
-  await handle.close();
-  return async () => {
-    try { await unlink(lockPath); } catch (error) { if (error.code !== "ENOENT") throw error; }
-  };
+
+  throw new SynodError(ERROR_CODES.ORCHESTRATION_LOCKED, "Could not safely acquire the Synod orchestration lock after stale-lock recovery.", {
+    details: { path: ORCHESTRATION_LOCK_PATH }
+  });
 }
 
 async function appendEvent(targetDirectory, event) {

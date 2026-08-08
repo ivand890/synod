@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -198,6 +199,13 @@ test("status detects content-sensitive checkpoint drift and checkpoint reconcile
   await initProject({ directory });
 
   assert.equal((await orchestrationStatus({ directory })).healthy, true);
+  const goalPath = path.join(directory, "docs/synod/GOAL.md");
+  const goal = await readFile(goalPath, "utf8");
+  await writeFile(goalPath, `${goal}\nChanged durable goal.\n`, "utf8");
+  assert.equal((await orchestrationStatus({ directory })).healthy, false);
+  await writeFile(goalPath, goal, "utf8");
+  assert.equal((await orchestrationStatus({ directory })).healthy, true);
+
   await writeFile(path.join(directory, "source.txt"), "version two\n", "utf8");
   const drifted = await orchestrationStatus({ directory });
   assert.equal(drifted.healthy, false);
@@ -208,6 +216,61 @@ test("status detects content-sensitive checkpoint drift and checkpoint reconcile
 
   await recordCheckpoint({ directory, message: "Accept source update" });
   assert.equal((await orchestrationStatus({ directory })).healthy, true);
+});
+
+test("checkpoint fingerprints include the exact staged index content", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-index-test-"));
+  temporaryDirectories.add(directory);
+  await git(directory, "init");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "user.email", "synod@example.invalid");
+  await git(directory, "config", "commit.gpgsign", "false");
+  const sourcePath = path.join(directory, "source.txt");
+  await writeFile(sourcePath, "initial\n", "utf8");
+  await git(directory, "add", "source.txt");
+  await git(directory, "commit", "-m", "initial");
+  await initProject({ directory });
+
+  await writeFile(sourcePath, "staged one\n", "utf8");
+  await git(directory, "add", "source.txt");
+  await writeFile(sourcePath, "stable worktree\n", "utf8");
+  await recordCheckpoint({ directory, message: "Record partially staged work" });
+  assert.equal((await orchestrationStatus({ directory })).healthy, true);
+
+  await writeFile(sourcePath, "staged two\n", "utf8");
+  await git(directory, "add", "source.txt");
+  await writeFile(sourcePath, "stable worktree\n", "utf8");
+  const drifted = await orchestrationStatus({ directory });
+  assert.equal(drifted.healthy, false);
+  assert.ok(drifted.drift.reasons.some(item => item.field === "git.worktree"));
+});
+
+test("stale orchestration locks are reclaimed while live locks fail closed", async () => {
+  const directory = await temporaryProject();
+  const lockPath = path.join(directory, ".synod/orchestration.lock");
+  const exited = spawn(process.execPath, ["-e", "process.exit(0)"]);
+  const stalePid = exited.pid;
+  await once(exited, "exit");
+  await writeFile(lockPath, `${JSON.stringify({
+    pid: stalePid,
+    token: "stale-owner",
+    createdAt: "2026-08-08T00:00:00.000Z"
+  })}\n`, "utf8");
+
+  assert.equal((await readOrchestration(directory)).state.schemaVersion, 1);
+  await assert.rejects(readFile(lockPath, "utf8"), { code: "ENOENT" });
+
+  const liveLock = `${JSON.stringify({
+    pid: process.pid,
+    token: "live-owner",
+    createdAt: "2026-08-08T00:00:00.000Z"
+  })}\n`;
+  await writeFile(lockPath, liveLock, "utf8");
+  await assert.rejects(
+    readOrchestration(directory),
+    error => error.code === ERROR_CODES.ORCHESTRATION_LOCKED && error.details.pid === process.pid
+  );
+  assert.equal(await readFile(lockPath, "utf8"), liveLock);
 });
 
 test("event log mutations append without rewriting the prior prefix", async () => {

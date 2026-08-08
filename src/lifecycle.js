@@ -190,7 +190,8 @@ export async function initProject(
 
   const profile = getProfile(profileId);
   const templates = await loadTemplateSet(packageVersion, profile);
-  for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, dependencies)) {
+  const orchestrationDependencies = { ...dependencies, checkpointOverlay: templates.files };
+  for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, orchestrationDependencies)) {
     templates.files.set(relativePath, content);
   }
   const previous = existingManifest ? manifestFileMap(existingManifest) : new Map();
@@ -347,7 +348,8 @@ export async function upgradeProject(
   }
   const profile = getProfile(requestedProfile || installed.profile || DEFAULT_PROFILE);
   const templates = await loadTemplateSet(packageVersion, profile);
-  for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, dependencies)) {
+  const orchestrationDependencies = { ...dependencies, checkpointOverlay: templates.files };
+  for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, orchestrationDependencies)) {
     templates.files.set(relativePath, content);
   }
   const previous = manifestFileMap(installed);
