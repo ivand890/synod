@@ -76,6 +76,35 @@ test("is idempotent when generated files are unchanged", async () => {
   assert.equal(second.unchanged.length + second.preserved.length, first.created.length);
 });
 
+test("repeated init preserves missing user-owned durable state", async () => {
+  const directory = await temporaryProject();
+  const goalPath = path.join(directory, "docs/synod/GOAL.md");
+  await initProject({ directory });
+  await rm(goalPath);
+
+  const result = await initProject({ directory });
+
+  assert.ok(result.preserved.includes("docs/synod/GOAL.md"));
+  assert.ok(!result.created.includes("docs/synod/GOAL.md"));
+  assert.ok(result.warnings.some(item => item.code === WARNING_CODES.USER_OWNED_FILE_MISSING));
+  await assert.rejects(readFile(goalPath, "utf8"), { code: "ENOENT" });
+});
+
+test("repeated init does not reclassify modified Synod config as user-owned", async () => {
+  const directory = await temporaryProject();
+  const configPath = path.join(directory, ".codex/config.toml");
+  const manifestPath = path.join(directory, ".synod/manifest.json");
+  await initProject({ directory });
+  await writeFile(configPath, "model = \"custom-model\"\n", "utf8");
+
+  const result = await initProject({ directory });
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+
+  assert.ok(result.conflicts.includes(".codex/config.toml"));
+  assert.equal(manifest.files.find(item => item.path === ".codex/config.toml").ownership, "synod");
+  assert.equal(await readFile(configPath, "utf8"), "model = \"custom-model\"\n");
+});
+
 test("appends a managed block without replacing existing AGENTS.md guidance", async () => {
   const directory = await temporaryProject();
   const agentsPath = path.join(directory, "AGENTS.md");

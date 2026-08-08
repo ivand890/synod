@@ -197,10 +197,26 @@ export async function initProject(
 
     if (inspected.type === "unsafe" || !["missing", "file"].includes(inspected.type)) {
       state = { path: relativePath, conflict: true };
+    } else if (previousEntry?.ownership === "user") {
+      ownership = "user";
+      state = { path: relativePath, action: "preserve" };
+      if (inspected.type === "missing") {
+        warnings.push(warning(
+          WARNING_CODES.USER_OWNED_FILE_MISSING,
+          `User-owned file is missing: ${relativePath}`,
+          { path: relativePath }
+        ));
+      } else if (normalizeText(inspected.content) !== normalizeText(templateContent)) {
+        warnings.push(warning(
+          WARNING_CODES.DURABLE_STATE_PRESERVED,
+          `Preserved user-owned project state in ${relativePath}.`,
+          { path: relativePath }
+        ));
+      }
     } else if (inspected.type === "missing") {
       state = { path: relativePath, action: "create" };
       operations.push(operationForWrite(relativePath, templateContent, inspected));
-    } else if (previousEntry?.ownership === "user" || relativePath.startsWith("docs/synod/")) {
+    } else if (relativePath.startsWith("docs/synod/")) {
       ownership = "user";
       state = { path: relativePath, action: "preserve" };
       if (normalizeText(inspected.content) !== normalizeText(templateContent)) {
@@ -210,7 +226,11 @@ export async function initProject(
           { path: relativePath }
         ));
       }
-    } else if (relativePath === ".codex/config.toml" && !inspected.content.startsWith(generatedConfigMarker)) {
+    } else if (
+      !previousEntry
+      && relativePath === ".codex/config.toml"
+      && !inspected.content.startsWith(generatedConfigMarker)
+    ) {
       ownership = "user";
       state = { path: relativePath, action: "preserve" };
       warnings.push(warning(
