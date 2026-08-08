@@ -10,7 +10,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: publish-${{ github.repository }}
+  group: publish-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -75,6 +75,26 @@ jobs:
             echo "Could not determine whether the npm version already exists." >&2
             exit 1
           fi
+      - name: Wait for durable release turn
+        if: steps.npm_state.outputs.published != 'true'
+        timeout-minutes: 30
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          for attempt in $(seq 1 100); do
+            git fetch --force --tags origin
+            npm_latest="$(npm view @ivand890/synod dist-tags.latest --prefer-online)"
+            github_latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+            next_release_tag="$(node scripts/next-release-tag.js "$npm_latest")"
+            if [ "$github_latest_tag" = "v$npm_latest" ] && [ "$RELEASE_TAG" = "$next_release_tag" ]; then
+              exit 0
+            fi
+            echo "$RELEASE_TAG is waiting: npm latest is v$npm_latest, GitHub Latest is $github_latest_tag, and the next tag is ${next_release_tag:-none}."
+            if [ "$attempt" -lt 100 ]; then sleep 15; fi
+          done
+          echo "$RELEASE_TAG did not acquire the durable release turn." >&2
+          exit 1
       - name: Prepare GitHub Release draft
         env:
           GH_TOKEN: ${{ github.token }}
@@ -122,7 +142,7 @@ jobs:
           if [ "$package_version" = "$npm_latest" ]; then
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
           else
-            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
           fi
       - name: Verify npm and GitHub release parity
         env:

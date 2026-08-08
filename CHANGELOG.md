@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Made tag publishing recoverable and fail closed across npm and GitHub Releases, with draft staging, exact `gitHead` checks, serialized publication, and enforced `latest` parity.
+- Made tag publishing recoverable and fail closed across npm and GitHub Releases, with draft staging, exact `gitHead` checks, a durable tag FIFO, and enforced `latest` parity.
 
 ## [0.5.1] - 2026-08-08
 
