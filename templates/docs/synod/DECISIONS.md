@@ -26,12 +26,12 @@ Status: accepted
 
 ### Decision
 
-Use Sol for architecture, decomposition, supervision, review, integration, and final verification. Delegate atomic implementation to Luna Max by default and escalate to Terra only when task complexity or failed correction rounds justify it.
+Use the configured supervising model for architecture, decomposition, supervision, review, integration, and final verification. Delegate atomic implementation to the selected cost-efficient worker and escalate only when task complexity or failed correction rounds justify it.
 
 ### Rationale
 
-Sol's highest-value contribution is judgment and control of the loop. Spending Sol on routine implementation defeats the cost-efficiency objective of the advisor pattern.
+The supervising model's highest-value contribution is judgment and control of the loop. Spending it on routine implementation defeats the cost-efficiency objective of the advisor pattern.
 
 ### Consequence
 
-Every implementation task needs a bounded contract, write scope, acceptance criteria, and verification commands. Sol inspects and tests each result but does not routinely author it.
+Every implementation task needs a bounded contract, write scope, acceptance criteria, and verification commands. The supervisor inspects and tests each result but does not routinely author it.

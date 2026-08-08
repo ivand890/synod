@@ -63,6 +63,10 @@ function respondingChild(options) {
   return new FakeChild((message, child) => {
     if (message.method === "initialize") child.respond(message.id, initializedResponse());
     if (message.method === "thread/list") child.respond(message.id, { data: [], nextCursor: null });
+    if (message.method === "model/list") child.respond(message.id, {
+      data: [{ id: "gpt-test", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }],
+      nextCursor: null
+    });
     if (message.method === "echo") child.respond(message.id, message.params);
   }, options);
 }
@@ -80,6 +84,7 @@ test("spawns, initializes, probes, and resolves App Server responses", async () 
 
   await client.start();
   await client.probeCapabilities();
+  const models = await client.listModels();
   const response = await client.request("echo", { value: 42 });
   const diagnostics = client.getDiagnostics();
   await client.close();
@@ -90,9 +95,11 @@ test("spawns, initializes, probes, and resolves App Server responses", async () 
     options: { stdio: ["pipe", "pipe", "pipe"] }
   }]);
   assert.deepEqual(response, { value: 42 });
+  assert.equal(models[0].id, "gpt-test");
   assert.equal(diagnostics.codexVersion, "0.142.0");
   assert.equal(diagnostics.appServer.capabilities.initialize, true);
   assert.equal(diagnostics.appServer.capabilities.threadList, true);
+  assert.equal(diagnostics.appServer.capabilities.modelList, true);
   assert.deepEqual(child.signals, ["SIGTERM"]);
 });
 

@@ -1,7 +1,7 @@
 name = "synod_explorer"
 description = "Read-only explorer that maps real execution paths and gathers evidence before changes."
-model = "gpt-5.6-terra"
-model_reasoning_effort = "medium"
+model = "__SYNOD_EXPLORER_MODEL__"
+model_reasoning_effort = "__SYNOD_EXPLORER_EFFORT__"
 sandbox_mode = "read-only"
 
 developer_instructions = """

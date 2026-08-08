@@ -1,0 +1,174 @@
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { ERROR_CODES } from "../src/errors.js";
+import { contentHash } from "../src/filesystem.js";
+import { checkProject, initProject, uninstallProject, upgradeProject } from "../src/lifecycle.js";
+import { migrateManifest } from "../src/migrations/index.js";
+import { LEGACY_V1_HASHES } from "../src/migrations/legacy-v1-hashes.js";
+
+const temporaryDirectories = new Set();
+
+async function temporaryProject() {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-lifecycle-test-"));
+  temporaryDirectories.add(directory);
+  return directory;
+}
+
+test.afterEach(async () => {
+  for (const directory of temporaryDirectories) {
+    await rm(directory, { recursive: true, force: true });
+    temporaryDirectories.delete(directory);
+  }
+});
+
+test("initialization rolls back files and directories after a partial failure", async () => {
+  const directory = await temporaryProject();
+
+  await assert.rejects(
+    initProject({ directory }, {
+      transactionHook(_operation, index) {
+        if (index === 2) throw new Error("injected failure");
+      }
+    }),
+    error => error.code === ERROR_CODES.TRANSACTION_FAILED
+  );
+
+  assert.deepEqual(await readdir(directory), []);
+});
+
+test("initialization detects a destination race immediately before mutation", async () => {
+  const directory = await temporaryProject();
+  const agentsPath = path.join(directory, "AGENTS.md");
+
+  await assert.rejects(
+    initProject({ directory }, {
+      async beforeMutationHook(_operation, index) {
+        if (index === 0) await writeFile(agentsPath, "concurrent owner\n", "utf8");
+      }
+    }),
+    error => error.code === ERROR_CODES.TRANSACTION_FAILED && error.details.originalCode === ERROR_CODES.DESTINATION_CHANGED
+  );
+
+  assert.equal(await readFile(agentsPath, "utf8"), "concurrent owner\n");
+  assert.deepEqual(await readdir(directory), ["AGENTS.md"]);
+});
+
+test("check permits user drift and rejects Synod-owned drift", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory, profile: "portable" });
+  await writeFile(path.join(directory, "docs/synod/GOAL.md"), "# My goal\n", "utf8");
+  await writeFile(path.join(directory, ".codex/agents/synod-reviewer.toml"), "modified\n", "utf8");
+
+  const result = await checkProject({ directory });
+
+  assert.equal(result.healthy, false);
+  assert.equal(result.checks.find(item => item.path === "docs/synod/GOAL.md").status, "modified-user");
+  assert.equal(result.checks.find(item => item.path === ".codex/agents/synod-reviewer.toml").status, "modified");
+});
+
+test("upgrade dry-run is non-mutating and profile changes preserve durable state", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory, profile: "portable" });
+  const configPath = path.join(directory, ".codex/config.toml");
+  const goalPath = path.join(directory, "docs/synod/GOAL.md");
+  await writeFile(goalPath, "# Durable custom goal\n", "utf8");
+  const before = await readFile(configPath, "utf8");
+
+  const preview = await upgradeProject({ directory, profile: "synod-5.6", dryRun: true });
+  assert.equal(preview.conflicts.length, 0);
+  assert.ok(preview.updated.includes(configPath.slice(directory.length + 1).split(path.sep).join("/")));
+  assert.equal(await readFile(configPath, "utf8"), before);
+
+  const applied = await upgradeProject({ directory, profile: "synod-5.6" });
+  assert.equal(applied.conflicts.length, 0);
+  assert.match(await readFile(configPath, "utf8"), /gpt-5\.6-sol/);
+  assert.equal(await readFile(goalPath, "utf8"), "# Durable custom goal\n");
+  const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
+  assert.equal(manifest.profile, "synod-5.6");
+});
+
+test("uninstall removes owned infrastructure and preserves user state and AGENTS content", async () => {
+  const directory = await temporaryProject();
+  const agentsPath = path.join(directory, "AGENTS.md");
+  const userAgents = "# User rules\n\nKeep me.\n";
+  await writeFile(agentsPath, userAgents, "utf8");
+  await initProject({ directory, profile: "portable" });
+  await writeFile(path.join(directory, "docs/synod/GOAL.md"), "# Keep this goal\n", "utf8");
+
+  const result = await uninstallProject({ directory });
+
+  assert.equal(result.conflicts.length, 0);
+  assert.equal(await readFile(agentsPath, "utf8"), userAgents);
+  assert.equal(await readFile(path.join(directory, "docs/synod/GOAL.md"), "utf8"), "# Keep this goal\n");
+  await assert.rejects(readFile(path.join(directory, ".synod/manifest.json"), "utf8"), { code: "ENOENT" });
+  await assert.rejects(readdir(path.join(directory, ".agents")), { code: "ENOENT" });
+  await assert.rejects(readdir(path.join(directory, ".codex")), { code: "ENOENT" });
+});
+
+test("uninstall refuses modified Synod-owned files without removing anything", async () => {
+  const directory = await temporaryProject();
+  const reviewerPath = path.join(directory, ".codex/agents/synod-reviewer.toml");
+  await initProject({ directory, profile: "portable" });
+  await writeFile(reviewerPath, "user modification\n", "utf8");
+
+  const result = await uninstallProject({ directory });
+
+  assert.deepEqual(result.conflicts, [".codex/agents/synod-reviewer.toml"]);
+  assert.equal(await readFile(reviewerPath, "utf8"), "user modification\n");
+  assert.equal(typeof JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8")).profile, "string");
+});
+
+test("schema 1 migration uses published hashes instead of adopting managed drift", async () => {
+  const directory = await temporaryProject();
+  const configPath = path.join(directory, ".codex/config.toml");
+  await mkdir(path.dirname(configPath), { recursive: true });
+  const modified = "# Generated by Synod.\nmodel = \"modified\"\n";
+  await writeFile(configPath, modified, "utf8");
+  const legacy = { schemaVersion: 1, templateVersion: "0.3.2", method: "advisor-loop" };
+
+  const { manifest, applied } = await migrateManifest(directory, legacy);
+  const entry = manifest.files.find(item => item.path === ".codex/config.toml");
+
+  assert.deepEqual(applied, [{ from: 1, to: 2 }]);
+  assert.equal(entry.contentHash, LEGACY_V1_HASHES["0.3.2"][".codex/config.toml"]);
+  assert.notEqual(entry.contentHash, contentHash(modified));
+  assert.equal(entry.provenance, "legacy-baseline");
+});
+
+test("check refuses a manifest reached through a symbolic-link ancestor", async () => {
+  const directory = await temporaryProject();
+  const outside = await temporaryProject();
+  await writeFile(path.join(outside, "manifest.json"), JSON.stringify({ schemaVersion: 2 }), "utf8");
+  await symlink(outside, path.join(directory, ".synod"));
+
+  await assert.rejects(
+    checkProject({ directory }),
+    error => error.code === ERROR_CODES.UNSAFE_PATH
+  );
+});
+
+test("uninstall rejects manifest paths outside Synod ownership boundaries", async () => {
+  const directory = await temporaryProject();
+  const importantPath = path.join(directory, "important.txt");
+  const manifestDirectory = path.join(directory, ".synod");
+  await mkdir(manifestDirectory);
+  await writeFile(importantPath, "keep\n", "utf8");
+  await writeFile(path.join(manifestDirectory, "manifest.json"), JSON.stringify({
+    schemaVersion: 2,
+    templateVersion: "0.4.0",
+    method: "advisor-loop",
+    profile: "portable",
+    hashAlgorithm: "sha256",
+    migrations: [],
+    files: [{ path: "important.txt", ownership: "synod", contentHash: contentHash("keep\n") }]
+  }), "utf8");
+
+  await assert.rejects(
+    uninstallProject({ directory, force: true }),
+    error => error.code === ERROR_CODES.MANIFEST_INVALID
+  );
+  assert.equal(await readFile(importantPath, "utf8"), "keep\n");
+});

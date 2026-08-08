@@ -1,7 +1,7 @@
 name = "synod_implementer"
-description = "Cost-efficient Luna Max worker that implements one atomic, fully specified task at a time."
-model = "gpt-5.6-luna"
-model_reasoning_effort = "max"
+description = "Cost-efficient worker that implements one atomic, fully specified task at a time."
+model = "__SYNOD_IMPLEMENTER_MODEL__"
+model_reasoning_effort = "__SYNOD_IMPLEMENTER_EFFORT__"
 sandbox_mode = "workspace-write"
 
 developer_instructions = """

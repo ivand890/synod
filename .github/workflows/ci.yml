@@ -64,18 +64,64 @@ jobs:
       - name: Test the published package shape
         run: pnpm test:package
 
+  codex_compatibility:
+    name: Codex ${{ matrix.codex-version }} compatibility
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - codex-version: "0.141.0"
+            expected-status: unsupported
+            expected-healthy: "false"
+          - codex-version: "0.142.0"
+            expected-status: known-good
+            expected-healthy: "true"
+          - codex-version: "0.145.0"
+            expected-status: supported
+            expected-healthy: "true"
+          - codex-version: "0.147.0"
+            expected-status: known-good
+            expected-healthy: "true"
+          - codex-version: "0.148.0-alpha.1"
+            expected-status: unsupported
+            expected-healthy: "false"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install the matrix Codex CLI
+        env:
+          CODEX_VERSION: ${{ matrix.codex-version }}
+        run: npm install --global "@openai/codex@$CODEX_VERSION"
+      - name: Verify the live Codex capability contract
+        env:
+          SYNOD_EXPECTED_CODEX_VERSION: ${{ matrix.codex-version }}
+          SYNOD_EXPECTED_CODEX_STATUS: ${{ matrix.expected-status }}
+          SYNOD_EXPECTED_DOCTOR_HEALTHY: ${{ matrix.expected-healthy }}
+        run: pnpm test:codex-compatibility
+
   required:
     name: Required
     if: always()
     needs:
       - test
       - package-smoke
+      - codex_compatibility
     runs-on: ubuntu-latest
     steps:
       - name: Confirm required jobs passed
         env:
           TEST_RESULT: ${{ needs.test.result }}
           PACKAGE_RESULT: ${{ needs.package-smoke.result }}
+          CODEX_RESULT: ${{ needs.codex_compatibility.result }}
         run: |
           test "$TEST_RESULT" = "success"
           test "$PACKAGE_RESULT" = "success"
+          test "$CODEX_RESULT" = "success"

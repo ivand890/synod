@@ -1,6 +1,6 @@
 {
   "name": "@ivand890/synod",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Install the Synod persistent advisor loop in Codex projects.",
   "type": "module",
   "bin": {
@@ -17,7 +17,8 @@
   "scripts": {
     "test": "node --test",
     "test:integration": "node --test test/cli.test.js",
-    "test:package": "node scripts/package-smoke.js"
+    "test:package": "node scripts/package-smoke.js",
+    "test:codex-compatibility": "node scripts/codex-compatibility-smoke.js"
   },
   "engines": {
     "node": ">=20"

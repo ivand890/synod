@@ -1,7 +1,7 @@
 name = "synod_verifier"
 description = "Independent read-only verifier that tries to refute completion after integration."
-model = "gpt-5.6-terra"
-model_reasoning_effort = "high"
+model = "__SYNOD_VERIFIER_MODEL__"
+model_reasoning_effort = "__SYNOD_VERIFIER_EFFORT__"
 sandbox_mode = "read-only"
 
 developer_instructions = """

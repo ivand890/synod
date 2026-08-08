@@ -1,6 +1,6 @@
 # Synod
 
-Synod installs a persistent, reviewed advisor loop for Codex projects. Sol owns architecture, task decomposition, supervision, review, integration, and final verification. Atomic implementation is delegated by default to the cost-efficient Luna Max worker, with Terra available for escalation or specialized analysis.
+Synod installs a persistent, reviewed advisor loop for Codex projects. The selected model profile assigns supervision, atomic implementation, exploration, review, verification, and mechanical work while keeping the primary agent responsible for integration and final evidence.
 
 ## Install
 
@@ -29,9 +29,13 @@ cd your-project
 synod init
 ```
 
-Preview changes first or replace conflicting Synod-managed files:
+Fresh installs default to the conservative `portable` profile. Run `synod doctor` before opting into `synod-5.6` so the exact model and reasoning capabilities are verified for the installed Codex runtime and account.
+
+Select a model profile, preview changes first, or replace conflicting Synod-managed files:
 
 ```bash
+synod init --profile synod-5.6
+synod init --profile portable
 synod init --dry-run
 synod init --force
 ```
@@ -40,7 +44,40 @@ Synod preserves an existing user-owned `.codex/config.toml`. It reports the file
 
 If `AGENTS.md` contains multiple complete Synod managed blocks, initialization stops without writing. `synod init --force` consolidates those blocks into one canonical block and preserves surrounding user content. Incomplete, nested, or orphaned Synod markers are always rejected because their ownership boundary cannot be repaired safely.
 
-The generated `docs/synod/` files are the durable project record. Git and runtime evidence remain authoritative when a checkpoint is stale.
+The generated `docs/synod/` files are the durable project record. They are user-owned after creation: upgrades and uninstall preserve them. Git and runtime evidence remain authoritative when a checkpoint is stale.
+
+## Safe project lifecycle
+
+Every installation records `.synod/manifest.json` schema 2 with the template version, selected profile, ownership, and a normalized SHA-256 hash for each managed path. Synod owns its generated infrastructure, shares ownership of only the marked block in `AGENTS.md`, and treats durable project state as user-owned.
+
+Verify project integrity and runtime capabilities:
+
+```bash
+synod check
+synod doctor
+synod check --json
+synod doctor --json
+```
+
+Preview and apply a versioned migration or profile change:
+
+```bash
+synod upgrade --dry-run
+synod upgrade
+synod upgrade --profile portable --dry-run
+synod upgrade --profile portable
+```
+
+Initialization, upgrade, and uninstall recheck every destination immediately before mutation, replace files atomically, and roll back already-applied operations when a later operation fails. Modified Synod-owned files are conflicts; `--force` is required to replace or remove them. User-owned files are preserved even under `--force`.
+
+Uninstall the managed infrastructure while retaining `docs/synod/` and surrounding user content in `AGENTS.md`:
+
+```bash
+synod uninstall --dry-run
+synod uninstall
+```
+
+Schema 1 manifests from v0.3.0 through v0.3.2 migrate through an explicit `1 → 2` migration. Their published template hashes are used as baselines so drift is detected before upgrade.
 
 ## Token usage by model
 
@@ -63,7 +100,7 @@ For a session that is still running, the report is a persisted snapshot: the act
 
 ## JSON contract
 
-Both `synod init --json` and `synod usage --json` emit exactly one JSON document. Schema version 1 has this top-level shape:
+Every command with `--json` emits exactly one JSON document. Envelope schema version 1 has this top-level shape:
 
 ```json
 {
@@ -73,7 +110,7 @@ Both `synod init --json` and `synod usage --json` emit exactly one JSON document
   "data": {},
   "warnings": [],
   "diagnostics": {
-    "synodVersion": "0.3.2",
+    "synodVersion": "0.4.0",
     "nodeVersion": "24.12.0",
     "platform": "darwin",
     "codexVersion": "0.142.0"
@@ -83,23 +120,44 @@ Both `synod init --json` and `synod usage --json` emit exactly one JSON document
 
 Failures set `ok` to `false`, omit `data`, include `error: { code, message, details? }`, and return a non-zero exit status. Warnings use `{ code, message, details? }`. Codes are stable within schema version 1.
 
-Error codes: `SYNOD_UNKNOWN_COMMAND`, `SYNOD_UNKNOWN_OPTION`, `SYNOD_MISSING_OPTION_VALUE`, `SYNOD_UNEXPECTED_ARGUMENT`, `SYNOD_TARGET_NOT_FOUND`, `SYNOD_TARGET_NOT_DIRECTORY`, `SYNOD_INIT_CONFLICT`, `SYNOD_AGENTS_BLOCK_MALFORMED`, `SYNOD_SESSION_NOT_FOUND`, `SYNOD_SESSION_CYCLE`, `SYNOD_ROLLOUT_PATH_MISSING`, `SYNOD_APP_SERVER_NOT_RUNNING`, `SYNOD_APP_SERVER_SPAWN_FAILED`, `SYNOD_APP_SERVER_TIMEOUT`, `SYNOD_APP_SERVER_EXITED`, `SYNOD_APP_SERVER_MALFORMED_OUTPUT`, `SYNOD_APP_SERVER_PROTOCOL_ERROR`, `SYNOD_APP_SERVER_UNSUPPORTED`, and `SYNOD_INTERNAL_ERROR`.
+Lifecycle errors include stable codes for invalid/unsupported manifests, required upgrades, conflicts, unsafe paths, destination races, transaction rollback, and unsupported downgrades. Existing command, App Server, session, and JSON codes remain stable within envelope schema version 1.
 
-Warning codes: `SYNOD_DURABLE_STATE_PRESERVED`, `SYNOD_USER_CONFIG_PRESERVED`, `SYNOD_AGENTS_BLOCK_DUPLICATES_REPAIRED`, `SYNOD_APP_SERVER_FORCE_KILLED`, and `SYNOD_APP_SERVER_EXIT_UNCONFIRMED`.
+Warnings identify preserved user state, available upgrades, missing user-owned files, incompatible profiles, unsupported Codex versions, and bounded App Server cleanup fallbacks.
 
-## Model routing
+## Model profiles and Codex compatibility
 
-- Sol High or Extra High: plan, decompose, supervise, review, integrate, and verify.
-- Luna Max: implement atomic tasks with explicit write scope and acceptance criteria.
-- Terra Medium or High: exploration, difficult analysis, review, or fallback when Luna cannot complete a task reliably.
+List the built-in profiles:
 
-Sol does not perform routine implementation. It may make only a minimal integration repair when delegating that repair would cost more than the change, and must record the exception.
+```bash
+synod profiles
+synod profiles --json
+```
+
+- `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. It requires Codex 0.147.0 or newer within the supported range and verifies each model and reasoning effort through `model/list`.
+- `portable` uses GPT-5.5 at role-specific reasoning efforts. It is the conservative fallback verified across both known-good Codex versions and account-specific model catalogs.
+
+`synod doctor` classifies the installed Codex binary independently from model availability:
+
+- Supported: `>=0.142.0 <0.148.0`.
+- Known-good and exercised in CI: `0.142.0`, `0.147.0`.
+- Unsupported: versions below the range, prereleases, and versions at or above `0.148.0` until the CI contract is deliberately expanded.
+
+Inside the supported range, unlisted patch/minor versions are reported as `supported`; only matrix-tested versions are `known-good`. A supported binary can still lack a selected model profile, which `doctor` reports separately.
+
+## Advisor routing
+
+- The configured supervisor plans, decomposes, supervises, reviews, integrates, and verifies.
+- The configured implementer completes atomic tasks with explicit write scope and acceptance criteria.
+- Explorer, reviewer, verifier, and mechanical roles use the selected profile's declared models and reasoning efforts.
+
+The supervisor does not perform routine implementation. It may make only a minimal integration repair when delegating that repair would cost more than the change, and must record the exception.
 
 ## Development
 
 ```bash
 pnpm test
 pnpm test:package
+pnpm test:codex-compatibility # requires explicit SYNOD_EXPECTED_* environment values
 pnpm pack --pack-destination dist
 ```
 

@@ -5,4 +5,5 @@ Append only material phase changes, accepted agent results, verification, recove
 ## Initialization
 
 - Installed Synod template version __SYNOD_VERSION__.
+- Selected model profile __SYNOD_PROFILE__.
 - Project goal and capability preflight remain pending.
