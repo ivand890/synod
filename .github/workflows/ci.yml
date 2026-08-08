@@ -96,6 +96,8 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+      - name: Enable pnpm
+        run: corepack enable
       - name: Install the matrix Codex CLI
         env:
           CODEX_VERSION: ${{ matrix.codex-version }}
