@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { link, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { ERROR_CODES } from "../src/errors.js";
+import { contentHash } from "../src/filesystem.js";
 import { initProject } from "../src/lifecycle.js";
 import {
   ORCHESTRATION_EVENTS_PATH,
@@ -219,6 +220,33 @@ test("status detects content-sensitive checkpoint drift and checkpoint reconcile
   assert.equal((await orchestrationStatus({ directory })).healthy, true);
 });
 
+test("checkpoint fingerprints preserve user-owned AGENTS and Codex config content", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-guidance-test-"));
+  temporaryDirectories.add(directory);
+  await git(directory, "init");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "user.email", "synod@example.invalid");
+  await git(directory, "config", "commit.gpgsign", "false");
+  await mkdir(path.join(directory, ".codex"), { recursive: true });
+  const agentsPath = path.join(directory, "AGENTS.md");
+  const configPath = path.join(directory, ".codex/config.toml");
+  await writeFile(agentsPath, "# Project guidance\n\nKeep releases signed.\n", "utf8");
+  await writeFile(configPath, "model = \"project-owned\"\n", "utf8");
+  await git(directory, "add", "AGENTS.md", ".codex/config.toml");
+  await git(directory, "commit", "-m", "add project guidance");
+  await initProject({ directory });
+
+  assert.equal((await orchestrationStatus({ directory })).healthy, true);
+  const installedAgents = await readFile(agentsPath, "utf8");
+  await writeFile(agentsPath, installedAgents.replace("Keep releases signed.", "Skip release signatures."), "utf8");
+  assert.equal((await orchestrationStatus({ directory })).healthy, false);
+  await writeFile(agentsPath, installedAgents, "utf8");
+  assert.equal((await orchestrationStatus({ directory })).healthy, true);
+
+  await writeFile(configPath, "model = \"changed-by-user\"\n", "utf8");
+  assert.equal((await orchestrationStatus({ directory })).healthy, false);
+});
+
 test("checkpoint fingerprints include the exact staged index content", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-index-test-"));
   temporaryDirectories.add(directory);
@@ -355,6 +383,15 @@ test("stale orchestration locks are reclaimed while live locks fail closed", asy
   assert.equal(await readFile(lockPath, "utf8"), liveLock);
 });
 
+test("an interrupted unpublished lock candidate never blocks orchestration", async () => {
+  const directory = await temporaryProject();
+  const candidatePath = path.join(directory, ".synod/orchestration-candidate-interrupted.lock");
+  await writeFile(candidatePath, "{", "utf8");
+
+  assert.equal((await readOrchestration(directory)).state.schemaVersion, 1);
+  assert.equal(await readFile(candidatePath, "utf8"), "{");
+});
+
 test("status holds one lock across its canonical snapshot", async () => {
   const directory = await temporaryProject();
   let signalCheckpoint;
@@ -413,6 +450,48 @@ test("a transient state/view transaction failure is recovered from the pending a
   assert.equal(state.lastEvent.sequence, 2);
   assert.equal(events.length, 2);
   await assert.rejects(readFile(path.join(directory, ".synod/pending-mutation.json"), "utf8"), { code: "ENOENT" });
+});
+
+test("recovery replaces a matching partial event suffix from the pending mutation", async () => {
+  const directory = await temporaryProject();
+  const statePath = path.join(directory, ORCHESTRATION_STATE_PATH);
+  const eventPath = path.join(directory, ORCHESTRATION_EVENTS_PATH);
+  const statusPath = path.join(directory, ORCHESTRATION_STATUS_PATH);
+  const pendingPath = path.join(directory, ".synod/pending-mutation.json");
+  const previousState = await readFile(statePath, "utf8");
+  const previousEvents = await readFile(eventPath);
+  const previousStatus = await readFile(statusPath, "utf8");
+
+  await addDefaultTask(directory, { objective: "Recuperación atómica 🔒" });
+  const nextStateContent = await readFile(statePath, "utf8");
+  const nextEvents = await readFile(eventPath);
+  const nextStatus = await readFile(statusPath, "utf8");
+  const pendingLine = nextEvents.subarray(previousEvents.length, nextEvents.length - 1);
+  const event = JSON.parse(pendingLine.toString("utf8"));
+  const pending = {
+    schemaVersion: 1,
+    event,
+    state: JSON.parse(nextStateContent),
+    status: nextStatus,
+    expectedStateHash: contentHash(previousState),
+    expectedStatusHash: contentHash(previousStatus)
+  };
+
+  await writeFile(statePath, previousState, "utf8");
+  await writeFile(statusPath, previousStatus, "utf8");
+  const lockEmoji = Buffer.from("🔒", "utf8");
+  const emojiOffset = pendingLine.indexOf(lockEmoji);
+  assert.ok(emojiOffset > 0);
+  await writeFile(eventPath, Buffer.concat([previousEvents, pendingLine.subarray(0, emojiOffset + 1)]));
+  await writeFile(pendingPath, `${JSON.stringify(pending, null, 2)}\n`, "utf8");
+
+  const recovered = await readOrchestration(directory);
+  assert.equal(recovered.state.lastEvent.sequence, 2);
+  assert.equal(recovered.events.length, 2);
+  assert.deepEqual(await readFile(eventPath), nextEvents);
+  assert.equal(await readFile(statePath, "utf8"), nextStateContent);
+  assert.equal(await readFile(statusPath, "utf8"), nextStatus);
+  await assert.rejects(readFile(pendingPath, "utf8"), { code: "ENOENT" });
 });
 
 test("tampered event logs fail closed", async () => {

@@ -574,6 +574,30 @@ export async function checkProject({ directory = "." } = {}) {
     });
   }
 
+  const orchestrationRecordsPresent = ORCHESTRATION_RECORD_PATHS.every(relativePath =>
+    checks.some(check => check.path === relativePath && check.status === "recorded")
+  );
+  if (orchestrationRecordsPresent) {
+    try {
+      await orchestrationStatus({ directory: targetDirectory });
+      checks.push({
+        path: ".synod/orchestration",
+        ownership: "record",
+        status: "valid",
+        severity: "info"
+      });
+    } catch (error) {
+      checks.push({
+        path: ".synod/orchestration",
+        ownership: "record",
+        status: "invalid",
+        severity: "error",
+        code: error.code || ERROR_CODES.ORCHESTRATION_STATE_INVALID,
+        message: error.message
+      });
+    }
+  }
+
   const upgradeAvailable = manifest.templateVersion !== packageVersion || rawManifest.schemaVersion !== MANIFEST_SCHEMA_VERSION;
   if (upgradeAvailable) {
     warnings.push(warning(

@@ -110,6 +110,22 @@ test("check permits user drift and rejects Synod-owned drift", async () => {
   assert.equal(result.checks.find(item => item.path === ".codex/agents/synod-reviewer.toml").status, "modified");
 });
 
+test("check rejects inconsistent canonical orchestration records", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory });
+  const eventsPath = path.join(directory, ".synod/events.jsonl");
+  const events = await readFile(eventsPath, "utf8");
+  await writeFile(eventsPath, events.replace("project.initialized", "project.tampered"), "utf8");
+
+  const result = await checkProject({ directory });
+  const orchestration = result.checks.find(item => item.path === ".synod/orchestration");
+
+  assert.equal(result.healthy, false);
+  assert.equal(orchestration.status, "invalid");
+  assert.equal(orchestration.severity, "error");
+  assert.equal(orchestration.code, ERROR_CODES.EVENT_LOG_INVALID);
+});
+
 test("upgrade dry-run is non-mutating and profile changes preserve durable state", async () => {
   const directory = await temporaryProject();
   await initProject({ directory, profile: "portable" });

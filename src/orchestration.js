@@ -9,11 +9,13 @@ import {
   applyTransaction,
   contentHash,
   inspectPath,
+  normalizeText,
   pathType,
   resolveProjectPath,
   unsafeAncestor
 } from "./filesystem.js";
 import { packageVersion } from "./package.js";
+import { generatedConfigMarker, removeAgentsBlocks } from "./templates.js";
 
 export const ORCHESTRATION_SCHEMA_VERSION = 1;
 export const ORCHESTRATION_STATE_PATH = ".synod/state.json";
@@ -87,12 +89,32 @@ function stateCore(state) {
 
 function isIgnoredCheckpointPath(relativePath) {
   const normalized = relativePath.replaceAll("\\", "/");
-  return normalized === "AGENTS.md"
-    || normalized === ".codex/config.toml"
-    || normalized.startsWith(".synod/")
+  return normalized.startsWith(".synod/")
     || normalized === ORCHESTRATION_STATUS_PATH
     || normalized.startsWith(".codex/agents/synod-")
     || normalized.startsWith(".agents/skills/synod-advisor/");
+}
+
+function isFilteredCheckpointPath(relativePath) {
+  return ["AGENTS.md", ".codex/config.toml"].includes(relativePath.replaceAll("\\", "/"));
+}
+
+function checkpointContent(relativePath, content) {
+  const normalized = relativePath.replaceAll("\\", "/");
+  if (normalized === "AGENTS.md") {
+    const userContent = normalizeText(removeAgentsBlocks(String(content)))
+      .replace(/\n+$/u, "");
+    return userContent.length === 0 ? undefined : Buffer.from(`${userContent}\n`, "utf8");
+  }
+  if (normalized === ".codex/config.toml") {
+    const text = String(content);
+    return text.startsWith(generatedConfigMarker) ? undefined : Buffer.from(text, "utf8");
+  }
+  return null;
+}
+
+function checkpointSignature(inspected) {
+  return `${inspected.type}:${inspected.contentHash || ""}`;
 }
 
 async function defaultGitRunner(directory, args) {
@@ -132,7 +154,10 @@ async function checkpointPath(directory, relativePath, gitRunner) {
     const handle = await open(absolutePath, flags);
     try {
       if (!(await handle.stat()).isFile()) return { type: "other" };
-      return { type: "file", contentHash: sha256Bytes(await handle.readFile()) };
+      const content = await handle.readFile();
+      const filtered = checkpointContent(relativePath, content.toString("utf8"));
+      if (filtered === undefined) return { type: "ignored" };
+      return { type: "file", contentHash: sha256Bytes(filtered === null ? content : filtered) };
     } finally {
       await handle.close();
     }
@@ -157,6 +182,21 @@ function indexRecords(indexOutput) {
   return records;
 }
 
+async function checkpointIndexEntries(directory, relativePath, entries, gitRunner) {
+  if (!entries) return undefined;
+  if (!isFilteredCheckpointPath(relativePath)) return entries;
+  return Promise.all(entries.map(async entry => {
+    const content = await gitRunner(directory, ["cat-file", "blob", entry.objectId]);
+    const filtered = checkpointContent(relativePath, content);
+    return {
+      mode: entry.mode,
+      stage: entry.stage,
+      type: filtered === undefined ? "ignored" : "file",
+      ...(filtered === undefined ? {} : { contentHash: sha256Bytes(filtered) })
+    };
+  }));
+}
+
 async function worktreeRecords(directory, porcelain, indexOutput, overlay, gitRunner) {
   const stagedIndex = indexRecords(indexOutput);
   const fields = porcelain.split("\0");
@@ -173,26 +213,39 @@ async function worktreeRecords(directory, porcelain, indexOutput, overlay, gitRu
     const inspected = isIgnoredCheckpointPath(relativePath)
       ? { type: "ignored" }
       : await checkpointPath(directory, relativePath, gitRunner);
+    const index = await checkpointIndexEntries(directory, relativePath, stagedIndex.get(relativePath), gitRunner);
+    let normalizedStatus = status;
+    if (isFilteredCheckpointPath(relativePath)) {
+      if (inspected.type === "ignored" && (!index || index.every(entry => entry.type === "ignored"))) continue;
+      const stageZero = index?.length === 1 && index[0].stage === 0 ? index[0] : undefined;
+      if (status !== "??" && stageZero) {
+        const worktreeMatchesIndex = checkpointSignature(inspected) === checkpointSignature(stageZero);
+        normalizedStatus = `${status[0]}${worktreeMatchesIndex ? " " : status[1] === " " ? "M" : status[1]}`;
+        if (normalizedStatus === "  ") continue;
+      }
+    }
     records.push({
-      status,
+      status: normalizedStatus,
       path: relativePath,
       ...(sourcePath ? { sourcePath } : {}),
       type: inspected.type,
       ...(inspected.contentHash ? { contentHash: inspected.contentHash } : {}),
       ...(inspected.gitHead ? { gitHead: inspected.gitHead } : {}),
       ...(inspected.worktreeFingerprint ? { worktreeFingerprint: inspected.worktreeFingerprint } : {}),
-      ...(stagedIndex.has(relativePath) ? { index: stagedIndex.get(relativePath) } : {})
+      ...(index ? { index } : {})
     });
   }
   const recordedPaths = new Set(records.map(record => record.path));
   for (const [relativePath, content] of overlay) {
     if (isIgnoredCheckpointPath(relativePath) || recordedPaths.has(relativePath)) continue;
     if (await pathType(path.resolve(directory, relativePath)) !== "missing") continue;
+    const filtered = checkpointContent(relativePath, content);
+    if (filtered === undefined) continue;
     records.push({
       status: "??",
       path: relativePath,
       type: "file",
-      contentHash: sha256Bytes(Buffer.from(content, "utf8"))
+      contentHash: sha256Bytes(filtered === null ? Buffer.from(content, "utf8") : filtered)
     });
   }
   return records.sort((left, right) => `${left.path}\0${left.sourcePath || ""}`.localeCompare(`${right.path}\0${right.sourcePath || ""}`));
@@ -535,7 +588,7 @@ function validateEventLog(events) {
   return events;
 }
 
-async function readRecord(targetDirectory, relativePath) {
+async function readRecordBytes(targetDirectory, relativePath) {
   const absolutePath = resolveProjectPath(targetDirectory, relativePath);
   const unsafe = await unsafeAncestor(targetDirectory, absolutePath);
   if (unsafe) {
@@ -548,7 +601,11 @@ async function readRecord(targetDirectory, relativePath) {
       details: { path: relativePath }
     });
   }
-  return readFile(absolutePath, "utf8");
+  return readFile(absolutePath);
+}
+
+async function readRecord(targetDirectory, relativePath) {
+  return (await readRecordBytes(targetDirectory, relativePath)).toString("utf8");
 }
 
 async function readOrchestrationRaw(targetDirectory) {
@@ -693,42 +750,57 @@ async function acquireLock(targetDirectory) {
   if (unsafe) throw new SynodError(ERROR_CODES.UNSAFE_PATH, `Refusing to lock orchestration through unsafe path: ${unsafe}`);
   const token = randomUUID();
   const lockContent = serializeJson({ pid: process.pid, token, createdAt: nowIso() });
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    let handle;
-    try {
-      handle = await open(lockPath, "wx", 0o600);
-      await handle.writeFile(lockContent, "utf8");
-      await handle.sync();
-      await handle.close();
-      return async () => {
-        const current = await inspectLock(lockPath);
-        if (current.type === "missing") return;
-        if (current.type === "file" && current.content === lockContent) await unlink(lockPath);
-      };
-    } catch (error) {
-      await handle?.close().catch(() => {});
-      if (error.code === "ENOENT") {
-        throw new SynodError(ERROR_CODES.ORCHESTRATION_NOT_INITIALIZED, "Synod orchestration is not initialized in this project.");
-      }
-      if (error.code !== "EEXIST") throw error;
-
-      const existing = await inspectLock(lockPath);
-      if (existing.type === "missing") continue;
-      if (existing.type !== "file") {
-        throw new SynodError(ERROR_CODES.UNSAFE_PATH, "Synod orchestration lock is not a regular file.", {
-          details: { path: ORCHESTRATION_LOCK_PATH, type: existing.type }
-        });
-      }
-      const owner = parseLockOwner(existing.content);
-      if (!owner || processIsAlive(owner.pid)) {
-        throw new SynodError(ERROR_CODES.ORCHESTRATION_LOCKED, "Another Synod orchestration mutation holds the project lock.", {
-          details: { path: ORCHESTRATION_LOCK_PATH, ...(owner ? { pid: owner.pid } : {}) }
-        });
-      }
-
-      await reclaimStaleLock(targetDirectory, lockPath, existing);
+  const candidatePath = resolveProjectPath(targetDirectory, `.synod/orchestration-candidate-${token}.lock`);
+  let candidateHandle;
+  try {
+    candidateHandle = await open(candidatePath, "wx", 0o600);
+    await candidateHandle.writeFile(lockContent, "utf8");
+    await candidateHandle.sync();
+    await candidateHandle.close();
+    candidateHandle = undefined;
+  } catch (error) {
+    await candidateHandle?.close().catch(() => {});
+    if (error.code === "ENOENT") {
+      throw new SynodError(ERROR_CODES.ORCHESTRATION_NOT_INITIALIZED, "Synod orchestration is not initialized in this project.");
     }
+    throw error;
+  }
+
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await link(candidatePath, lockPath);
+        return async () => {
+          const current = await inspectLock(lockPath);
+          if (current.type === "missing") return;
+          if (current.type === "file" && current.content === lockContent) await unlink(lockPath);
+        };
+      } catch (error) {
+        if (error.code === "ENOENT") {
+          throw new SynodError(ERROR_CODES.ORCHESTRATION_NOT_INITIALIZED, "Synod orchestration is not initialized in this project.");
+        }
+        if (error.code !== "EEXIST") throw error;
+
+        const existing = await inspectLock(lockPath);
+        if (existing.type === "missing") continue;
+        if (existing.type !== "file") {
+          throw new SynodError(ERROR_CODES.UNSAFE_PATH, "Synod orchestration lock is not a regular file.", {
+            details: { path: ORCHESTRATION_LOCK_PATH, type: existing.type }
+          });
+        }
+        const owner = parseLockOwner(existing.content);
+        if (!owner || processIsAlive(owner.pid)) {
+          throw new SynodError(ERROR_CODES.ORCHESTRATION_LOCKED, "Another Synod orchestration mutation holds the project lock.", {
+            details: { path: ORCHESTRATION_LOCK_PATH, ...(owner ? { pid: owner.pid } : {}) }
+          });
+        }
+
+        await reclaimStaleLock(targetDirectory, lockPath, existing);
+      }
+    }
+  } finally {
+    // An orphaned candidate is unpublished and cannot block another owner.
+    await unlink(candidatePath).catch(() => {});
   }
 
   throw new SynodError(ERROR_CODES.ORCHESTRATION_LOCKED, "Could not safely acquire the Synod orchestration lock after stale-lock recovery.", {
@@ -792,15 +864,32 @@ async function recoverPendingMutation(targetDirectory) {
   const record = await readPendingMutation(targetDirectory);
   if (!record) return false;
   const { pending } = record;
-  const rawEvents = await readRecord(targetDirectory, ORCHESTRATION_EVENTS_PATH);
+  const rawEventBytes = await readRecordBytes(targetDirectory, ORCHESTRATION_EVENTS_PATH);
+  const finalNewline = rawEventBytes.lastIndexOf(0x0a);
+  const completePrefixBytes = finalNewline < 0 ? Buffer.alloc(0) : rawEventBytes.subarray(0, finalNewline + 1);
+  const partialSuffix = rawEventBytes.subarray(finalNewline + 1);
+  const completePrefix = completePrefixBytes.toString("utf8");
   let events;
   try {
-    events = validateEventLog(rawEvents.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)));
+    events = validateEventLog(completePrefix.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)));
   } catch (error) {
     if (error instanceof SynodError) throw error;
     throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, `Could not parse ${ORCHESTRATION_EVENTS_PATH}: ${error.message}`, { cause: error });
   }
   const last = events.at(-1);
+  const pendingLine = JSON.stringify(pending.event);
+  const pendingLineBytes = Buffer.from(pendingLine, "utf8");
+  if (
+    partialSuffix.length > 0
+    && (
+      partialSuffix.length > pendingLineBytes.length
+      || !pendingLineBytes.subarray(0, partialSuffix.length).equals(partialSuffix)
+    )
+  ) {
+    throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "The partial event-log suffix does not match the pending mutation.", {
+      details: { eventSequence: last.sequence, pendingSequence: pending.event.sequence }
+    });
+  }
   if (last.eventHash !== pending.event.eventHash) {
     if (
       last.eventHash !== pending.event.previousHash
@@ -810,7 +899,25 @@ async function recoverPendingMutation(targetDirectory) {
         details: { eventSequence: last.sequence, pendingSequence: pending.event.sequence }
       });
     }
-    await appendEvent(targetDirectory, pending.event);
+    validateEventLog([...events, pending.event]);
+    if (partialSuffix.length > 0) {
+      // The valid prefix is immutable; only the uncommitted partial append is replaced.
+      const eventInspected = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_EVENTS_PATH));
+      const currentEventBytes = await readRecordBytes(targetDirectory, ORCHESTRATION_EVENTS_PATH);
+      if (eventInspected.type !== "file" || !currentEventBytes.equals(rawEventBytes)) {
+        throw new SynodError(ERROR_CODES.DESTINATION_CHANGED, "Event log changed while repairing a pending append.");
+      }
+      await applyTransaction(targetDirectory, [{
+        action: "write",
+        path: ORCHESTRATION_EVENTS_PATH,
+        content: Buffer.concat([completePrefixBytes, pendingLineBytes, Buffer.from("\n")]),
+        expected: { type: "file", hash: eventInspected.hash }
+      }]);
+    } else {
+      await appendEvent(targetDirectory, pending.event);
+    }
+  } else if (partialSuffix.length > 0) {
+    throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "Unexpected bytes follow the committed pending event.");
   }
 
   const stateInspected = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_STATE_PATH));
