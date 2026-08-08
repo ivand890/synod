@@ -1,6 +1,6 @@
 # Releasing Synod
 
-Synod publishes `@ivand890/synod` from GitHub Actions with npm trusted publishing. No npm publish token is stored in GitHub.
+Synod publishes `@ivand890/synod` and its matching GitHub Release from GitHub Actions. npm uses trusted publishing; no npm publish token is stored in GitHub.
 
 ## Prepare a release
 
@@ -22,13 +22,24 @@ git tag -s "v$release_version" -m "v$release_version"
 git push origin "v$release_version"
 ```
 
-The tag must match the version in `package.json`. The protected `Publish` workflow verifies that the tagged commit belongs to `main`, runs the full test suite and package smoke test, and publishes through the protected `npm` environment.
+The tag must match the version in `package.json`. The protected `Publish` workflow verifies that the tagged commit belongs to `main`, runs the full test suite and package smoke test, prepares a draft GitHub Release, and publishes through the protected `npm` environment. Releases are serialized across tags so two versions cannot race to become `latest`.
+
+After npm exposes the exact version and tagged `gitHead`, the workflow publishes the draft and verifies all of these invariants before it can succeed:
+
+- the tagged npm version belongs to the exact Git commit;
+- the matching GitHub Release exists and is neither a draft nor a prerelease;
+- npm's `latest` dist-tag and GitHub's `Latest` release identify the same version;
+- the npm `gitHead` for that latest version resolves to its Git tag.
+
+GitHub Releases and npm do not share an atomic transaction. A failure after npm accepts a package can therefore leave a draft temporarily pending, but never a successful workflow with mismatched public state. Re-running the same tag verifies the immutable npm `gitHead`, reuses the draft, and completes the release safely.
 
 Approve the `npm` environment deployment in GitHub, then verify the release:
 
 ```bash
 release_version=0.5.0
 npm view @ivand890/synod version dist-tags --json
+gh release view "v$release_version" --json tagName,isDraft,isPrerelease,url
+gh release list --limit 1
 pnpm dlx "@ivand890/synod@$release_version" --version
 ```
 
