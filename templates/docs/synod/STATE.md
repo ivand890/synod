@@ -1,12 +1,8 @@
-# Synod State
+# Synod State Notes
 
-Updated: not yet checkpointed
-Phase: bootstrap
-Branch: unknown
-Verified HEAD: unknown
-Working tree: unknown
+Canonical machine-readable state is `.synod/state.json`. Its append-only audit log is `.synod/events.jsonl`, and `STATUS.md` is the generated human view. Do not use this notes file to override task state, acceptance, verification, or checkpoints.
 
-## Active objective
+## Initial objective
 
 Initialize the durable project goal and execution plan.
 
@@ -29,9 +25,9 @@ Initialize the durable project goal and execution plan.
 
 None.
 
-## Drift
+## Drift policy
 
-Not checked.
+Run `synod status`. Reconcile unexpected drift or explicitly accept the current branch, `HEAD`, and working-tree fingerprint with `synod checkpoint`.
 
 ## Blockers
 
@@ -41,6 +37,6 @@ The project goal and completion criteria are not defined.
 
 Read the repository instructions, inspect Git state, and replace the draft sections in `GOAL.md` with an agreed objective and measurable completion criteria.
 
-## Verification ledger
+## Notes
 
-No checks recorded.
+Keep only contextual notes here. Record exact revision evidence through validated task transitions.

@@ -39,12 +39,15 @@ test("initializes a fresh project with durable state, agents, and skill", async 
   assert.match(agents, /\$synod-advisor/);
 
   const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
-  assert.equal(manifest.schemaVersion, 2);
+  assert.equal(manifest.schemaVersion, 3);
   assert.equal(manifest.templateVersion, packageVersion);
   assert.equal(manifest.profile, "portable");
   assert.equal(manifest.hashAlgorithm, "sha256");
   assert.equal(manifest.files.find(item => item.path === "AGENTS.md").ownership, "shared");
   assert.equal(manifest.files.find(item => item.path === "docs/synod/GOAL.md").ownership, "user");
+  assert.equal(manifest.files.find(item => item.path === ".synod/state.json").ownership, "record");
+  assert.equal(manifest.files.find(item => item.path === ".synod/events.jsonl").ownership, "record");
+  assert.equal(manifest.files.find(item => item.path === "docs/synod/STATUS.md").ownership, "record");
   assert.match(manifest.files.find(item => item.path === ".codex/config.toml").contentHash, /^sha256:[0-9a-f]{64}$/);
   assert.equal(manifest.files.find(item => item.path === "AGENTS.md").separatorBefore, "");
 
@@ -72,7 +75,7 @@ test("is idempotent when generated files are unchanged", async () => {
   assert.equal(second.created.length, 0);
   assert.equal(second.updated.length, 0);
   assert.equal(second.operations.length, 0);
-  assert.equal(second.preserved.length, 5);
+  assert.equal(second.preserved.length, 8);
   assert.equal(second.unchanged.length + second.preserved.length, first.created.length);
 });
 

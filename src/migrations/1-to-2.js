@@ -63,6 +63,7 @@ export async function migrateManifest1To2(targetDirectory, legacy) {
   }
 
   return createManifest({
+    schemaVersion: 2,
     templateVersion: legacy.templateVersion,
     profile: "synod-5.6",
     files: files.filter(entry => entry.contentHash),

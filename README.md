@@ -40,15 +40,15 @@ synod init --dry-run
 synod init --force
 ```
 
-Synod preserves an existing user-owned `.codex/config.toml`. It reports the file so you can merge the recommended model and agent defaults deliberately. It also never overwrites the durable project memory under `docs/synod/`, even with `--force`.
+Synod preserves an existing user-owned `.codex/config.toml`. It reports the file so you can merge the recommended model and agent defaults deliberately. It also never overwrites the user-owned goal, plan, state notes, decisions, or worklog under `docs/synod/`, even with `--force`; only the generated `STATUS.md` record is updated by orchestration commands.
 
 If `AGENTS.md` contains multiple complete Synod managed blocks, initialization stops without writing. `synod init --force` consolidates those blocks into one canonical block and preserves surrounding user content. Incomplete, nested, or orphaned Synod markers are always rejected because their ownership boundary cannot be repaired safely.
 
-The generated `docs/synod/` files are the durable project record. They are user-owned after creation: upgrades and uninstall preserve them. Git and runtime evidence remain authoritative when a checkpoint is stale.
+Synod keeps canonical orchestration state in `.synod/state.json`, an append-only audit stream in `.synod/events.jsonl`, and a generated human view in `docs/synod/STATUS.md`. Goal, decision, plan, state-note, and worklog Markdown remain user-owned supporting context. Upgrades and uninstall preserve both kinds of durable records.
 
 ## Safe project lifecycle
 
-Every installation records `.synod/manifest.json` schema 2 with the template version, selected profile, ownership, and a normalized SHA-256 hash for each managed path. Synod owns its generated infrastructure, shares ownership of only the marked block in `AGENTS.md`, and treats durable project state as user-owned.
+Every installation records `.synod/manifest.json` schema 3 with the template version, selected profile, ownership, and a normalized SHA-256 hash for each managed path. Synod owns its generated infrastructure, shares ownership of only the marked block in `AGENTS.md`, and classifies canonical state, its event log, and the generated status view as mutable durable records that are preserved on uninstall.
 
 Verify project integrity and runtime capabilities:
 
@@ -77,7 +77,60 @@ synod uninstall --dry-run
 synod uninstall
 ```
 
-Schema 1 manifests from v0.3.0 through v0.3.2 migrate through an explicit `1 → 2` migration. Their published template hashes are used as baselines so drift is detected before upgrade.
+Schema 1 manifests from v0.3.0 through v0.3.2 migrate through explicit `1 → 2 → 3` migrations. Schema 2 v0.4 projects migrate through `2 → 3`. Published legacy template hashes remain the baseline so drift is detected before upgrade.
+
+## Enforced orchestration
+
+Create an atomic task with every field required before execution:
+
+```bash
+synod task add T-001 \
+  --objective "Implement the API contract" \
+  --executor synod_implementer \
+  --acceptance "The documented success and failure cases pass" \
+  --verification "pnpm test"
+```
+
+Acceptance criteria, verification commands, evidence, and dependencies are repeatable options. Use `--depends-on T-000` for prerequisites and `--cwd <directory>` outside the project root.
+
+Task state follows a validated graph:
+
+```text
+PLANNED → READY → ACTIVE → REVIEW → ACCEPTED → VERIFIED → DONE
+                         ↘ ACTIVE (correction)
+```
+
+Non-terminal tasks can be blocked or superseded. A blocked task can resume only its recorded prior state. Terminal tasks cannot transition.
+
+Every transition requires an exact task revision. Submitting work from `ACTIVE` to `REVIEW` advances it by one and requires delivery evidence. Acceptance and verification each require separate evidence tied to that same revision. Returning reviewed, accepted, or verified work to `ACTIVE` increments the correction round and clears current acceptance and verification:
+
+```bash
+synod task transition T-001 READY --revision 0
+synod task transition T-001 ACTIVE --revision 0
+synod task transition T-001 REVIEW --revision 1 --evidence "commit:abc123"
+synod task transition T-001 ACCEPTED --revision 1 --evidence "review:approved"
+synod task transition T-001 VERIFIED --revision 1 --evidence "test:pnpm-test:pass"
+synod task transition T-001 DONE --revision 1
+```
+
+Each evidence item also captures the Git branch, exact `HEAD`, and content-sensitive working-tree fingerprint observed for that event. State mutations hold an exclusive project lock, validate the complete event hash chain, append one event, and atomically replace state plus its Markdown projection.
+
+Task mutations do not move the canonical checkpoint, so they cannot silently accept repository drift. Only `synod checkpoint` changes the acknowledged branch, `HEAD`, and working-tree fingerprint.
+
+Read actual state and compare its last checkpoint with the current repository:
+
+```bash
+synod status
+synod status --json
+```
+
+`status` exits non-zero with `SYNOD_CHECKPOINT_DRIFT` when branch, `HEAD`, or relevant working-tree content differs. Synod-owned infrastructure and orchestration records are excluded so Synod does not create its own drift. After investigating a deliberate change, accept it explicitly:
+
+```bash
+synod checkpoint --message "Accepted the integrated revision"
+```
+
+Do not hand-edit `.synod/state.json`, `.synod/events.jsonl`, or `docs/synod/STATUS.md`. A broken event sequence, hash chain, state/log match, or Markdown projection fails closed.
 
 ## Token usage by model
 
@@ -110,7 +163,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
   "data": {},
   "warnings": [],
   "diagnostics": {
-    "synodVersion": "0.4.0",
+    "synodVersion": "0.5.0",
     "nodeVersion": "24.12.0",
     "platform": "darwin",
     "codexVersion": "0.142.0"
@@ -120,7 +173,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
 
 Failures set `ok` to `false`, omit `data`, include `error: { code, message, details? }`, and return a non-zero exit status. Warnings use `{ code, message, details? }`. Codes are stable within schema version 1.
 
-Lifecycle errors include stable codes for invalid/unsupported manifests, required upgrades, conflicts, unsafe paths, destination races, transaction rollback, and unsupported downgrades. Existing command, App Server, session, and JSON codes remain stable within envelope schema version 1.
+Lifecycle errors include stable codes for invalid/unsupported manifests, required upgrades, conflicts, unsafe paths, destination races, transaction rollback, and unsupported downgrades. Orchestration errors identify invalid state/logs, state-log mismatch, held locks, invalid tasks or transitions, stale revisions, missing evidence, and checkpoint drift. Existing command, App Server, session, and JSON codes remain stable within envelope schema version 1.
 
 Warnings identify preserved user state, available upgrades, missing user-owned files, incompatible profiles, unsupported Codex versions, and bounded App Server cleanup fallbacks.
 

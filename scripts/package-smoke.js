@@ -78,6 +78,27 @@ try {
   if (checkEnvelope.ok !== true || checkEnvelope.data.healthy !== true) {
     throw new Error(`Installed CLI failed its project check: ${checkOutput}`);
   }
+  const statusOutput = run(synodExecutable, ["status", targetDirectory, "--json"], {
+    cwd: consumerDirectory,
+    capture: true,
+  });
+  const statusEnvelope = JSON.parse(statusOutput);
+  if (statusEnvelope.ok !== true || statusEnvelope.data.healthy !== true || statusEnvelope.data.eventCount !== 1) {
+    throw new Error(`Installed CLI returned an invalid orchestration status: ${statusOutput}`);
+  }
+  const taskOutput = run(synodExecutable, [
+    "task", "add", "T-001",
+    "--objective", "Package smoke task",
+    "--executor", "synod_implementer",
+    "--acceptance", "Canonical task is persisted",
+    "--verification", "synod status",
+    "--cwd", targetDirectory,
+    "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  const taskEnvelope = JSON.parse(taskOutput);
+  if (taskEnvelope.ok !== true || taskEnvelope.data.task.id !== "T-001" || taskEnvelope.data.lastEvent.sequence !== 2) {
+    throw new Error(`Installed CLI failed its orchestration task smoke: ${taskOutput}`);
+  }
   const upgradeOutput = run(synodExecutable, ["upgrade", targetDirectory, "--dry-run", "--json"], {
     cwd: consumerDirectory,
     capture: true,
