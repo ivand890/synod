@@ -22,6 +22,7 @@ import { migrateManifest } from "./migrations/index.js";
 import { packageVersion } from "./package.js";
 import { DEFAULT_PROFILE, getProfile } from "./profiles.js";
 import {
+  agentsBlockSeparator,
   appendAgentsBlock,
   extractManagedAgentsBlock,
   findManagedAgentsBlocks,
@@ -89,8 +90,8 @@ function resultFromPlan(targetDirectory, dryRun, operations, states, warnings, c
   };
 }
 
-function addManifestEntry(entries, pathValue, ownership, hash, provenance = "installed") {
-  entries.set(pathValue, { path: pathValue, ownership, contentHash: hash, provenance });
+function addManifestEntry(entries, pathValue, ownership, hash, provenance = "installed", extra = {}) {
+  entries.set(pathValue, { path: pathValue, ownership, contentHash: hash, provenance, ...extra });
 }
 
 async function planAgentsInit(targetDirectory, block, force, previousEntry) {
@@ -106,13 +107,19 @@ async function planAgentsInit(targetDirectory, block, force, previousEntry) {
     return {
       inspected,
       content,
+      separatorBefore: agentsBlockSeparator(existing),
       state: { path: "AGENTS.md", action: inspected.type === "missing" ? "create" : "update" }
     };
   }
   if (blocks.length > 1 && !force) return { inspected, state: { path: "AGENTS.md", conflict: true } };
   const managed = extractManagedAgentsBlock(existing);
   if (blocks.length === 1 && normalizeText(managed.content) === normalizeText(block)) {
-    return { inspected, content: existing, state: { path: "AGENTS.md", action: "unchanged" } };
+    return {
+      inspected,
+      content: existing,
+      separatorBefore: previousEntry?.separatorBefore,
+      state: { path: "AGENTS.md", action: "unchanged" }
+    };
   }
   if (previousEntry && blocks.length === 1 && contentHash(managed.content) !== previousEntry.contentHash && !force) {
     return { inspected, state: { path: "AGENTS.md", conflict: true } };
@@ -121,6 +128,7 @@ async function planAgentsInit(targetDirectory, block, force, previousEntry) {
   return {
     inspected,
     content: replaceAgentsBlocks(existing, block),
+    separatorBefore: previousEntry?.separatorBefore,
     state: { path: "AGENTS.md", action: "update" },
     warning: blocks.length > 1
       ? warning(
@@ -170,7 +178,14 @@ export async function initProject(
     if (["create", "update"].includes(agentsPlan.state.action)) {
       operations.push(operationForWrite("AGENTS.md", agentsPlan.content, agentsPlan.inspected));
     }
-    addManifestEntry(entries, "AGENTS.md", "shared", contentHash(templates.agentsBlock));
+    addManifestEntry(
+      entries,
+      "AGENTS.md",
+      "shared",
+      contentHash(templates.agentsBlock),
+      previous.get("AGENTS.md")?.provenance || "installed",
+      agentsPlan.separatorBefore === undefined ? {} : { separatorBefore: agentsPlan.separatorBefore }
+    );
   }
   if (agentsPlan.warning) warnings.push(agentsPlan.warning);
 
@@ -284,7 +299,14 @@ export async function upgradeProject(
     if (["create", "update"].includes(agentsPlan.state.action)) {
       operations.push(operationForWrite("AGENTS.md", agentsPlan.content, agentsPlan.inspected));
     }
-    addManifestEntry(nextEntries, "AGENTS.md", "shared", contentHash(templates.agentsBlock));
+    addManifestEntry(
+      nextEntries,
+      "AGENTS.md",
+      "shared",
+      contentHash(templates.agentsBlock),
+      previous.get("AGENTS.md")?.provenance || "installed",
+      agentsPlan.separatorBefore === undefined ? {} : { separatorBefore: agentsPlan.separatorBefore }
+    );
   }
   if (agentsPlan.warning) warnings.push(agentsPlan.warning);
 
@@ -491,7 +513,7 @@ export async function uninstallProject(
         conflicts.push(entry.path);
         continue;
       }
-      const content = removeAgentsBlocks(inspected.content);
+      const content = removeAgentsBlocks(inspected.content, { separatorBefore: entry.separatorBefore });
       if (content.length === 0) {
         states.push({ path: entry.path, action: "remove" });
         operations.push(operationForDelete(entry.path, inspected));

@@ -87,6 +87,12 @@ export function validateManifest(manifest, { allowLegacy = true } = {}) {
     if (typeof entry.contentHash !== "string" || !/^sha256:[0-9a-f]{64}$/.test(entry.contentHash)) {
       throw new SynodError(ERROR_CODES.MANIFEST_INVALID, `Invalid content hash for ${entry.path}.`);
     }
+    if (
+      entry.separatorBefore !== undefined
+      && (entry.path !== "AGENTS.md" || !["", "\n", "\n\n"].includes(entry.separatorBefore))
+    ) {
+      throw new SynodError(ERROR_CODES.MANIFEST_INVALID, `Invalid managed separator for ${entry.path}.`);
+    }
     seen.add(entry.path);
   }
   return manifest;

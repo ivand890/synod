@@ -56,6 +56,24 @@ test("initialization detects a destination race immediately before mutation", as
   assert.deepEqual(await readdir(directory), ["AGENTS.md"]);
 });
 
+test("rollback preserves content changed after an earlier transaction write", async () => {
+  const directory = await temporaryProject();
+  const agentsPath = path.join(directory, "AGENTS.md");
+
+  await assert.rejects(
+    initProject({ directory }, {
+      async transactionHook(_operation, index) {
+        if (index === 0) await writeFile(agentsPath, "concurrent owner\n", "utf8");
+        if (index === 1) throw new Error("injected failure after concurrent edit");
+      }
+    }),
+    error => error.code === ERROR_CODES.ROLLBACK_FAILED
+      && error.details.rollbackFailures.some(item => item.path === "AGENTS.md")
+  );
+
+  assert.equal(await readFile(agentsPath, "utf8"), "concurrent owner\n");
+});
+
 test("check permits user drift and rejects Synod-owned drift", async () => {
   const directory = await temporaryProject();
   await initProject({ directory, profile: "portable" });
@@ -106,6 +124,21 @@ test("uninstall removes owned infrastructure and preserves user state and AGENTS
   await assert.rejects(readFile(path.join(directory, ".synod/manifest.json"), "utf8"), { code: "ENOENT" });
   await assert.rejects(readdir(path.join(directory, ".agents")), { code: "ENOENT" });
   await assert.rejects(readdir(path.join(directory, ".codex")), { code: "ENOENT" });
+});
+
+test("uninstall preserves whitespace and trailing spaces outside the managed AGENTS block", async () => {
+  const directory = await temporaryProject();
+  const agentsPath = path.join(directory, "AGENTS.md");
+  const userAgents = "# A\n\n\n\n# B  \n\n";
+  await writeFile(agentsPath, userAgents, "utf8");
+  await initProject({ directory, profile: "portable" });
+
+  const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
+  assert.equal(manifest.files.find(item => item.path === "AGENTS.md").separatorBefore, "");
+
+  await uninstallProject({ directory });
+
+  assert.equal(await readFile(agentsPath, "utf8"), userAgents);
 });
 
 test("uninstall refuses modified Synod-owned files without removing anything", async () => {

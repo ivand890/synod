@@ -108,8 +108,12 @@ export function extractManagedAgentsBlock(content) {
   return { blocks, content: content.slice(blocks[0].start, blocks[0].end) };
 }
 
+export function agentsBlockSeparator(existing) {
+  return existing.length === 0 || existing.endsWith("\n\n") ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
+}
+
 export function appendAgentsBlock(existing, block) {
-  const separator = existing.length === 0 || existing.endsWith("\n\n") ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
+  const separator = agentsBlockSeparator(existing);
   return `${existing}${separator}${block}\n`;
 }
 
@@ -126,14 +130,21 @@ export function replaceAgentsBlocks(existing, block) {
   return content + existing.slice(cursor);
 }
 
-export function removeAgentsBlocks(existing) {
+export function removeAgentsBlocks(existing, { separatorBefore } = {}) {
   const managedBlocks = findManagedAgentsBlocks(existing);
-  let content = "";
-  let cursor = 0;
-  for (const managed of managedBlocks) {
-    content += existing.slice(cursor, managed.start);
-    cursor = managed.end;
+  let content = existing;
+  for (const managed of [...managedBlocks].reverse()) {
+    let start = managed.start;
+    let end = managed.end;
+    if (
+      managedBlocks.length === 1
+      && separatorBefore !== undefined
+      && existing.slice(start - separatorBefore.length, start) === separatorBefore
+    ) {
+      start -= separatorBefore.length;
+    }
+    if (existing[end] === "\n") end += 1;
+    content = content.slice(0, start) + content.slice(end);
   }
-  content += existing.slice(cursor);
-  return content.replaceAll(/\n{3,}/g, "\n\n").trimEnd() + (content.trim().length > 0 ? "\n" : "");
+  return content;
 }

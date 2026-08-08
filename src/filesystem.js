@@ -77,7 +77,7 @@ function matchesExpected(actual, expected) {
 
 async function writeTemporary(targetPath, content, mode) {
   const temporaryPath = path.join(path.dirname(targetPath), `.synod-tmp-${randomUUID()}`);
-  const handle = await open(temporaryPath, "wx", mode ?? 0o600);
+  const handle = await open(temporaryPath, "wx", mode ?? 0o666);
   try {
     await handle.writeFile(content, "utf8");
     await handle.sync();
@@ -92,10 +92,24 @@ async function rollbackJournal(journal, createdDirectories) {
   const failures = [];
   for (const entry of [...journal].reverse()) {
     try {
-      const targetType = await pathType(entry.targetPath);
-      if (entry.targetMutated && targetType === "file") await unlink(entry.targetPath);
-      if (entry.backupPath && await pathType(entry.backupPath) === "file") {
-        await rename(entry.backupPath, entry.targetPath);
+      if (entry.targetMutated) {
+        const actual = await inspectPath(entry.targetPath);
+        const alreadyRemoved = !entry.backupPath
+          && entry.appliedExpected?.type === "file"
+          && actual.type === "missing";
+        if (!alreadyRemoved && !matchesExpected(actual, entry.appliedExpected)) {
+          failures.push({
+            path: entry.relativePath,
+            message: "Destination changed after Synod mutated it; concurrent content was preserved.",
+            expected: entry.appliedExpected,
+            actual: { type: actual.type, hash: actual.hash }
+          });
+        } else {
+          if (actual.type === "file") await unlink(entry.targetPath);
+          if (entry.backupPath && await pathType(entry.backupPath) === "file") {
+            await rename(entry.backupPath, entry.targetPath);
+          }
+        }
       }
       if (entry.temporaryPath && await pathType(entry.temporaryPath) === "file") {
         await unlink(entry.temporaryPath);
@@ -159,7 +173,8 @@ export async function applyTransaction(targetDirectory, operations, { beforeMuta
         targetPath,
         backupPath: undefined,
         temporaryPath: undefined,
-        targetMutated: false
+        targetMutated: false,
+        appliedExpected: undefined
       };
 
       if (operation.action === "write") {
@@ -178,9 +193,11 @@ export async function applyTransaction(targetDirectory, operations, { beforeMuta
           entry.backupPath = path.join(path.dirname(targetPath), `.synod-backup-${randomUUID()}`);
           await rename(targetPath, entry.backupPath);
           entry.targetMutated = true;
+          entry.appliedExpected = { type: "missing" };
         }
         await rename(entry.temporaryPath, targetPath);
         entry.targetMutated = true;
+        entry.appliedExpected = { type: "file", hash: contentHash(operation.content) };
         entry.temporaryPath = undefined;
       } else if (operation.action === "delete") {
         if (actual.type !== "file") {
@@ -190,6 +207,7 @@ export async function applyTransaction(targetDirectory, operations, { beforeMuta
         entry.backupPath = path.join(path.dirname(targetPath), `.synod-backup-${randomUUID()}`);
         await rename(targetPath, entry.backupPath);
         entry.targetMutated = true;
+        entry.appliedExpected = { type: "missing" };
       } else {
         throw new TypeError(`Unknown transaction action: ${operation.action}`);
       }

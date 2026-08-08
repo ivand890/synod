@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -46,6 +46,11 @@ test("initializes a fresh project with durable state, agents, and skill", async 
   assert.equal(manifest.files.find(item => item.path === "AGENTS.md").ownership, "shared");
   assert.equal(manifest.files.find(item => item.path === "docs/synod/GOAL.md").ownership, "user");
   assert.match(manifest.files.find(item => item.path === ".codex/config.toml").contentHash, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(manifest.files.find(item => item.path === "AGENTS.md").separatorBefore, "");
+
+  const expectedFileMode = 0o666 & ~process.umask();
+  assert.equal((await stat(path.join(directory, "AGENTS.md"))).mode & 0o777, expectedFileMode);
+  assert.equal((await stat(path.join(directory, ".synod/manifest.json"))).mode & 0o777, expectedFileMode);
 
   const config = await readFile(path.join(directory, ".codex/config.toml"), "utf8");
   assert.match(config, /default_subagent_model = "gpt-5\.5"/);
@@ -73,14 +78,17 @@ test("is idempotent when generated files are unchanged", async () => {
 
 test("appends a managed block without replacing existing AGENTS.md guidance", async () => {
   const directory = await temporaryProject();
-  await writeFile(path.join(directory, "AGENTS.md"), "# Existing guidance\n\n- Keep this rule.\n", "utf8");
+  const agentsPath = path.join(directory, "AGENTS.md");
+  await writeFile(agentsPath, "# Existing guidance\n\n- Keep this rule.\n", "utf8");
+  await chmod(agentsPath, 0o640);
 
   await initProject({ directory });
 
-  const agents = await readFile(path.join(directory, "AGENTS.md"), "utf8");
+  const agents = await readFile(agentsPath, "utf8");
   assert.match(agents, /^# Existing guidance/m);
   assert.match(agents, /- Keep this rule\./);
   assert.equal(agents.match(/<!-- synod:start -->/g).length, 1);
+  assert.equal((await stat(agentsPath)).mode & 0o777, 0o640);
 });
 
 test("reports conflicts before writing any new files", async () => {
