@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-07
+
+### Added
+
+- Added a schema 2 ownership manifest with normalized SHA-256 hashes for Synod-owned files, the managed `AGENTS.md` block, and user-owned durable state.
+- Added transactional lifecycle writes with destination rechecks, atomic replacement, and rollback on partial failure.
+- Added `check`, `doctor`, versioned schema migrations, `upgrade --dry-run`, `upgrade`, and `uninstall`.
+- Added `synod-5.6` and `portable` model profiles plus live App Server model/reasoning capability detection.
+- Added an explicit Codex support contract: `>=0.142.0 <0.148.0`, with `0.142.0` and `0.147.0` tested as known-good in CI.
+
+### Changed
+
+- `init` now records ownership and hashes transactionally instead of installing a static manifest template.
+- Model-specific templates are rendered from the selected profile with `--profile`.
+- Fresh installs default to the conservative `portable` profile; legacy 0.3.x migrations retain `synod-5.6` unless changed explicitly.
+- Durable files under `docs/synod/` remain user-owned across checks, upgrades, and uninstall.
+
+### Security
+
+- Upgrade and uninstall refuse to overwrite or remove drifted Synod-owned content unless `--force` is explicit.
+- Legacy schema 1 projects use published v0.3.0-v0.3.2 hash baselines during migration so local modifications are not silently adopted.
+
 ## [0.3.2] - 2026-08-06
 
 ### Added
@@ -40,7 +62,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/ivand890/synod/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/ivand890/synod/releases/tag/v0.3.2
 [0.3.1]: https://github.com/ivand890/synod/releases/tag/v0.3.1
 [0.3.0]: https://www.npmjs.com/package/@ivand890/synod/v/0.3.0

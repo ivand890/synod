@@ -1,4 +1,4 @@
 interface:
   display_name: "Synod Advisor"
   short_description: "Supervise cost-efficient atomic implementation"
-  default_prompt: "Use $synod-advisor so Sol supervises and reviews atomic implementation delegated to Luna Max."
+  default_prompt: "Use $synod-advisor so the configured supervisor reviews atomic implementation delegated to the selected worker profile."

@@ -1,11 +1,11 @@
 ---
 name: synod-advisor
-description: Run or resume Synod's persistent, cost-efficient advisor loop for complex Codex projects. Use when Sol should supervise architecture, planning, review, and verification while delegating atomic implementation to Luna Max or another cheaper worker, when work spans multiple phases or sessions, or when the project must advance through documented checkpoints and correction rounds.
+description: Run or resume Synod's persistent, cost-efficient advisor loop for complex Codex projects. Use when a supervising model should own architecture, planning, review, and verification while delegating atomic implementation to the configured worker profile, when work spans multiple phases or sessions, or when the project must advance through documented checkpoints and correction rounds.
 ---
 
 # Synod Advisor
 
-Advance the project to its next verified checkpoint. Keep Sol in the supervisory loop and move routine implementation to cost-efficient workers while treating Git and runtime evidence as authoritative.
+Advance the project to its next verified checkpoint. Keep the primary agent in the supervisory loop and move routine implementation to cost-efficient workers while treating Git and runtime evidence as authoritative.
 
 ## Load durable state
 
@@ -14,27 +14,27 @@ Advance the project to its next verified checkpoint. Keep Sol in the supervisory
 3. Compare observed state with `docs/synod/STATE.md`. Mark contradictions as drift and correct the checkpoint before relying on it.
 4. If `GOAL.md` still contains an undefined objective or completion criteria, establish them with the user before implementation.
 
-## Keep Sol in the advisor role
+## Keep the primary agent in the advisor role
 
-Keep the primary Sol agent responsible for the goal, architecture, plan, atomic task contracts, supervision, acceptance decisions, integration, and final verification. Do not use Sol as the routine implementation worker.
+Keep the primary agent responsible for the goal, architecture, plan, atomic task contracts, supervision, acceptance decisions, integration, and final verification. Do not use the supervising model as the routine implementation worker.
 
-Delegate implementation whenever the work can be expressed as an atomic contract. Let Sol implement only when:
+Delegate implementation whenever the work can be expressed as an atomic contract. Let the supervisor implement only when:
 
 - no suitable worker is available;
 - a tiny integration repair would cost more to delegate than to perform;
 - the task cannot be isolated after a genuine decomposition attempt.
 
-Record the reason for every Sol implementation exception in `STATE.md` or `DECISIONS.md`.
+Record the reason for every supervisor implementation exception in `STATE.md` or `DECISIONS.md`.
 
 Prefer these project agents:
 
-- `synod_implementer` for atomic implementation with Luna Max. Use this worker by default.
+- `synod_implementer` for atomic implementation with the selected profile's cost-efficient worker. Use this worker by default.
 - `synod_explorer` for read-heavy mapping and evidence gathering.
 - `synod_reviewer` for correctness, security, regressions, and test gaps.
 - `synod_verifier` for an independent attempt to refute completion.
 - `synod_mechanical` for clear, repetitive, high-volume read-only checks.
 
-Escalate implementation from Luna Max to Terra High only after the task proves insufficiently specified, Luna returns a justified capability blocker, or two focused correction rounds fail. If a named agent or model is unavailable, use the closest cost-efficient agent with the same permission boundary and record the substitution in `STATE.md`.
+Escalate implementation to the configured higher-capability profile only after the task proves insufficiently specified, the worker returns a justified capability blocker, or two focused correction rounds fail. If a named model is unavailable, run `synod doctor`, select a compatible profile, apply it with `synod upgrade [directory] --profile <id>` so the generated `.codex` configuration and agents are updated, and then record the substitution in `STATE.md`.
 
 ## Delegate with a contract
 
@@ -48,21 +48,21 @@ Before any implementation, give the worker a stable task ID from `PLAN.md` and i
 - required evidence and output format;
 - instruction not to expand scope or declare the parent goal complete.
 
-Use at most three concurrent subagents. Maintain one active writer per worktree. For parallel implementation, use separate worktrees and disjoint write scopes. While `synod_implementer` is editing a worktree, Sol must supervise rather than edit the same files.
+Use at most three concurrent subagents. Maintain one active writer per worktree. For parallel implementation, use separate worktrees and disjoint write scopes. While `synod_implementer` is editing a worktree, the primary agent must supervise rather than edit the same files.
 
 ## Review in a closed loop
 
 Treat implementation output as a proposal, never as acceptance.
 
-1. Let Luna Max implement the atomic task and return changed paths, diff summary, tests, and uncertainties.
-2. Have Sol inspect the actual diff against the contract and check for unrelated changes.
-3. Have Sol run or reproduce the relevant deterministic verification instead of trusting the worker's claim.
+1. Let the configured implementer complete the atomic task and return changed paths, diff summary, tests, and uncertainties.
+2. Have the supervisor inspect the actual diff against the contract and check for unrelated changes.
+3. Have the supervisor run or reproduce the relevant deterministic verification instead of trusting the worker's claim.
 4. If incomplete, send only the missing delta to the same worker.
-5. Allow at most two correction rounds. Then split the task, escalate to Terra, or mark it blocked.
-6. Let Sol accept and integrate only after the implementation and evidence satisfy the contract.
-7. Move tasks through `PLANNED`, `READY`, `ACTIVE`, `REVIEW`, `ACCEPTED`, `VERIFIED`, and `DONE`. Only Sol changes acceptance states.
+5. Allow at most two correction rounds. Then split the task, escalate the profile, or mark it blocked.
+6. Let the supervisor accept and integrate only after the implementation and evidence satisfy the contract.
+7. Move tasks through `PLANNED`, `READY`, `ACTIVE`, `REVIEW`, `ACCEPTED`, `VERIFIED`, and `DONE`. Only the supervisor changes acceptance states.
 
-After integration, use `synod_verifier` when an independent pass materially reduces risk. Sol adjudicates its `PASS`, `FAIL`, or `INCONCLUSIVE` result and performs the final deterministic checks directly.
+After integration, use `synod_verifier` when an independent pass materially reduces risk. The supervisor adjudicates its `PASS`, `FAIL`, or `INCONCLUSIVE` result and performs the final deterministic checks directly.
 
 ## Respect risk boundaries
 

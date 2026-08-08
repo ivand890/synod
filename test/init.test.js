@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -39,16 +39,26 @@ test("initializes a fresh project with durable state, agents, and skill", async 
   assert.match(agents, /\$synod-advisor/);
 
   const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
-  assert.equal(manifest.schemaVersion, 1);
+  assert.equal(manifest.schemaVersion, 2);
   assert.equal(manifest.templateVersion, packageVersion);
+  assert.equal(manifest.profile, "portable");
+  assert.equal(manifest.hashAlgorithm, "sha256");
+  assert.equal(manifest.files.find(item => item.path === "AGENTS.md").ownership, "shared");
+  assert.equal(manifest.files.find(item => item.path === "docs/synod/GOAL.md").ownership, "user");
+  assert.match(manifest.files.find(item => item.path === ".codex/config.toml").contentHash, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(manifest.files.find(item => item.path === "AGENTS.md").separatorBefore, "");
+
+  const expectedFileMode = 0o666 & ~process.umask();
+  assert.equal((await stat(path.join(directory, "AGENTS.md"))).mode & 0o777, expectedFileMode);
+  assert.equal((await stat(path.join(directory, ".synod/manifest.json"))).mode & 0o777, expectedFileMode);
 
   const config = await readFile(path.join(directory, ".codex/config.toml"), "utf8");
-  assert.match(config, /default_subagent_model = "gpt-5\.6-luna"/);
-  assert.match(config, /default_subagent_reasoning_effort = "max"/);
+  assert.match(config, /default_subagent_model = "gpt-5\.5"/);
+  assert.match(config, /default_subagent_reasoning_effort = "high"/);
 
   const implementer = await readFile(path.join(directory, ".codex/agents/synod-implementer.toml"), "utf8");
-  assert.match(implementer, /model = "gpt-5\.6-luna"/);
-  assert.match(implementer, /model_reasoning_effort = "max"/);
+  assert.match(implementer, /model = "gpt-5\.5"/);
+  assert.match(implementer, /model_reasoning_effort = "high"/);
   assert.match(implementer, /sandbox_mode = "workspace-write"/);
 });
 
@@ -61,19 +71,53 @@ test("is idempotent when generated files are unchanged", async () => {
   assert.equal(second.conflicts.length, 0);
   assert.equal(second.created.length, 0);
   assert.equal(second.updated.length, 0);
-  assert.equal(second.unchanged.length, first.created.length);
+  assert.equal(second.operations.length, 0);
+  assert.equal(second.preserved.length, 5);
+  assert.equal(second.unchanged.length + second.preserved.length, first.created.length);
+});
+
+test("repeated init preserves missing user-owned durable state", async () => {
+  const directory = await temporaryProject();
+  const goalPath = path.join(directory, "docs/synod/GOAL.md");
+  await initProject({ directory });
+  await rm(goalPath);
+
+  const result = await initProject({ directory });
+
+  assert.ok(result.preserved.includes("docs/synod/GOAL.md"));
+  assert.ok(!result.created.includes("docs/synod/GOAL.md"));
+  assert.ok(result.warnings.some(item => item.code === WARNING_CODES.USER_OWNED_FILE_MISSING));
+  await assert.rejects(readFile(goalPath, "utf8"), { code: "ENOENT" });
+});
+
+test("repeated init does not reclassify modified Synod config as user-owned", async () => {
+  const directory = await temporaryProject();
+  const configPath = path.join(directory, ".codex/config.toml");
+  const manifestPath = path.join(directory, ".synod/manifest.json");
+  await initProject({ directory });
+  await writeFile(configPath, "model = \"custom-model\"\n", "utf8");
+
+  const result = await initProject({ directory });
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+
+  assert.ok(result.conflicts.includes(".codex/config.toml"));
+  assert.equal(manifest.files.find(item => item.path === ".codex/config.toml").ownership, "synod");
+  assert.equal(await readFile(configPath, "utf8"), "model = \"custom-model\"\n");
 });
 
 test("appends a managed block without replacing existing AGENTS.md guidance", async () => {
   const directory = await temporaryProject();
-  await writeFile(path.join(directory, "AGENTS.md"), "# Existing guidance\n\n- Keep this rule.\n", "utf8");
+  const agentsPath = path.join(directory, "AGENTS.md");
+  await writeFile(agentsPath, "# Existing guidance\n\n- Keep this rule.\n", "utf8");
+  await chmod(agentsPath, 0o640);
 
   await initProject({ directory });
 
-  const agents = await readFile(path.join(directory, "AGENTS.md"), "utf8");
+  const agents = await readFile(agentsPath, "utf8");
   assert.match(agents, /^# Existing guidance/m);
   assert.match(agents, /- Keep this rule\./);
   assert.equal(agents.match(/<!-- synod:start -->/g).length, 1);
+  assert.equal((await stat(agentsPath)).mode & 0o777, 0o640);
 });
 
 test("reports conflicts before writing any new files", async () => {
@@ -101,7 +145,7 @@ test("force replaces Synod infrastructure but preserves config and durable state
   const result = await initProject({ directory, force: true });
 
   assert.equal(result.conflicts.length, 0);
-  assert.ok(result.unchanged.includes("docs/synod/GOAL.md"));
+  assert.ok(result.preserved.includes("docs/synod/GOAL.md"));
   assert.equal(result.warnings.filter(item => item.message.includes("Preserved")).length, 2);
   assert.equal(await readFile(configPath, "utf8"), "model = \"custom-model\"\n");
   assert.equal(await readFile(goalPath, "utf8"), "stale generated content\n");
@@ -142,7 +186,7 @@ test("rejects symbolic links in generated destination ancestors", async () => {
   await assert.rejects(readFile(path.join(directory, "AGENTS.md"), "utf8"), { code: "ENOENT" });
 });
 
-test("keeps Sol supervisory and delegates routine implementation to Luna Max", async () => {
+test("keeps the primary agent supervisory and delegates routine implementation", async () => {
   const directory = await temporaryProject();
   await initProject({ directory });
 
@@ -150,9 +194,9 @@ test("keeps Sol supervisory and delegates routine implementation to Luna Max", a
   const agents = await readFile(path.join(directory, "AGENTS.md"), "utf8");
   const decisions = await readFile(path.join(directory, "docs/synod/DECISIONS.md"), "utf8");
 
-  assert.match(skill, /Do not use Sol as the routine implementation worker\./);
-  assert.match(skill, /synod_implementer.*Luna Max/);
-  assert.match(agents, /Do not use Sol as the default implementation worker\./);
+  assert.match(skill, /Do not use the supervising model as the routine implementation worker\./);
+  assert.match(skill, /synod_implementer.*selected profile/);
+  assert.match(agents, /Do not use the supervising model as the default implementation worker\./);
   assert.match(decisions, /Cost-efficient agents perform implementation/);
 });
 

@@ -16,14 +16,14 @@ Initialize the durable project goal and execution plan.
 - Build command: unknown
 - Test command: unknown
 - Required tools and services: unchecked
-- Luna Max implementation worker: unchecked
+- Configured implementation worker: unchecked
 - External credentials: unverified
 - Pre-existing user changes: unchecked
 
 ## Verified facts
 
 - Synod project files were initialized at template version __SYNOD_VERSION__.
-- Sol is the supervising advisor; atomic implementation defaults to Luna Max.
+- The selected model profile is __SYNOD_PROFILE__; the primary agent supervises atomic implementation.
 
 ## Active delegations
 

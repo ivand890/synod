@@ -20,7 +20,7 @@ test("the installed entry point initializes a target directory", async () => {
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Synod initialized/);
+    assert.match(result.stdout, /Synod init completed/);
     assert.match(await readFile(path.join(directory, "docs/synod/PLAN.md"), "utf8"), /Synod Execution Plan/);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -36,6 +36,8 @@ test("prints version and help", () => {
   assert.equal(help.status, 0);
   assert.match(help.stdout, /synod init/);
   assert.match(help.stdout, /synod usage/);
+  assert.match(help.stdout, /synod upgrade/);
+  assert.match(help.stdout, /synod doctor/);
 });
 
 test("init emits versioned JSON for success and conflicts", async () => {
@@ -80,4 +82,44 @@ test("unknown commands emit stable JSON errors when requested", async () => {
   assert.equal(status, 1);
   assert.equal(envelope.ok, false);
   assert.equal(envelope.error.code, ERROR_CODES.UNKNOWN_COMMAND);
+});
+
+test("check and doctor emit failure JSON when their health gates fail", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-health-json-test-"));
+  const messages = [];
+  const output = { log: message => messages.push(message), warn() {}, error() {} };
+
+  try {
+    await run(["init", directory], output);
+    messages.length = 0;
+    await writeFile(path.join(directory, ".codex/agents/synod-reviewer.toml"), "drift\n", "utf8");
+
+    const checkStatus = await run(["check", directory, "--json"], output);
+    const check = JSON.parse(messages.shift());
+    assert.equal(checkStatus, 1);
+    assert.equal(check.ok, false);
+    assert.equal(check.error.code, ERROR_CODES.CHECK_FAILED);
+
+    const doctorStatus = await run(["doctor", directory, "--json"], output, {
+      doctorClientFactory: () => ({
+        async start() {},
+        async probeCapabilities() {},
+        async listModels() { return []; },
+        async close() {},
+        getWarnings() { return []; },
+        getDiagnostics() {
+          return {
+            codexVersion: "0.148.0",
+            appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
+          };
+        }
+      })
+    });
+    const doctor = JSON.parse(messages.shift());
+    assert.equal(doctorStatus, 1);
+    assert.equal(doctor.ok, false);
+    assert.equal(doctor.error.code, ERROR_CODES.DOCTOR_FAILED);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
