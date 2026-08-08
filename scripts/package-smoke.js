@@ -15,11 +15,19 @@ const synodExecutable = path.join(
   ".bin",
   process.platform === "win32" ? "synod.cmd" : "synod",
 );
+const synodEntryPoint = path.join(
+  consumerDirectory,
+  "node_modules",
+  "@ivand890",
+  "synod",
+  "bin",
+  "synod.js",
+);
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
-    shell: process.platform === "win32",
+    shell: process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command),
     stdio: options.capture ? "pipe" : "inherit",
     ...options,
   });
@@ -31,6 +39,14 @@ function run(command, args, options = {}) {
   }
 
   return result.stdout?.trim();
+}
+
+function runSynod(args, options = {}) {
+  if (process.platform === "win32") {
+    return run(process.execPath, [synodEntryPoint, ...args], options);
+  }
+
+  return run(synodExecutable, args, options);
 }
 
 try {
@@ -62,7 +78,7 @@ try {
     throw new Error(`Expected version ${expectedVersion}, received ${installedVersion}.`);
   }
 
-  const initOutput = run(synodExecutable, ["init", targetDirectory, "--profile", "portable", "--json"], {
+  const initOutput = runSynod(["init", targetDirectory, "--profile", "portable", "--json"], {
     cwd: consumerDirectory,
     capture: true,
   });
@@ -70,7 +86,7 @@ try {
   if (envelope.schemaVersion !== 1 || envelope.ok !== true || envelope.command !== "init") {
     throw new Error(`Installed CLI returned an invalid JSON contract: ${initOutput}`);
   }
-  const checkOutput = run(synodExecutable, ["check", targetDirectory, "--json"], {
+  const checkOutput = runSynod(["check", targetDirectory, "--json"], {
     cwd: consumerDirectory,
     capture: true,
   });
@@ -78,7 +94,7 @@ try {
   if (checkEnvelope.ok !== true || checkEnvelope.data.healthy !== true) {
     throw new Error(`Installed CLI failed its project check: ${checkOutput}`);
   }
-  const statusOutput = run(synodExecutable, ["status", targetDirectory, "--json"], {
+  const statusOutput = runSynod(["status", targetDirectory, "--json"], {
     cwd: consumerDirectory,
     capture: true,
   });
@@ -86,7 +102,7 @@ try {
   if (statusEnvelope.ok !== true || statusEnvelope.data.healthy !== true || statusEnvelope.data.eventCount !== 1) {
     throw new Error(`Installed CLI returned an invalid orchestration status: ${statusOutput}`);
   }
-  const taskOutput = run(synodExecutable, [
+  const taskOutput = runSynod([
     "task", "add", "T-001",
     "--objective", "Package smoke task",
     "--executor", "synod_implementer",
@@ -99,7 +115,7 @@ try {
   if (taskEnvelope.ok !== true || taskEnvelope.data.task.id !== "T-001" || taskEnvelope.data.lastEvent.sequence !== 2) {
     throw new Error(`Installed CLI failed its orchestration task smoke: ${taskOutput}`);
   }
-  const upgradeOutput = run(synodExecutable, ["upgrade", targetDirectory, "--dry-run", "--json"], {
+  const upgradeOutput = runSynod(["upgrade", targetDirectory, "--dry-run", "--json"], {
     cwd: consumerDirectory,
     capture: true,
   });
@@ -107,7 +123,7 @@ try {
   if (upgradeEnvelope.ok !== true || upgradeEnvelope.data.conflicts.length !== 0) {
     throw new Error(`Installed CLI returned an invalid upgrade plan: ${upgradeOutput}`);
   }
-  const uninstallOutput = run(synodExecutable, ["uninstall", targetDirectory, "--dry-run", "--json"], {
+  const uninstallOutput = runSynod(["uninstall", targetDirectory, "--dry-run", "--json"], {
     cwd: consumerDirectory,
     capture: true,
   });
