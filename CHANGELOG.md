@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-08
+
+### Fixed
+
+- Kept `synod init --dry-run` read-only when preserved orchestration records contain a pending recovery journal.
+- Rejected inherited `Object.prototype` names as unexpected task arguments instead of interpreting them as CLI options.
+- Prevented stale-lock claim cleanup failures from masking the primary reclamation result.
+
 ## [0.5.0] - 2026-08-08
 
 ### Added
@@ -81,7 +89,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/ivand890/synod/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ivand890/synod/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ivand890/synod/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/ivand890/synod/releases/tag/v0.3.2

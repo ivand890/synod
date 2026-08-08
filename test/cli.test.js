@@ -86,6 +86,19 @@ test("unknown commands emit stable JSON errors when requested", async () => {
   assert.equal(envelope.error.code, ERROR_CODES.UNKNOWN_COMMAND);
 });
 
+test("task parsing rejects inherited Object.prototype names", async () => {
+  const messages = [];
+  const output = { log: message => messages.push(message), warn() {}, error() {} };
+
+  const status = await run(["task", "add", "T-001", "toString", "value", "--json"], output);
+  const envelope = JSON.parse(messages[0]);
+
+  assert.equal(status, 1);
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error.code, ERROR_CODES.UNEXPECTED_ARGUMENT);
+  assert.equal(envelope.error.details.argument, "toString");
+});
+
 test("check and doctor emit failure JSON when their health gates fail", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-health-json-test-"));
   const messages = [];

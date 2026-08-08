@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -124,6 +124,40 @@ test("check rejects inconsistent canonical orchestration records", async () => {
   assert.equal(orchestration.status, "invalid");
   assert.equal(orchestration.severity, "error");
   assert.equal(orchestration.code, ERROR_CODES.EVENT_LOG_INVALID);
+});
+
+test("init dry-run refuses pending orchestration recovery without writing", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory });
+  const statePath = path.join(directory, ".synod/state.json");
+  const eventsPath = path.join(directory, ".synod/events.jsonl");
+  const statusPath = path.join(directory, "docs/synod/STATUS.md");
+  const pendingPath = path.join(directory, ".synod/pending-mutation.json");
+  const stateContent = await readFile(statePath, "utf8");
+  const eventsContent = await readFile(eventsPath, "utf8");
+  const statusContent = await readFile(statusPath, "utf8");
+  const event = JSON.parse(eventsContent.trimEnd().split("\n").at(-1));
+  const pendingContent = `${JSON.stringify({
+    schemaVersion: 1,
+    event,
+    state: JSON.parse(stateContent),
+    status: statusContent,
+    expectedStateHash: contentHash(stateContent),
+    expectedStatusHash: contentHash(statusContent)
+  }, null, 2)}\n`;
+  await writeFile(pendingPath, pendingContent, "utf8");
+  await unlink(path.join(directory, ".synod/manifest.json"));
+
+  await assert.rejects(
+    initProject({ directory, dryRun: true }),
+    error => error.code === ERROR_CODES.ORCHESTRATION_STATE_INVALID
+      && error.details.path === ".synod/pending-mutation.json"
+  );
+
+  assert.equal(await readFile(statePath, "utf8"), stateContent);
+  assert.equal(await readFile(eventsPath, "utf8"), eventsContent);
+  assert.equal(await readFile(statusPath, "utf8"), statusContent);
+  assert.equal(await readFile(pendingPath, "utf8"), pendingContent);
 });
 
 test("upgrade dry-run is non-mutating and profile changes preserve durable state", async () => {
