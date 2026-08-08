@@ -13,6 +13,9 @@ test("publish workflow cannot succeed without npm and GitHub Release parity", as
   assert.match(workflow, /gh release edit "\$RELEASE_TAG"[\s\S]*--draft=false/);
   assert.match(workflow, /npm view "@ivand890\/synod@\$package_version" gitHead/);
   assert.match(workflow, /releases\/latest" --jq \.tag_name/);
+  assert.ok(workflow.includes('if [ "$published_git_head" != "$tagged_commit" ]; then'));
+  assert.ok(workflow.includes("if: steps.npm_state.outputs.published != 'true'"));
+  assert.ok(workflow.includes('test "$(npm view "@ivand890/synod@$package_version" gitHead --prefer-online)" = "$tagged_commit"'));
 
   const orderedSteps = [
     "Inspect existing npm publication",
