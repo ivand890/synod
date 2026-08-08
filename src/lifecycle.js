@@ -39,7 +39,8 @@ import {
   ORCHESTRATION_STATE_PATH,
   ORCHESTRATION_STATUS_PATH,
   createInitialOrchestrationFiles,
-  orchestrationStatus
+  orchestrationStatus,
+  validateOrchestrationReadOnly
 } from "./orchestration.js";
 
 const ORCHESTRATION_RECORD_PATHS = [
@@ -211,7 +212,8 @@ export async function initProject(
   const adoptExistingRecords = !existingManifest
     && existingRecords.every(([, inspected]) => inspected.type === "file");
   if (adoptExistingRecords) {
-    await orchestrationStatus({ directory: targetDirectory }, dependencies);
+    if (dryRun) await validateOrchestrationReadOnly({ directory: targetDirectory });
+    else await orchestrationStatus({ directory: targetDirectory }, dependencies);
     for (const [relativePath, inspected] of existingRecords) {
       templates.files.set(relativePath, inspected.content);
     }

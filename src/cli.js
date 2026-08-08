@@ -144,6 +144,21 @@ function parseCheckpointArgs(args) {
   return options;
 }
 
+const TASK_FIELD_OPTIONS = Object.freeze({
+  "--cwd": "directory",
+  "--objective": "objective",
+  "--executor": "executor",
+  "--actor": "actor",
+  "--reason": "reason"
+});
+
+const TASK_LIST_OPTIONS = Object.freeze({
+  "--acceptance": "acceptance",
+  "--verification": "verification",
+  "--depends-on": "dependsOn",
+  "--evidence": "evidence"
+});
+
 function parseTaskArgs(args) {
   if (args.length === 0 || args[0] === "-h" || args[0] === "--help") return { help: true };
   const action = args[0];
@@ -173,24 +188,11 @@ function parseTaskArgs(args) {
       options.json = true;
       continue;
     }
-    const fields = {
-      "--cwd": "directory",
-      "--objective": "objective",
-      "--executor": "executor",
-      "--actor": "actor",
-      "--reason": "reason"
-    };
-    const lists = {
-      "--acceptance": "acceptance",
-      "--verification": "verification",
-      "--depends-on": "dependsOn",
-      "--evidence": "evidence"
-    };
-    if (fields[arg]) {
-      options[fields[arg]] = optionValue(args, index, arg);
+    if (Object.hasOwn(TASK_FIELD_OPTIONS, arg)) {
+      options[TASK_FIELD_OPTIONS[arg]] = optionValue(args, index, arg);
       index += 1;
-    } else if (lists[arg]) {
-      options[lists[arg]].push(optionValue(args, index, arg));
+    } else if (Object.hasOwn(TASK_LIST_OPTIONS, arg)) {
+      options[TASK_LIST_OPTIONS[arg]].push(optionValue(args, index, arg));
       index += 1;
     } else if (arg === "--revision") {
       const value = optionValue(args, index, arg);

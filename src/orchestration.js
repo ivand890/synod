@@ -735,11 +735,8 @@ async function reclaimStaleLock(targetDirectory, lockPath, existing) {
     return true;
   } finally {
     if (claimed) {
-      try {
-        await unlink(claimPath);
-      } catch (error) {
-        if (error.code !== "ENOENT") throw error;
-      }
+      // Orphan claims are harmless and reconciled by the inode check on reuse.
+      await unlink(claimPath).catch(() => {});
     }
   }
 }
@@ -1328,6 +1325,31 @@ export async function orchestrationStatus({ directory = "." } = {}, dependencies
     tasks: taskList(state),
     markdownView: ORCHESTRATION_STATUS_PATH
   };
+}
+
+export async function validateOrchestrationReadOnly({ directory = "." } = {}) {
+  const targetDirectory = path.resolve(directory);
+  const pending = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
+  if (pending.type !== "missing") {
+    throw new SynodError(
+      ERROR_CODES.ORCHESTRATION_STATE_INVALID,
+      "Pending orchestration recovery is required; refusing to mutate records during read-only validation.",
+      { details: { path: ORCHESTRATION_PENDING_PATH, type: pending.type } }
+    );
+  }
+  const { state, events } = await readOrchestrationRaw(targetDirectory);
+  const markdown = await readRecord(targetDirectory, ORCHESTRATION_STATUS_PATH);
+  const expectedMarkdown = renderStatusMarkdown(state);
+  if (contentHash(markdown) !== contentHash(expectedMarkdown)) {
+    throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, "Generated Markdown status does not match canonical orchestration state.", {
+      details: {
+        path: ORCHESTRATION_STATUS_PATH,
+        expectedHash: contentHash(expectedMarkdown),
+        actualHash: contentHash(markdown)
+      }
+    });
+  }
+  return { state, events };
 }
 
 export function formatOrchestrationStatus(result) {
