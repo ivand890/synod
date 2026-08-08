@@ -120,8 +120,12 @@ async function checkpointPath(directory, relativePath, gitRunner) {
       return { type: "symlink", contentHash: sha256Bytes(await readlink(absolutePath, { encoding: "buffer" })) };
     }
     if (stats.isDirectory()) {
-      const gitHead = await optionalGit(gitRunner, absolutePath, ["rev-parse", "HEAD"]);
-      return { type: "directory", ...(gitHead ? { gitHead } : {}) };
+      const nested = await captureGitCheckpoint(absolutePath, { gitRunner });
+      return {
+        type: "directory",
+        ...(nested.head ? { gitHead: nested.head } : {}),
+        ...(nested.available ? { worktreeFingerprint: nested.worktree.fingerprint } : {})
+      };
     }
     if (!stats.isFile()) return { type: "other" };
     const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0);
@@ -176,6 +180,7 @@ async function worktreeRecords(directory, porcelain, indexOutput, overlay, gitRu
       type: inspected.type,
       ...(inspected.contentHash ? { contentHash: inspected.contentHash } : {}),
       ...(inspected.gitHead ? { gitHead: inspected.gitHead } : {}),
+      ...(inspected.worktreeFingerprint ? { worktreeFingerprint: inspected.worktreeFingerprint } : {}),
       ...(stagedIndex.has(relativePath) ? { index: stagedIndex.get(relativePath) } : {})
     });
   }
@@ -637,8 +642,21 @@ async function reclaimStaleLock(targetDirectory, lockPath, existing) {
     claimed = true;
   } catch (error) {
     if (error.code === "ENOENT") return true;
-    if (error.code === "EEXIST") return false;
-    throw error;
+    if (error.code === "EEXIST") {
+      try {
+        const [lockStats, claimStats] = await Promise.all([
+          lstat(lockPath, { bigint: true }),
+          lstat(claimPath, { bigint: true })
+        ]);
+        claimed = lockStats.dev === claimStats.dev && lockStats.ino === claimStats.ino;
+      } catch (inspectionError) {
+        if (inspectionError.code === "ENOENT") return false;
+        throw inspectionError;
+      }
+      if (!claimed) return false;
+    } else {
+      throw error;
+    }
   }
 
   try {

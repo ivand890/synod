@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { link, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -292,20 +293,54 @@ test("checkpoint fingerprints hash exact symlink targets", {
   assert.equal((await orchestrationStatus({ directory })).healthy, false);
 });
 
+test("checkpoint fingerprints include dirty submodule worktrees", async () => {
+  const submodule = await mkdtemp(path.join(os.tmpdir(), "synod-submodule-test-"));
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-submodule-test-"));
+  temporaryDirectories.add(submodule);
+  temporaryDirectories.add(directory);
+  for (const repository of [submodule, directory]) {
+    await git(repository, "init");
+    await git(repository, "config", "user.name", "Synod Test");
+    await git(repository, "config", "user.email", "synod@example.invalid");
+    await git(repository, "config", "commit.gpgsign", "false");
+  }
+  await writeFile(path.join(submodule, "nested.txt"), "initial\n", "utf8");
+  await git(submodule, "add", "nested.txt");
+  await git(submodule, "commit", "-m", "initial");
+  await git(directory, "-c", "protocol.file.allow=always", "submodule", "add", submodule, "vendor/submodule");
+  await git(directory, "commit", "-m", "add submodule");
+  await initProject({ directory });
+
+  const nestedPath = path.join(directory, "vendor/submodule/nested.txt");
+  await writeFile(nestedPath, "dirty one\n", "utf8");
+  await recordCheckpoint({ directory, message: "Record dirty submodule" });
+  assert.equal((await orchestrationStatus({ directory })).healthy, true);
+  await writeFile(nestedPath, "dirty two\n", "utf8");
+  assert.equal((await orchestrationStatus({ directory })).healthy, false);
+});
+
 test("stale orchestration locks are reclaimed while live locks fail closed", async () => {
   const directory = await temporaryProject();
   const lockPath = path.join(directory, ".synod/orchestration.lock");
   const exited = spawn(process.execPath, ["-e", "process.exit(0)"]);
   const stalePid = exited.pid;
   await once(exited, "exit");
-  await writeFile(lockPath, `${JSON.stringify({
+  const staleLock = `${JSON.stringify({
     pid: stalePid,
     token: "stale-owner",
     createdAt: "2026-08-08T00:00:00.000Z"
-  })}\n`, "utf8");
+  })}\n`;
+  await writeFile(lockPath, staleLock, "utf8");
 
   assert.equal((await readOrchestration(directory)).state.schemaVersion, 1);
   await assert.rejects(readFile(lockPath, "utf8"), { code: "ENOENT" });
+
+  await writeFile(lockPath, staleLock, "utf8");
+  const claimId = createHash("sha256").update(staleLock, "utf8").digest("hex");
+  const claimPath = path.join(directory, `.synod/orchestration-reclaim-${claimId}.lock`);
+  await link(lockPath, claimPath);
+  assert.equal((await readOrchestration(directory)).state.schemaVersion, 1);
+  await assert.rejects(readFile(claimPath, "utf8"), { code: "ENOENT" });
 
   const liveLock = `${JSON.stringify({
     pid: process.pid,

@@ -34,7 +34,19 @@ import {
   replaceAgentsBlocks
 } from "./templates.js";
 import { compareVersions } from "./compatibility.js";
-import { createInitialOrchestrationFiles } from "./orchestration.js";
+import {
+  ORCHESTRATION_EVENTS_PATH,
+  ORCHESTRATION_STATE_PATH,
+  ORCHESTRATION_STATUS_PATH,
+  createInitialOrchestrationFiles,
+  orchestrationStatus
+} from "./orchestration.js";
+
+const ORCHESTRATION_RECORD_PATHS = [
+  ORCHESTRATION_STATE_PATH,
+  ORCHESTRATION_EVENTS_PATH,
+  ORCHESTRATION_STATUS_PATH
+];
 
 async function validateTarget(directory) {
   const targetDirectory = path.resolve(directory || ".");
@@ -190,9 +202,24 @@ export async function initProject(
 
   const profile = getProfile(profileId);
   const templates = await loadTemplateSet(packageVersion, profile);
-  const orchestrationDependencies = { ...dependencies, checkpointOverlay: templates.files };
-  for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, orchestrationDependencies)) {
-    templates.files.set(relativePath, content);
+  const existingRecords = await Promise.all(
+    ORCHESTRATION_RECORD_PATHS.map(async relativePath => [
+      relativePath,
+      await inspectManagedPath(targetDirectory, relativePath)
+    ])
+  );
+  const adoptExistingRecords = !existingManifest
+    && existingRecords.every(([, inspected]) => inspected.type === "file");
+  if (adoptExistingRecords) {
+    await orchestrationStatus({ directory: targetDirectory }, dependencies);
+    for (const [relativePath, inspected] of existingRecords) {
+      templates.files.set(relativePath, inspected.content);
+    }
+  } else {
+    const orchestrationDependencies = { ...dependencies, checkpointOverlay: templates.files };
+    for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, orchestrationDependencies)) {
+      templates.files.set(relativePath, content);
+    }
   }
   const previous = existingManifest ? manifestFileMap(existingManifest) : new Map();
   const entries = new Map();
@@ -254,7 +281,9 @@ export async function initProject(
       state = { path: relativePath, action: "create" };
       operations.push(operationForWrite(relativePath, templateContent, inspected));
     } else if (ownership === "record") {
-      state = { path: relativePath, conflict: true };
+      state = adoptExistingRecords
+        ? { path: relativePath, action: "preserve" }
+        : { path: relativePath, conflict: true };
     } else if (relativePath.startsWith("docs/synod/")) {
       ownership = "user";
       state = { path: relativePath, action: "preserve" };

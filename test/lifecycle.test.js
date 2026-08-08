@@ -147,6 +147,21 @@ test("uninstall removes owned infrastructure and preserves user state and AGENTS
   await assert.rejects(readFile(path.join(directory, ".synod/manifest.json"), "utf8"), { code: "ENOENT" });
   await assert.rejects(readdir(path.join(directory, ".agents")), { code: "ENOENT" });
   await assert.rejects(readdir(path.join(directory, ".codex")), { code: "ENOENT" });
+
+  const recordPaths = [
+    ".synod/state.json",
+    ".synod/events.jsonl",
+    "docs/synod/STATUS.md"
+  ];
+  const recordsBeforeReinstall = await Promise.all(
+    recordPaths.map(relativePath => readFile(path.join(directory, relativePath), "utf8"))
+  );
+  const reinstalled = await initProject({ directory, profile: "portable" });
+  assert.equal(reinstalled.conflicts.length, 0);
+  assert.deepEqual(
+    await Promise.all(recordPaths.map(relativePath => readFile(path.join(directory, relativePath), "utf8"))),
+    recordsBeforeReinstall
+  );
 });
 
 test("uninstall preserves whitespace and trailing spaces outside the managed AGENTS block", async () => {
