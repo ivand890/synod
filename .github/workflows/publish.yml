@@ -83,14 +83,22 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           for attempt in $(seq 1 100); do
-            git fetch --force --tags origin
-            npm_latest="$(npm view @ivand890/synod dist-tags.latest --prefer-online)"
-            github_latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
-            next_release_tag="$(node scripts/next-release-tag.js "$npm_latest")"
-            if [ "$github_latest_tag" = "v$npm_latest" ] && [ "$RELEASE_TAG" = "$next_release_tag" ]; then
+            release_state_ready=true
+            npm_latest=""
+            github_latest_tag=""
+            next_release_tag=""
+            if ! git fetch --force --tags origin; then release_state_ready=false; fi
+            if ! npm_latest="$(npm view @ivand890/synod dist-tags.latest --prefer-online)"; then release_state_ready=false; fi
+            if [ "$release_state_ready" = "true" ] && ! github_latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"; then release_state_ready=false; fi
+            if [ "$release_state_ready" = "true" ] && ! next_release_tag="$(node scripts/next-release-tag.js "$npm_latest")"; then release_state_ready=false; fi
+            if [ "$release_state_ready" = "true" ] && [ "$github_latest_tag" = "v$npm_latest" ] && [ "$RELEASE_TAG" = "$next_release_tag" ]; then
               exit 0
             fi
-            echo "$RELEASE_TAG is waiting: npm latest is v$npm_latest, GitHub Latest is $github_latest_tag, and the next tag is ${next_release_tag:-none}."
+            if [ "$release_state_ready" = "true" ]; then
+              echo "$RELEASE_TAG is waiting: npm latest is v$npm_latest, GitHub Latest is $github_latest_tag, and the next tag is ${next_release_tag:-none}."
+            else
+              echo "$RELEASE_TAG could not read the complete release state on attempt $attempt; retrying."
+            fi
             if [ "$attempt" -lt 100 ]; then sleep 15; fi
           done
           echo "$RELEASE_TAG did not acquire the durable release turn." >&2
@@ -151,20 +159,36 @@ jobs:
         run: |
           package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
           tagged_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
-          test "$(npm view "@ivand890/synod@$package_version" gitHead --prefer-online)" = "$tagged_commit"
-          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "false"
-          test "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)" = "false"
-
-          npm_latest="$(npm view @ivand890/synod dist-tags.latest --prefer-online)"
-          expected_latest_tag="v$npm_latest"
-          github_latest_tag=""
           for attempt in 1 2 3 4 5 6; do
-            github_latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
-            if [ "$github_latest_tag" = "$expected_latest_tag" ]; then break; fi
+            verification_ready=true
+            current_npm_git_head=""
+            current_release_draft=""
+            current_release_prerelease=""
+            npm_latest=""
+            github_latest_tag=""
+            latest_release_draft=""
+            latest_tagged_commit=""
+            latest_npm_git_head=""
+            if ! current_npm_git_head="$(npm view "@ivand890/synod@$package_version" gitHead --prefer-online)"; then verification_ready=false; fi
+            if ! current_release_draft="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"; then verification_ready=false; fi
+            if ! current_release_prerelease="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isPrerelease --jq .isPrerelease)"; then verification_ready=false; fi
+            if ! npm_latest="$(npm view @ivand890/synod dist-tags.latest --prefer-online)"; then verification_ready=false; fi
+            expected_latest_tag="v$npm_latest"
+            if [ "$verification_ready" = "true" ] && ! github_latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"; then verification_ready=false; fi
+            if [ "$verification_ready" = "true" ] && ! latest_release_draft="$(gh release view "$expected_latest_tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"; then verification_ready=false; fi
+            if [ "$verification_ready" = "true" ] && ! latest_tagged_commit="$(git rev-parse "$expected_latest_tag^{commit}")"; then verification_ready=false; fi
+            if [ "$verification_ready" = "true" ] && ! latest_npm_git_head="$(npm view "@ivand890/synod@$npm_latest" gitHead --prefer-online)"; then verification_ready=false; fi
+            if [ "$verification_ready" = "true" ] \
+              && [ "$current_npm_git_head" = "$tagged_commit" ] \
+              && [ "$current_release_draft" = "false" ] \
+              && [ "$current_release_prerelease" = "false" ] \
+              && [ "$github_latest_tag" = "$expected_latest_tag" ] \
+              && [ "$latest_release_draft" = "false" ] \
+              && [ "$latest_npm_git_head" = "$latest_tagged_commit" ]; then
+              exit 0
+            fi
+            echo "Release parity is not yet readable on attempt $attempt; retrying."
             if [ "$attempt" -lt 6 ]; then sleep 5; fi
           done
-          test "$github_latest_tag" = "$expected_latest_tag"
-          test "$(gh release view "$expected_latest_tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "false"
-          latest_tagged_commit="$(git rev-parse "$expected_latest_tag^{commit}")"
-          latest_npm_git_head="$(npm view "@ivand890/synod@$npm_latest" gitHead --prefer-online)"
-          test "$latest_npm_git_head" = "$latest_tagged_commit"
+          echo "npm and GitHub release parity could not be verified." >&2
+          exit 1

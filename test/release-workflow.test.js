@@ -19,8 +19,12 @@ test("publish workflow cannot succeed without npm and GitHub Release parity", as
   assert.match(workflow, /releases\/latest" --jq \.tag_name/);
   assert.ok(workflow.includes('if [ "$published_git_head" != "$tagged_commit" ]; then'));
   assert.ok(workflow.includes("if: steps.npm_state.outputs.published != 'true'"));
+  assert.ok(workflow.includes('if ! git fetch --force --tags origin; then release_state_ready=false; fi'));
+  assert.ok(workflow.includes('! npm_latest="$(npm view @ivand890/synod dist-tags.latest --prefer-online)"'));
+  assert.ok(workflow.includes('! github_latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"'));
   assert.ok(workflow.includes('[ "$github_latest_tag" = "v$npm_latest" ] && [ "$RELEASE_TAG" = "$next_release_tag" ]'));
-  assert.ok(workflow.includes('test "$(npm view "@ivand890/synod@$package_version" gitHead --prefer-online)" = "$tagged_commit"'));
+  assert.ok(workflow.includes('[ "$current_npm_git_head" = "$tagged_commit" ]'));
+  assert.ok(workflow.includes('[ "$latest_npm_git_head" = "$latest_tagged_commit" ]'));
 
   const orderedSteps = [
     "Inspect existing npm publication",
