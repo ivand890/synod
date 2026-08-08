@@ -38,6 +38,8 @@ test("prints version and help", () => {
   assert.match(help.stdout, /synod usage/);
   assert.match(help.stdout, /synod upgrade/);
   assert.match(help.stdout, /synod doctor/);
+  assert.match(help.stdout, /synod status/);
+  assert.match(help.stdout, /synod task add/);
 });
 
 test("init emits versioned JSON for success and conflicts", async () => {
@@ -119,6 +121,42 @@ test("check and doctor emit failure JSON when their health gates fail", async ()
     assert.equal(doctorStatus, 1);
     assert.equal(doctor.ok, false);
     assert.equal(doctor.error.code, ERROR_CODES.DOCTOR_FAILED);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("task and status commands expose canonical orchestration through schema-1 envelopes", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-orchestration-json-test-"));
+  const messages = [];
+  const output = { log: message => messages.push(message), warn() {}, error() {} };
+
+  try {
+    await run(["init", directory], output);
+    messages.length = 0;
+    const addStatus = await run([
+      "task", "add", "T-001",
+      "--objective", "Exercise the CLI contract",
+      "--executor", "synod_implementer",
+      "--acceptance", "The task is persisted",
+      "--verification", "pnpm test",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const added = JSON.parse(messages.shift());
+    assert.equal(addStatus, 0);
+    assert.equal(added.schemaVersion, 1);
+    assert.equal(added.command, "task");
+    assert.equal(added.data.action, "add");
+    assert.equal(added.data.task.id, "T-001");
+
+    const statusCode = await run(["status", directory, "--json"], output);
+    const status = JSON.parse(messages.shift());
+    assert.equal(statusCode, 0);
+    assert.equal(status.ok, true);
+    assert.equal(status.command, "status");
+    assert.equal(status.data.eventCount, 2);
+    assert.equal(status.data.tasks[0].revision, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

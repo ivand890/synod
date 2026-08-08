@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-08
+
+### Added
+
+- Added canonical schema-1 orchestration state in `.synod/state.json`, a SHA-256 hash-chained append-only event log, and the generated durable `docs/synod/STATUS.md` view.
+- Added `synod task add` and validated `synod task transition` commands with task IDs, executors, exact revisions, correction rounds, acceptance, verification, dependencies, and evidence.
+- Added `synod status` with automatic branch, `HEAD`, and content-sensitive working-tree checkpoint drift detection, plus explicit `synod checkpoint` reconciliation.
+- Added manifest schema 3 and explicit schema 2 to 3 migration for mutable, uninstall-preserved orchestration records.
+
+### Changed
+
+- Task delivery, correction, acceptance, verification, and completion now pass through enforced transitions instead of relying on editable Markdown state.
+- Evidence records capture the exact task revision plus Git HEAD and working-tree fingerprint at the event checkpoint.
+- Task mutations no longer acknowledge checkpoint drift implicitly; only `synod checkpoint` moves the canonical checkpoint.
+
+### Security
+
+- Orchestration mutations use an exclusive project lock, validate state against the hash-chained event log, and atomically replace canonical state and its Markdown projection.
+
 ## [0.4.0] - 2026-08-07
 
 ### Added
@@ -62,7 +81,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ivand890/synod/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ivand890/synod/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/ivand890/synod/releases/tag/v0.3.2
 [0.3.1]: https://github.com/ivand890/synod/releases/tag/v0.3.1

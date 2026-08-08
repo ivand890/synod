@@ -1,5 +1,7 @@
 # Synod Execution Plan
 
+Canonical tasks live in `.synod/state.json` and are changed only with `synod task add` and `synod task transition`. The generated current view is `STATUS.md`; use this file for human planning notes that have not yet become executable task contracts.
+
 Allowed states: `PLANNED`, `READY`, `ACTIVE`, `REVIEW`, `ACCEPTED`, `VERIFIED`, `DONE`, `BLOCKED`, `SUPERSEDED`.
 
 Only the primary advisor changes acceptance states. An implementation agent may report delivery but cannot mark its task accepted, verified, or done.
@@ -11,11 +13,9 @@ Only the primary advisor changes acceptance states. An implementation agent may 
 3. The configured worker implements by default; the supervisor reviews, corrects, integrates, and verifies.
 4. Complete the goal against the original criteria.
 
-## Tasks
+## Candidate tasks
 
-| ID | Objective | Depends on | Advisor | Executor | Write scope | State | Revision | Evidence |
-|---|---|---|---|---|---|---|---:|---|
-| T-001 | Define the first atomic implementation contract | — | supervisor | — | read-only | PLANNED | 0 | — |
+Record proposed decomposition here, then create each approved task in canonical state with its executor, acceptance criteria, verification commands, and dependencies.
 
 ## Delegation contract
 

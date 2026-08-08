@@ -1,5 +1,7 @@
 # Synod Goal
 
+This file is human-owned product context. Canonical execution state, task revisions, acceptance, verification, and evidence live under `.synod/` and are projected to `STATUS.md`.
+
 Status: draft
 
 ## Outcome

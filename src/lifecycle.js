@@ -13,6 +13,7 @@ import {
 } from "./filesystem.js";
 import {
   MANIFEST_PATH,
+  MANIFEST_SCHEMA_VERSION,
   createManifest,
   manifestFileMap,
   readManifest,
@@ -33,6 +34,19 @@ import {
   replaceAgentsBlocks
 } from "./templates.js";
 import { compareVersions } from "./compatibility.js";
+import {
+  ORCHESTRATION_EVENTS_PATH,
+  ORCHESTRATION_STATE_PATH,
+  ORCHESTRATION_STATUS_PATH,
+  createInitialOrchestrationFiles,
+  orchestrationStatus
+} from "./orchestration.js";
+
+const ORCHESTRATION_RECORD_PATHS = [
+  ORCHESTRATION_STATE_PATH,
+  ORCHESTRATION_EVENTS_PATH,
+  ORCHESTRATION_STATUS_PATH
+];
 
 async function validateTarget(directory) {
   const targetDirectory = path.resolve(directory || ".");
@@ -172,7 +186,7 @@ export async function initProject(
   const existingManifest = await readManifest(targetDirectory, { required: false });
   const profileId = requestedProfile || existingManifest?.profile || DEFAULT_PROFILE;
   if (existingManifest && (
-    existingManifest.schemaVersion !== 2 ||
+    existingManifest.schemaVersion !== MANIFEST_SCHEMA_VERSION ||
     existingManifest.templateVersion !== packageVersion ||
     existingManifest.profile !== profileId
   )) {
@@ -188,6 +202,25 @@ export async function initProject(
 
   const profile = getProfile(profileId);
   const templates = await loadTemplateSet(packageVersion, profile);
+  const existingRecords = await Promise.all(
+    ORCHESTRATION_RECORD_PATHS.map(async relativePath => [
+      relativePath,
+      await inspectManagedPath(targetDirectory, relativePath)
+    ])
+  );
+  const adoptExistingRecords = !existingManifest
+    && existingRecords.every(([, inspected]) => inspected.type === "file");
+  if (adoptExistingRecords) {
+    await orchestrationStatus({ directory: targetDirectory }, dependencies);
+    for (const [relativePath, inspected] of existingRecords) {
+      templates.files.set(relativePath, inspected.content);
+    }
+  } else {
+    const orchestrationDependencies = { ...dependencies, checkpointOverlay: templates.files };
+    for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, orchestrationDependencies)) {
+      templates.files.set(relativePath, content);
+    }
+  }
   const previous = existingManifest ? manifestFileMap(existingManifest) : new Map();
   const entries = new Map();
   const operations = [];
@@ -224,25 +257,33 @@ export async function initProject(
 
     if (inspected.type === "unsafe" || !["missing", "file"].includes(inspected.type)) {
       state = { path: relativePath, conflict: true };
-    } else if (previousEntry?.ownership === "user") {
-      ownership = "user";
-      state = { path: relativePath, action: "preserve" };
-      if (inspected.type === "missing") {
-        warnings.push(warning(
-          WARNING_CODES.USER_OWNED_FILE_MISSING,
-          `User-owned file is missing: ${relativePath}`,
-          { path: relativePath }
-        ));
-      } else if (normalizeText(inspected.content) !== normalizeText(templateContent)) {
-        warnings.push(warning(
-          WARNING_CODES.DURABLE_STATE_PRESERVED,
-          `Preserved user-owned project state in ${relativePath}.`,
-          { path: relativePath }
-        ));
+    } else if (previousEntry?.ownership === "user" || previousEntry?.ownership === "record") {
+      ownership = previousEntry.ownership;
+      if (ownership === "record" && inspected.type === "missing") {
+        state = { path: relativePath, conflict: true };
+      } else {
+        state = { path: relativePath, action: "preserve" };
+        if (inspected.type === "missing") {
+          warnings.push(warning(
+            WARNING_CODES.USER_OWNED_FILE_MISSING,
+            `User-owned file is missing: ${relativePath}`,
+            { path: relativePath }
+          ));
+        } else if (ownership === "user" && normalizeText(inspected.content) !== normalizeText(templateContent)) {
+          warnings.push(warning(
+            WARNING_CODES.DURABLE_STATE_PRESERVED,
+            `Preserved user-owned project state in ${relativePath}.`,
+            { path: relativePath }
+          ));
+        }
       }
     } else if (inspected.type === "missing") {
       state = { path: relativePath, action: "create" };
       operations.push(operationForWrite(relativePath, templateContent, inspected));
+    } else if (ownership === "record") {
+      state = adoptExistingRecords
+        ? { path: relativePath, action: "preserve" }
+        : { path: relativePath, conflict: true };
     } else if (relativePath.startsWith("docs/synod/")) {
       ownership = "user";
       state = { path: relativePath, action: "preserve" };
@@ -281,11 +322,15 @@ export async function initProject(
       conflicts.push(relativePath);
       continue;
     }
-    const installedHash = ownership === "user" && previousEntry
+    const installedHash = ownership === "record" && previousEntry
       ? previousEntry.contentHash
-      : ownership === "user" && inspected.hash
+      : ownership === "record" && inspected.hash
         ? inspected.hash
-        : contentHash(templateContent);
+        : ownership === "user" && previousEntry
+          ? previousEntry.contentHash
+          : ownership === "user" && inspected.hash
+            ? inspected.hash
+            : contentHash(templateContent);
     addManifestEntry(entries, relativePath, ownership, installedHash, previousEntry?.provenance || "installed");
   }
 
@@ -332,6 +377,10 @@ export async function upgradeProject(
   }
   const profile = getProfile(requestedProfile || installed.profile || DEFAULT_PROFILE);
   const templates = await loadTemplateSet(packageVersion, profile);
+  const orchestrationDependencies = { ...dependencies, checkpointOverlay: templates.files };
+  for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, orchestrationDependencies)) {
+    templates.files.set(relativePath, content);
+  }
   const previous = manifestFileMap(installed);
   const nextEntries = new Map();
   const operations = [];
@@ -368,6 +417,13 @@ export async function upgradeProject(
 
     if (inspected.type === "unsafe" || !["missing", "file"].includes(inspected.type)) {
       state = { path: relativePath, conflict: true };
+    } else if (old?.ownership === "record") {
+      if (inspected.type === "missing") {
+        state = { path: relativePath, conflict: true };
+      } else {
+        ownership = "record";
+        state = { path: relativePath, action: "preserve" };
+      }
     } else if (old?.ownership === "user") {
       state = { path: relativePath, action: inspected.type === "missing" ? "preserve" : "preserve" };
       if (inspected.type === "missing") {
@@ -379,7 +435,7 @@ export async function upgradeProject(
         state = { path: relativePath, action: "create" };
         operations.push(operationForWrite(relativePath, templateContent, inspected));
       }
-    } else if (!old && (relativePath.startsWith("docs/synod/") || (
+    } else if (!old && ownership !== "record" && (relativePath.startsWith("docs/synod/") || (
       relativePath === ".codex/config.toml" && !inspected.content.startsWith(generatedConfigMarker)
     ))) {
       ownership = "user";
@@ -400,9 +456,11 @@ export async function upgradeProject(
       conflicts.push(relativePath);
       continue;
     }
-    const installedHash = ownership === "user"
+    const installedHash = ownership === "record"
       ? old?.contentHash || inspected.hash || contentHash(templateContent)
-      : contentHash(templateContent);
+      : ownership === "user"
+        ? old?.contentHash || inspected.hash || contentHash(templateContent)
+        : contentHash(templateContent);
     addManifestEntry(nextEntries, relativePath, ownership, installedHash, ownership === "user" ? old?.provenance || "adopted-user" : "installed");
   }
 
@@ -484,6 +542,16 @@ export async function checkProject({ directory = "." } = {}) {
       });
       continue;
     }
+    if (entry.ownership === "record") {
+      checks.push({
+        path: entry.path,
+        ownership: entry.ownership,
+        status: inspected.type === "file" ? "recorded" : "missing",
+        severity: inspected.type === "file" ? "info" : "error",
+        actualHash: inspected.hash
+      });
+      continue;
+    }
     if (entry.ownership === "user") {
       checks.push({
         path: entry.path,
@@ -506,7 +574,31 @@ export async function checkProject({ directory = "." } = {}) {
     });
   }
 
-  const upgradeAvailable = manifest.templateVersion !== packageVersion || rawManifest.schemaVersion !== 2;
+  const orchestrationRecordsPresent = ORCHESTRATION_RECORD_PATHS.every(relativePath =>
+    checks.some(check => check.path === relativePath && check.status === "recorded")
+  );
+  if (orchestrationRecordsPresent) {
+    try {
+      await orchestrationStatus({ directory: targetDirectory });
+      checks.push({
+        path: ".synod/orchestration",
+        ownership: "record",
+        status: "valid",
+        severity: "info"
+      });
+    } catch (error) {
+      checks.push({
+        path: ".synod/orchestration",
+        ownership: "record",
+        status: "invalid",
+        severity: "error",
+        code: error.code || ERROR_CODES.ORCHESTRATION_STATE_INVALID,
+        message: error.message
+      });
+    }
+  }
+
+  const upgradeAvailable = manifest.templateVersion !== packageVersion || rawManifest.schemaVersion !== MANIFEST_SCHEMA_VERSION;
   if (upgradeAvailable) {
     warnings.push(warning(
       WARNING_CODES.PROJECT_UPGRADE_AVAILABLE,
@@ -542,7 +634,7 @@ export async function uninstallProject(
 
   for (const entry of manifest.files) {
     const inspected = await inspectManagedPath(targetDirectory, entry.path);
-    if (entry.ownership === "user") {
+    if (entry.ownership === "user" || entry.ownership === "record") {
       states.push({ path: entry.path, action: "preserve" });
       continue;
     }

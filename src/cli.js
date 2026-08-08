@@ -6,6 +6,13 @@ import { checkProject, initProject, uninstallProject, upgradeProject } from "./l
 import { packageVersion } from "./package.js";
 import { listProfiles } from "./profiles.js";
 import { collectUsage, formatUsageReport } from "./usage.js";
+import {
+  addTask,
+  formatOrchestrationStatus,
+  orchestrationStatus,
+  recordCheckpoint,
+  transitionTask
+} from "./orchestration.js";
 
 const HELP = `Synod ${packageVersion}
 
@@ -15,6 +22,10 @@ Usage:
   synod init [directory] [--profile <id>] [--dry-run] [--force] [--json]
   synod upgrade [directory] [--profile <id>] [--dry-run] [--force] [--json]
   synod check [directory] [--json]
+  synod status [directory] [--json]
+  synod checkpoint [directory] [--actor <id>] [--message <text>] [--json]
+  synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--cwd <directory>] [--json]
+  synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
   synod doctor [directory] [--json]
   synod uninstall [directory] [--dry-run] [--force] [--json]
   synod profiles [--json]
@@ -26,6 +37,9 @@ Commands:
   init        Transactionally install Synod files and an ownership manifest.
   upgrade     Migrate and update a managed project; --dry-run previews the plan.
   check       Verify managed-file hashes, ownership, and local project integrity.
+  status      Read canonical orchestration state and detect checkpoint drift.
+  checkpoint  Accept the current Git/worktree checkpoint in canonical state.
+  task        Add tasks and apply validated, revision-aware state transitions.
   doctor      Probe Codex version, App Server, model, and reasoning capabilities.
   uninstall   Remove unchanged Synod-owned content and preserve user-owned state.
   profiles    List built-in model profiles and their requirements.
@@ -38,6 +52,8 @@ Options:
   --session   Select any thread in a session tree. Defaults to the latest session in --cwd.
   --cwd       Select the project directory used to find the latest session.
   --by-model  Group consumption by model (the default and currently supported view).
+  --revision  Require the exact task revision for a transition.
+  --evidence  Attach evidence to the exact task revision and current checkpoint.
   --json      Print a versioned machine-readable success, warning, or error envelope.
   -h, --help  Show help.
   -v, --version
@@ -93,6 +109,107 @@ function parseUsageArgs(args) {
     } else {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
     }
+  }
+  return options;
+}
+
+function optionValue(args, index, option) {
+  const value = args[index + 1];
+  if (!value || value.startsWith("-")) throw missingValue(option);
+  return value;
+}
+
+function parseCheckpointArgs(args) {
+  const options = { directory: ".", json: false, actor: "supervisor" };
+  let hasDirectory = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "-h" || arg === "--help") return { help: true };
+    if (arg === "--json") options.json = true;
+    else if (["--actor", "--message", "--cwd"].includes(arg)) {
+      const value = optionValue(args, index, arg);
+      if (arg === "--actor") options.actor = value;
+      else if (arg === "--message") options.message = value;
+      else options.directory = value;
+      index += 1;
+    } else if (arg.startsWith("-")) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
+    } else if (hasDirectory || options.directory !== ".") {
+      throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
+    } else {
+      options.directory = arg;
+      hasDirectory = true;
+    }
+  }
+  return options;
+}
+
+function parseTaskArgs(args) {
+  if (args.length === 0 || args[0] === "-h" || args[0] === "--help") return { help: true };
+  const action = args[0];
+  if (!["add", "transition"].includes(action)) {
+    throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown task action: ${action}`, { details: { action } });
+  }
+  const requiredPositionals = action === "add" ? 2 : 3;
+  if (args.length < requiredPositionals || args.slice(0, requiredPositionals).some(value => value.startsWith("-"))) {
+    throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Task ${action} is missing required positional arguments.`);
+  }
+  const options = {
+    action,
+    id: args[1],
+    ...(action === "transition" ? { to: args[2] } : {}),
+    directory: ".",
+    json: false,
+    actor: "supervisor",
+    acceptance: [],
+    verification: [],
+    dependsOn: [],
+    evidence: []
+  };
+  const start = requiredPositionals;
+  for (let index = start; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--json") {
+      options.json = true;
+      continue;
+    }
+    const fields = {
+      "--cwd": "directory",
+      "--objective": "objective",
+      "--executor": "executor",
+      "--actor": "actor",
+      "--reason": "reason"
+    };
+    const lists = {
+      "--acceptance": "acceptance",
+      "--verification": "verification",
+      "--depends-on": "dependsOn",
+      "--evidence": "evidence"
+    };
+    if (fields[arg]) {
+      options[fields[arg]] = optionValue(args, index, arg);
+      index += 1;
+    } else if (lists[arg]) {
+      options[lists[arg]].push(optionValue(args, index, arg));
+      index += 1;
+    } else if (arg === "--revision") {
+      const value = optionValue(args, index, arg);
+      options.revision = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+      index += 1;
+    } else if (arg.startsWith("-")) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
+    } else {
+      throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
+    }
+  }
+  if (action === "add" && (options.revision !== undefined || options.evidence.length > 0 || options.reason !== undefined)) {
+    throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task add received a transition-only option.");
+  }
+  if (action === "transition" && (
+    options.objective !== undefined || options.executor !== undefined || options.acceptance.length > 0
+    || options.verification.length > 0 || options.dependsOn.length > 0
+  )) {
+    throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task transition received a task-definition option.");
   }
   return options;
 }
@@ -181,6 +298,55 @@ export async function run(args, output = console, dependencies = {}) {
       } else {
         output.log(formatUsageReport(report));
         printWarnings(report.warnings, output);
+      }
+      return 0;
+    }
+
+    if (command === "status") {
+      const options = parseLifecycleArgs(args.slice(1));
+      if (options.help) { output.log(HELP); return 0; }
+      const result = await orchestrationStatus(options, dependencies);
+      if (options.json) {
+        const envelope = result.healthy
+          ? successEnvelope("status", result)
+          : errorEnvelope("status", new SynodError(
+              ERROR_CODES.CHECKPOINT_DRIFT,
+              "Synod checkpoint drift was detected.",
+              { details: result }
+            ));
+        output.log(JSON.stringify(envelope, null, 2));
+      } else {
+        output.log(formatOrchestrationStatus(result));
+      }
+      return result.healthy ? 0 : 1;
+    }
+
+    if (command === "checkpoint") {
+      const options = parseCheckpointArgs(args.slice(1));
+      if (options.help) { output.log(HELP); return 0; }
+      const result = await recordCheckpoint(options, dependencies);
+      const data = { checkpoint: result.checkpoint, lastEvent: result.state.lastEvent };
+      if (options.json) output.log(JSON.stringify(successEnvelope("checkpoint", data), null, 2));
+      else output.log(`Recorded checkpoint ${result.state.lastEvent.sequence}: ${result.checkpoint.head || "no Git HEAD"}`);
+      return 0;
+    }
+
+    if (command === "task") {
+      const options = parseTaskArgs(args.slice(1));
+      if (options.help) { output.log(HELP); return 0; }
+      if (options.action === "add") {
+        const result = await addTask(options, dependencies);
+        const data = { task: result.task, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
+        if (options.json) output.log(JSON.stringify(successEnvelope("task", { action: "add", ...data }), null, 2));
+        else output.log(`Added ${result.task.id} in ${result.task.state} at revision ${result.task.revision}.`);
+      } else {
+        const result = await transitionTask(options, dependencies);
+        const data = { task: result.task, evidence: result.evidence, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
+        if (options.json) output.log(JSON.stringify(successEnvelope("task", { action: "transition", ...data }), null, 2));
+        else {
+          output.log(`Transitioned ${result.task.id} to ${result.task.state} at revision ${result.task.revision}.`);
+          for (const item of result.evidence) output.log(`Recorded evidence ${item.id}: ${item.kind} @ revision ${item.revision}.`);
+        }
       }
       return 0;
     }

@@ -9,15 +9,15 @@ Status: accepted
 
 ### Decision
 
-Use `docs/synod/` as the durable operational record. Treat chat transcripts and generated memories as supporting context only.
+Use `.synod/state.json` as canonical orchestration state, `.synod/events.jsonl` as the append-only audit record, and `docs/synod/STATUS.md` as the generated human view. Treat chat transcripts and generated memories as supporting context only.
 
 ### Rationale
 
-Threads can be compacted, memories can be delayed, and the working tree can change between sessions.
+Threads can be compacted, memories can be delayed, Markdown can be edited, and the working tree can change between sessions.
 
 ### Consequence
 
-Verify checkpoints against Git and runtime evidence whenever work resumes.
+Run `synod status` whenever work resumes and record intentional checkpoint changes explicitly.
 
 ## D-002 — Cost-efficient agents perform implementation
 

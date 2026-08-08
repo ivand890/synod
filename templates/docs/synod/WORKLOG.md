@@ -1,6 +1,6 @@
 # Synod Worklog
 
-Append only material phase changes, accepted agent results, verification, recovery events, and handoffs. Keep entries concise and link to commits or artifacts instead of copying long logs.
+Use this human-owned file for narrative context only. Canonical transitions and exact-revision evidence are recorded by Synod in `.synod/events.jsonl`. Keep entries concise and link to event IDs, commits, or artifacts instead of copying long logs.
 
 ## Initialization
 
