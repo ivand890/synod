@@ -1,7 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
+  lstat,
+  link,
   mkdir,
+  open,
   readFile,
   realpath,
   rename,
@@ -26,6 +29,10 @@ export const LOCAL_RUNTIME_EXECUTABLE = `${LOCAL_RUNTIME_DIRECTORY}/node_modules
 
 const currentPackageRoot = fileURLToPath(new URL("..", import.meta.url));
 const lifecycleCommands = new Set(["init", "upgrade", "check", "status", "doctor", "uninstall"]);
+const LOCAL_RUNTIME_INSTALL_LOCK_PATH = ".synod/runtime-install.lock";
+const LOCAL_RUNTIME_INSTALL_LOCK_TIMEOUT_MS = 130_000;
+const LOCAL_RUNTIME_INSTALL_LOCK_RETRY_MS = 25;
+const LOCAL_RUNTIME_INSTALL_LOCK_GRACE_MS = 1_000;
 
 function boundedOutput(value) {
   const output = String(value || "").trim();
@@ -36,6 +43,7 @@ function runtimePaths(targetDirectory) {
   return {
     synodDirectory: resolveProjectPath(targetDirectory, ".synod"),
     descriptor: resolveProjectPath(targetDirectory, LOCAL_RUNTIME_DESCRIPTOR_PATH),
+    installLock: resolveProjectPath(targetDirectory, LOCAL_RUNTIME_INSTALL_LOCK_PATH),
     runtime: resolveProjectPath(targetDirectory, LOCAL_RUNTIME_DIRECTORY),
     executable: resolveProjectPath(targetDirectory, LOCAL_RUNTIME_EXECUTABLE),
     packageRoot: resolveProjectPath(targetDirectory, `${LOCAL_RUNTIME_DIRECTORY}/node_modules/${packageName}`)
@@ -311,11 +319,133 @@ async function commitStagedRuntime(targetDirectory, stageDirectory, descriptorCo
   if (descriptorBackedUp) await unlink(descriptorBackup).catch(() => {});
 }
 
+function liveProcess(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
+function runtimeInstallLockOwner(content) {
+  try {
+    const value = JSON.parse(content);
+    return value
+      && Number.isInteger(value.pid)
+      && typeof value.token === "string"
+      && value.token.length > 0
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function reclaimRuntimeInstallLock(lockPath, existing, now) {
+  const owner = runtimeInstallLockOwner(existing.content);
+  if (owner && liveProcess(owner.pid)) return false;
+  if (!owner) {
+    const stats = await lstat(lockPath).catch(error => error.code === "ENOENT" ? undefined : Promise.reject(error));
+    if (!stats || now() - stats.mtimeMs < LOCAL_RUNTIME_INSTALL_LOCK_GRACE_MS) return false;
+  }
+  const claimId = createHash("sha256").update(existing.content, "utf8").digest("hex");
+  const claimPath = `${lockPath}.reclaim-${claimId}`;
+  let claimed = false;
+  try {
+    await link(lockPath, claimPath);
+    claimed = true;
+  } catch (error) {
+    if (error.code === "ENOENT") return true;
+    if (error.code !== "EEXIST") throw error;
+    try {
+      const [lockStats, claimStats] = await Promise.all([
+        lstat(lockPath, { bigint: true }),
+        lstat(claimPath, { bigint: true })
+      ]);
+      claimed = lockStats.dev === claimStats.dev && lockStats.ino === claimStats.ino;
+    } catch (inspectionError) {
+      if (inspectionError.code === "ENOENT") return false;
+      throw inspectionError;
+    }
+    if (!claimed) return false;
+  }
+  try {
+    const [claim, current] = await Promise.all([
+      inspectPath(claimPath),
+      inspectPath(lockPath)
+    ]);
+    if (
+      claim.type !== "file"
+      || claim.content !== existing.content
+      || current.type !== "file"
+      || current.content !== existing.content
+    ) return false;
+    await unlink(lockPath).catch(error => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    return true;
+  } finally {
+    if (claimed) await unlink(claimPath).catch(() => {});
+  }
+}
+
+async function acquireRuntimeInstallLock(paths, {
+  timeoutMs = LOCAL_RUNTIME_INSTALL_LOCK_TIMEOUT_MS,
+  retryMs = LOCAL_RUNTIME_INSTALL_LOCK_RETRY_MS,
+  now = Date.now
+} = {}) {
+  const startedAt = now();
+  while (true) {
+    const token = randomUUID();
+    const content = `${JSON.stringify({ pid: process.pid, token, createdAt: new Date(now()).toISOString() })}\n`;
+    let handle;
+    try {
+      handle = await open(paths.installLock, "wx", 0o600);
+      await handle.writeFile(content, "utf8");
+      await handle.close();
+      return async () => {
+        const current = await inspectPath(paths.installLock);
+        if (current.type === "missing") return;
+        if (current.type !== "file" || current.content !== content) {
+          throw new SynodError(ERROR_CODES.LOCAL_RUNTIME_CONFLICT, "The Synod runtime install lock changed ownership unexpectedly.", {
+            details: { path: LOCAL_RUNTIME_INSTALL_LOCK_PATH }
+          });
+        }
+        await unlink(paths.installLock);
+      };
+    } catch (error) {
+      await handle?.close().catch(() => {});
+      if (error.code !== "EEXIST") {
+        if (handle) await unlink(paths.installLock).catch(() => {});
+        throw error;
+      }
+      const existing = await inspectPath(paths.installLock);
+      if (existing.type === "missing") continue;
+      if (existing.type !== "file") {
+        throw new SynodError(ERROR_CODES.LOCAL_RUNTIME_CONFLICT, "The Synod runtime install lock is not a regular file.", {
+          details: { path: LOCAL_RUNTIME_INSTALL_LOCK_PATH, actualType: existing.type }
+        });
+      }
+      if (await reclaimRuntimeInstallLock(paths.installLock, existing, now)) continue;
+      if (now() - startedAt >= timeoutMs) {
+        const owner = runtimeInstallLockOwner(existing.content);
+        throw new SynodError(ERROR_CODES.LOCAL_RUNTIME_CONFLICT, "Another Synod runtime installation holds the project lock.", {
+          details: { path: LOCAL_RUNTIME_INSTALL_LOCK_PATH, ...(owner ? { pid: owner.pid } : {}) }
+        });
+      }
+      await new Promise(resolve => setTimeout(resolve, retryMs));
+    }
+  }
+}
+
 export async function installLocalRuntime(targetDirectory, {
   runtimeVersion = packageVersion,
   packageSpec = process.env.SYNOD_RUNTIME_PACKAGE_SPEC || runtimeVersion,
   runPnpm = defaultRunPnpm,
-  renamePath = rename
+  renamePath = rename,
+  lockOptions
 } = {}) {
   if (!parseVersion(runtimeVersion) || typeof packageSpec !== "string" || packageSpec.length === 0) {
     throw new SynodError(ERROR_CODES.LOCAL_RUNTIME_INVALID, "The requested Synod local runtime version or package source is invalid.", {
@@ -333,28 +463,31 @@ export async function installLocalRuntime(targetDirectory, {
   if (unsafe) {
     throw new SynodError(ERROR_CODES.UNSAFE_PATH, `Refusing to install the local runtime through unsafe path: ${unsafe}.`);
   }
-  const existingDescriptor = await readLocalRuntimeDescriptor(targetDirectory);
-  const runtimeType = await pathType(paths.runtime);
-  if (!existingDescriptor && runtimeType !== "missing") {
-    throw new SynodError(ERROR_CODES.LOCAL_RUNTIME_CONFLICT, "An unmanaged .synod/runtime directory already exists.", {
-      details: { path: LOCAL_RUNTIME_DIRECTORY, actualType: runtimeType }
-    });
-  }
-  if (existingDescriptor && compareVersions(existingDescriptor.runtimeVersion, runtimeVersion) > 0) {
-    throw new SynodError(ERROR_CODES.DOWNGRADE_UNSUPPORTED, "Refusing to replace a newer local Synod runtime with an older version.", {
-      details: { installed: existingDescriptor.runtimeVersion, requested: runtimeVersion }
-    });
-  }
-  if (existingDescriptor?.runtimeVersion === runtimeVersion) {
-    const existing = await inspectLocalRuntime(targetDirectory, existingDescriptor);
-    if (existing.ready) return existing;
-  }
-
   const createdSynodDirectory = await pathType(paths.synodDirectory) === "missing";
   await mkdir(paths.synodDirectory, { recursive: true });
-  const stageDirectory = path.join(paths.synodDirectory, `.runtime-stage-${randomUUID()}`);
-  await mkdir(stageDirectory, { recursive: false });
+  let releaseLock;
+  let stageDirectory;
   try {
+    releaseLock = await acquireRuntimeInstallLock(paths, lockOptions);
+    const existingDescriptor = await readLocalRuntimeDescriptor(targetDirectory);
+    const runtimeType = await pathType(paths.runtime);
+    if (!existingDescriptor && runtimeType !== "missing") {
+      throw new SynodError(ERROR_CODES.LOCAL_RUNTIME_CONFLICT, "An unmanaged .synod/runtime directory already exists.", {
+        details: { path: LOCAL_RUNTIME_DIRECTORY, actualType: runtimeType }
+      });
+    }
+    if (existingDescriptor && compareVersions(existingDescriptor.runtimeVersion, runtimeVersion) > 0) {
+      throw new SynodError(ERROR_CODES.DOWNGRADE_UNSUPPORTED, "Refusing to replace a newer local Synod runtime with an older version.", {
+        details: { installed: existingDescriptor.runtimeVersion, requested: runtimeVersion }
+      });
+    }
+    if (existingDescriptor?.runtimeVersion === runtimeVersion) {
+      const existing = await inspectLocalRuntime(targetDirectory, existingDescriptor);
+      if (existing.ready) return existing;
+    }
+
+    stageDirectory = path.join(paths.synodDirectory, `.runtime-stage-${randomUUID()}`);
+    await mkdir(stageDirectory, { recursive: false });
     await writeFile(path.join(stageDirectory, "package.json"), `${JSON.stringify({
       name: "synod-project-runtime",
       version: "0.0.0",
@@ -366,15 +499,18 @@ export async function installLocalRuntime(targetDirectory, {
     await runPnpm(stageDirectory, { packageSpec, runtimeVersion, packageName, packageManager });
     await verifyStagedRuntime(stageDirectory, runtimeVersion);
     await commitStagedRuntime(targetDirectory, stageDirectory, serializeRuntimeDescriptor(runtimeVersion, packageSpec), { renamePath });
+    stageDirectory = undefined;
+    return inspectLocalRuntime(targetDirectory);
   } catch (error) {
-    await rm(stageDirectory, { recursive: true, force: true }).catch(() => {});
-    if (createdSynodDirectory) await rmdir(paths.synodDirectory).catch(() => {});
+    if (stageDirectory) await rm(stageDirectory, { recursive: true, force: true }).catch(() => {});
     if (error instanceof SynodError) throw error;
     throw new SynodError(ERROR_CODES.LOCAL_RUNTIME_INSTALL_FAILED, `Could not install the Synod project runtime: ${error.message}`, {
       cause: error
     });
+  } finally {
+    await releaseLock?.();
+    if (createdSynodDirectory) await rmdir(paths.synodDirectory).catch(() => {});
   }
-  return inspectLocalRuntime(targetDirectory);
 }
 
 function lifecycleOptions(command, args) {

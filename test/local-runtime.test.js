@@ -392,6 +392,64 @@ test("upgrade atomically replaces an older runtime before delegating", async () 
   assert.equal((await readLocalRuntimeDescriptor(directory)).runtimeVersion, packageVersion);
 });
 
+test("concurrent cross-version installs cannot commit a downgrade", async () => {
+  const directory = await temporaryProject();
+  let releaseNewer;
+  let reportNewerStarted;
+  let olderInstallerStarted = false;
+  const newerStarted = new Promise(resolve => { reportNewerStarted = resolve; });
+  const holdNewer = new Promise(resolve => { releaseNewer = resolve; });
+
+  const newer = installLocalRuntime(directory, {
+    runtimeVersion: "0.7.0",
+    packageSpec: "0.7.0",
+    async runPnpm(stageDirectory, context) {
+      await fakePnpmInstall(stageDirectory, context);
+      reportNewerStarted();
+      await holdNewer;
+    }
+  });
+  await newerStarted;
+
+  const older = installLocalRuntime(directory, {
+    runtimeVersion: "0.6.0",
+    packageSpec: "0.6.0",
+    async runPnpm(stageDirectory, context) {
+      olderInstallerStarted = true;
+      await fakePnpmInstall(stageDirectory, context);
+    }
+  }).then(
+    value => ({ value }),
+    error => ({ error })
+  );
+
+  await new Promise(resolve => setTimeout(resolve, 75));
+  assert.equal(olderInstallerStarted, false);
+  releaseNewer();
+  await newer;
+  const olderResult = await older;
+
+  assert.equal(olderResult.error?.code, ERROR_CODES.DOWNGRADE_UNSUPPORTED);
+  assert.equal((await readLocalRuntimeDescriptor(directory)).runtimeVersion, "0.7.0");
+  assert.equal((await inspectLocalRuntime(directory)).descriptor.runtimeVersion, "0.7.0");
+});
+
+test("a stale runtime install lock is reclaimed", async () => {
+  const directory = await temporaryProject();
+  const lockPath = path.join(directory, ".synod/runtime-install.lock");
+  await mkdir(path.dirname(lockPath), { recursive: true });
+  await writeFile(lockPath, `${JSON.stringify({
+    pid: 2_147_483_647,
+    token: "stale-runtime-owner",
+    createdAt: new Date(0).toISOString()
+  })}\n`);
+
+  const installed = await installLocalRuntime(directory, { runPnpm: fakePnpmInstall });
+
+  assert.equal(installed.ready, true);
+  await assert.rejects(readFile(lockPath, "utf8"), { code: "ENOENT" });
+});
+
 test("refuses to downgrade a newer pinned runtime", async () => {
   const directory = await temporaryProject();
   await writePinnedRuntime(directory, "9.9.9");
