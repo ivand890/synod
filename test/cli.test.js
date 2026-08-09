@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -11,17 +11,40 @@ import { packageVersion } from "../src/package.js";
 
 const bin = path.resolve("bin/synod.js");
 
-test("the installed entry point initializes a target directory", async () => {
+test("the installed entry point keeps init dry-run free of runtime and project writes", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-test-"));
 
   try {
-    const result = spawnSync(process.execPath, [bin, "init", directory], {
+    const result = spawnSync(process.execPath, [bin, "init", directory, "--dry-run"], {
       encoding: "utf8"
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Synod init completed/);
-    assert.match(await readFile(path.join(directory, "docs/synod/PLAN.md"), "utf8"), /Synod Execution Plan/);
+    assert.ok(result.stdout.includes(`Runtime: ${packageVersion} (install)`));
+    assert.match(result.stdout, /Synod init plan is valid/);
+    await assert.rejects(readFile(path.join(directory, "docs/synod/PLAN.md"), "utf8"), { code: "ENOENT" });
+    await assert.rejects(readFile(path.join(directory, ".synod/runtime.json"), "utf8"), { code: "ENOENT" });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the installed entry point emits one stable JSON error for an unmanaged runtime", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-runtime-conflict-test-"));
+
+  try {
+    await mkdir(path.join(directory, ".synod/runtime"), { recursive: true });
+    const result = spawnSync(process.execPath, [bin, "init", directory, "--json"], {
+      encoding: "utf8"
+    });
+    const envelope = JSON.parse(result.stdout);
+
+    assert.equal(result.status, 1);
+    assert.equal(result.stderr, "");
+    assert.equal(envelope.schemaVersion, 1);
+    assert.equal(envelope.ok, false);
+    assert.equal(envelope.error.code, ERROR_CODES.LOCAL_RUNTIME_CONFLICT);
+    assert.equal((await stat(path.join(directory, ".synod/runtime"))).isDirectory(), true);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

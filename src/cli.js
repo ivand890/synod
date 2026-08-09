@@ -34,14 +34,14 @@ Usage:
   synod --version
 
 Commands:
-  init        Transactionally install Synod files and an ownership manifest.
-  upgrade     Migrate and update a managed project; --dry-run previews the plan.
+  init        Install a project-local runtime, Synod files, and an ownership manifest.
+  upgrade     Update the selected local runtime and migrate managed project content.
   check       Verify managed-file hashes, ownership, and local project integrity.
   status      Read canonical orchestration state and detect checkpoint drift.
   checkpoint  Accept the current Git/worktree checkpoint in canonical state.
   task        Add tasks and apply validated, revision-aware state transitions.
   doctor      Probe Codex version, App Server, model, and reasoning capabilities.
-  uninstall   Remove unchanged Synod-owned content and preserve user-owned state.
+  uninstall   Remove the local runtime and unchanged managed content; preserve durable state.
   profiles    List built-in model profiles and their requirements.
   usage       Report token consumption for a Codex session tree, grouped by model.
 
@@ -234,11 +234,13 @@ function printLifecycleResult(command, result, output) {
     output.error("Resolve the paths or use --force for Synod-owned content.");
     return;
   }
+  if (result.runtimeVersion) output.log(`Runtime: ${result.runtimeVersion} (${result.runtimeAction || "project-local"})`);
   output.log(`Synod ${result.dryRun ? `${command} plan is valid` : `${command} completed`} in ${result.targetDirectory}`);
 }
 
 function textCheck(result) {
   const lines = [`Synod project check: ${result.healthy ? "healthy" : "failed"}`];
+  lines.push(`Runtime: ${result.runtimeVersion || "external"}`);
   lines.push(`Template: ${result.templateVersion} (manifest schema ${result.manifestSchemaVersion})`);
   lines.push(`Profile: ${result.profile}`);
   for (const item of result.checks) lines.push(`${item.status.padEnd(13)} ${item.ownership.padEnd(6)} ${item.path}`);

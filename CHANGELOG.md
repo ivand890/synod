@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added a per-project, version-pinned Synod runtime under `.synod/runtime`, bootstrapped through `pnpm dlx`, with delegation from external installations, atomic upgrades, dry-run planning, and validated uninstall cleanup.
 - Made `synod doctor` distinguish Codex CLI from Codex Desktop, select the active surface's executable, and report its version, executable source, and shared Codex home without conflating separate installations.
 
 ### Fixed
