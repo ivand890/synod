@@ -5,6 +5,7 @@ const profiles = {
     id: "synod-5.6",
     description: "Role-specialized GPT-5.6 profile for current Codex releases.",
     minimumCodexVersion: "0.147.0",
+    defaultSubagent: { model: "gpt-5.6-terra", effort: "max" },
     roles: {
       supervisor: { model: "gpt-5.6-sol", effort: "high", planEffort: "xhigh" },
       implementer: { model: "gpt-5.6-luna", effort: "max" },
@@ -18,6 +19,7 @@ const profiles = {
     id: "portable",
     description: "Portable profile for the full supported Codex range.",
     minimumCodexVersion: "0.142.0",
+    defaultSubagent: { model: "gpt-5.5", effort: "high" },
     roles: {
       supervisor: { model: "gpt-5.5", effort: "xhigh", planEffort: "xhigh" },
       implementer: { model: "gpt-5.5", effort: "high" },
@@ -54,7 +56,12 @@ export function evaluateProfile(profile, models) {
   );
   const missing = [];
 
-  for (const [role, requirement] of Object.entries(profile.roles)) {
+  const requirements = {
+    default_subagent: profile.defaultSubagent,
+    ...profile.roles
+  };
+
+  for (const [role, requirement] of Object.entries(requirements)) {
     const efforts = availableModels.get(requirement.model);
     if (!efforts) {
       missing.push({ role, model: requirement.model, capability: "model" });
