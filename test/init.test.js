@@ -37,6 +37,8 @@ test("initializes a fresh project with durable state, agents, and skill", async 
   const agents = await readFile(path.join(directory, "AGENTS.md"), "utf8");
   assert.match(agents, /<!-- synod:start -->/);
   assert.match(agents, /\$synod-advisor/);
+  assert.ok(agents.includes(`pnpm dlx @ivand890/synod@${packageVersion} status`));
+  assert.ok(agents.includes("pnpm dlx @ivand890/synod@<target-version> upgrade [directory]"));
 
   const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
   assert.equal(manifest.schemaVersion, 3);
@@ -201,6 +203,28 @@ test("keeps the primary agent supervisory and delegates routine implementation",
   assert.match(skill, /synod_implementer.*selected profile/);
   assert.match(agents, /Do not use the supervising model as the default implementation worker\./);
   assert.match(decisions, /Cost-efficient agents perform implementation/);
+});
+
+test("renders the GPT-5.6 profile with Luna resolved through custom-agent defaults", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory, profile: "synod-5.6" });
+
+  const config = await readFile(path.join(directory, ".codex/config.toml"), "utf8");
+  const implementer = await readFile(path.join(directory, ".codex/agents/synod-implementer.toml"), "utf8");
+  const mechanical = await readFile(path.join(directory, ".codex/agents/synod-mechanical.toml"), "utf8");
+  const skill = await readFile(path.join(directory, ".agents/skills/synod-advisor/SKILL.md"), "utf8");
+
+  assert.match(config, /model = "gpt-5\.6-sol"/);
+  assert.match(config, /default_subagent_model = "gpt-5\.6-luna"/);
+  assert.match(implementer, /model = "gpt-5\.6-luna"/);
+  assert.match(mechanical, /model = "gpt-5\.6-luna"/);
+  assert.match(skill, /Omit explicit `model` and `reasoning_effort` spawn overrides/);
+  assert.match(skill, /full-history fork inherits the parent agent type/);
+  assert.match(skill, /target configured custom-agent type and a fresh fork without full parent history/);
+  assert.match(skill, /Omit explicit `model` and `reasoning_effort`, then inspect/);
+  assert.match(skill, /persisted `turn_context`/);
+  assert.ok(skill.includes(`pnpm dlx @ivand890/synod@${packageVersion} doctor`));
+  assert.ok(skill.includes("pnpm dlx @ivand890/synod@<target-version> upgrade [directory]"));
 });
 
 test("rejects duplicate complete AGENTS.md blocks unless force repairs them", async () => {

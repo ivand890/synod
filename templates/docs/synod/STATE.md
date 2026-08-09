@@ -27,7 +27,7 @@ None.
 
 ## Drift policy
 
-Run `synod status`. Reconcile unexpected drift or explicitly accept the current branch, `HEAD`, and working-tree fingerprint with `synod checkpoint`.
+Run `__SYNOD_COMMAND__ status`. Reconcile unexpected drift or explicitly accept the current branch, `HEAD`, and working-tree fingerprint with `__SYNOD_COMMAND__ checkpoint`.
 
 ## Blockers
 

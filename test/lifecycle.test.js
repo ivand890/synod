@@ -9,6 +9,7 @@ import { applyTransaction, contentHash } from "../src/filesystem.js";
 import { checkProject, initProject, uninstallProject, upgradeProject } from "../src/lifecycle.js";
 import { migrateManifest } from "../src/migrations/index.js";
 import { LEGACY_V1_HASHES } from "../src/migrations/legacy-v1-hashes.js";
+import { packageName, packageVersion } from "../src/package.js";
 
 const temporaryDirectories = new Set();
 
@@ -179,6 +180,72 @@ test("upgrade dry-run is non-mutating and profile changes preserve durable state
   assert.equal(await readFile(goalPath, "utf8"), "# Durable custom goal\n");
   const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
   assert.equal(manifest.profile, "synod-5.6");
+});
+
+test("init recommends an upgrade for the validated project and requested profile", async () => {
+  const parent = await temporaryProject();
+  const directory = path.join(parent, "project with spaces");
+  await mkdir(directory);
+  await initProject({ directory, profile: "portable" });
+
+  await assert.rejects(
+    initProject({ directory, profile: "synod-5.6" }),
+    error => {
+      const expected = `pnpm dlx ${packageName}@${packageVersion} upgrade '${directory}' --profile synod-5.6`;
+      assert.equal(error.code, ERROR_CODES.UPGRADE_REQUIRED);
+      assert.equal(error.details.recommendedCommand, expected);
+      assert.match(error.message, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      return true;
+    }
+  );
+});
+
+test("init renders Windows-compatible quoting in upgrade recovery commands", async () => {
+  const parent = await temporaryProject();
+  const directory = path.join(parent, "project with spaces");
+  await mkdir(directory);
+  await initProject({ directory, profile: "portable" });
+
+  await assert.rejects(
+    initProject(
+      { directory, profile: "synod-5.6" },
+      { platform: "win32" }
+    ),
+    error => {
+      const expected = `pnpm dlx ${packageName}@${packageVersion} upgrade "${directory}" --profile synod-5.6`;
+      assert.equal(error.code, ERROR_CODES.UPGRADE_REQUIRED);
+      assert.equal(error.details.recommendedCommand, expected);
+      assert.doesNotMatch(error.details.recommendedCommand, /'[^']*'/);
+      return true;
+    }
+  );
+});
+
+test("upgrade preserves stale user guidance and emits an explicit repair path", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory, profile: "portable" });
+  const guidancePaths = [
+    "docs/synod/DECISIONS.md",
+    "docs/synod/PLAN.md",
+    "docs/synod/STATE.md"
+  ];
+  const preservedContent = "Custom project guidance using bare synod commands.\n";
+  for (const relativePath of guidancePaths) {
+    await writeFile(path.join(directory, relativePath), preservedContent, "utf8");
+  }
+
+  const result = await upgradeProject({ directory, profile: "synod-5.6" });
+
+  for (const relativePath of guidancePaths) {
+    assert.equal(await readFile(path.join(directory, relativePath), "utf8"), preservedContent);
+    const warning = result.warnings.find(item => item.details?.path === relativePath);
+    assert.equal(warning.code, WARNING_CODES.DURABLE_STATE_PRESERVED);
+    assert.equal(warning.details.action, "review-and-update-manually");
+    assert.deepEqual(warning.details.currentGuidance, [
+      "AGENTS.md",
+      ".agents/skills/synod-advisor/SKILL.md"
+    ]);
+  }
 });
 
 test("uninstall removes owned infrastructure and preserves user state and AGENTS content", async () => {

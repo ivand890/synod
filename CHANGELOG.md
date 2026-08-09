@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-08
+
+### Fixed
+
+- Documented and generated the correct custom-agent spawn contract so Luna resolves from the agent file or `[agents]` defaults instead of being incorrectly rejected from the narrower explicit-override list.
+- Accepted preview Codex builds whose numeric base remains inside the supported range when their required App Server and model capability probes pass, while reporting version eligibility separately from model compatibility and known-good CI versions.
+- Made generated project guidance invoke the exact installed Synod version through `pnpm dlx`, while requiring version upgrades to select their target bootstrap explicitly, generating project/profile-aware recovery commands, and warning when preserved user-owned guidance needs manual refresh.
+
 ## [0.6.0] - 2026-08-08
 
 ### Added
@@ -101,7 +109,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/ivand890/synod/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/ivand890/synod/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/ivand890/synod/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ivand890/synod/compare/v0.4.0...v0.5.0

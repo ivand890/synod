@@ -20,7 +20,7 @@ import {
   serializeManifest
 } from "./manifest.js";
 import { migrateManifest } from "./migrations/index.js";
-import { packageVersion } from "./package.js";
+import { packageName, packageVersion } from "./package.js";
 import { inspectLocalRuntime, readLocalRuntimeDescriptor } from "./local-runtime.js";
 import { DEFAULT_PROFILE, getProfile } from "./profiles.js";
 import {
@@ -49,6 +49,46 @@ const ORCHESTRATION_RECORD_PATHS = [
   ORCHESTRATION_EVENTS_PATH,
   ORCHESTRATION_STATUS_PATH
 ];
+
+const USER_GUIDANCE_PATHS = new Set([
+  "docs/synod/DECISIONS.md",
+  "docs/synod/PLAN.md",
+  "docs/synod/STATE.md"
+]);
+
+const CURRENT_GUIDANCE_PATHS = [
+  "AGENTS.md",
+  ".agents/skills/synod-advisor/SKILL.md"
+];
+
+function shellQuoteArgument(value, platform = process.platform) {
+  const stringValue = String(value);
+  const safePattern = platform === "win32"
+    ? /^[A-Za-z0-9_@+=:,./\\-]+$/
+    : /^[A-Za-z0-9_@%+=:,./-]+$/;
+  if (safePattern.test(stringValue)) return stringValue;
+  if (platform === "win32") return `"${stringValue.replaceAll('"', '""')}"`;
+  return `'${stringValue.replaceAll("'", `'"'"'`)}'`;
+}
+
+function renderUpgradeCommand({ directory, targetDirectory, requestedProfile, profileId, platform }) {
+  const args = ["pnpm", "dlx", `${packageName}@${packageVersion}`, "upgrade"];
+  if (directory !== ".") args.push(targetDirectory);
+  if (requestedProfile) args.push("--profile", profileId);
+  return args.map(argument => shellQuoteArgument(argument, platform)).join(" ");
+}
+
+function preservedGuidanceWarning(relativePath) {
+  return warning(
+    WARNING_CODES.DURABLE_STATE_PRESERVED,
+    `Preserved user-owned guidance in ${relativePath}. Review the current managed guidance and update this file manually if its Synod instructions are stale.`,
+    {
+      path: relativePath,
+      action: "review-and-update-manually",
+      currentGuidance: CURRENT_GUIDANCE_PATHS
+    }
+  );
+}
 
 async function validateTarget(directory) {
   const targetDirectory = path.resolve(directory || ".");
@@ -198,12 +238,20 @@ export async function initProject(
     existingManifest.templateVersion !== packageVersion ||
     existingManifest.profile !== profileId
   )) {
-    throw new SynodError(ERROR_CODES.UPGRADE_REQUIRED, "This project is already managed by another Synod template or profile. Run `synod upgrade`.", {
+    const recommendedCommand = renderUpgradeCommand({
+      directory,
+      targetDirectory,
+      requestedProfile,
+      profileId,
+      platform: dependencies.platform || process.platform
+    });
+    throw new SynodError(ERROR_CODES.UPGRADE_REQUIRED, `This project is already managed by another Synod template or profile. Run \`${recommendedCommand}\`.`, {
       details: {
         installedTemplateVersion: existingManifest.templateVersion,
         installedProfile: existingManifest.profile,
         targetTemplateVersion: packageVersion,
-        targetProfile: profileId
+        targetProfile: profileId,
+        recommendedCommand
       }
     });
   }
@@ -445,6 +493,11 @@ export async function upgradeProject(
       state = { path: relativePath, action: inspected.type === "missing" ? "preserve" : "preserve" };
       if (inspected.type === "missing") {
         warnings.push(warning(WARNING_CODES.USER_OWNED_FILE_MISSING, `User-owned file is missing: ${relativePath}`, { path: relativePath }));
+      } else if (
+        USER_GUIDANCE_PATHS.has(relativePath)
+        && normalizeText(inspected.content) !== normalizeText(templateContent)
+      ) {
+        warnings.push(preservedGuidanceWarning(relativePath));
       }
     } else if (inspected.type === "missing") {
       if (old && !force) state = { path: relativePath, conflict: true };
@@ -457,6 +510,12 @@ export async function upgradeProject(
     ))) {
       ownership = "user";
       state = { path: relativePath, action: "preserve" };
+      if (
+        USER_GUIDANCE_PATHS.has(relativePath)
+        && normalizeText(inspected.content) !== normalizeText(templateContent)
+      ) {
+        warnings.push(preservedGuidanceWarning(relativePath));
+      }
     } else if (!old && !force) {
       state = { path: relativePath, conflict: true };
     } else if (old && (old.provenance === "legacy-adopted" || inspected.hash !== old.contentHash) && !force) {

@@ -69,14 +69,24 @@ export async function doctorProject(
     ));
   }
 
-  const profileChecks = listProfiles().map(profile => ({
-    ...evaluateProfile(profile, models),
-    description: profile.description,
-    minimumCodexVersion: profile.minimumCodexVersion,
-    versionEligible: compatibility.status !== "unsupported"
-      && Boolean(parseVersion(codexVersion))
-      && compareVersions(codexVersion, profile.minimumCodexVersion) >= 0
-  })).map(value => ({ ...value, compatible: value.compatible && value.versionEligible }));
+  const parsedCodexVersion = parseVersion(codexVersion);
+  const profileCodexVersion = parsedCodexVersion?.prerelease === undefined
+    ? parsedCodexVersion
+    : { ...parsedCodexVersion, prerelease: undefined };
+  const profileChecks = listProfiles().map(profile => {
+    const capabilityCheck = evaluateProfile(profile, models);
+    const versionEligible = compatibility.status !== "unsupported"
+      && Boolean(profileCodexVersion)
+      && compareVersions(profileCodexVersion, profile.minimumCodexVersion) >= 0;
+    return {
+      ...capabilityCheck,
+      modelCompatible: capabilityCheck.compatible,
+      compatible: capabilityCheck.compatible && versionEligible,
+      description: profile.description,
+      minimumCodexVersion: profile.minimumCodexVersion,
+      versionEligible
+    };
+  });
   const recommendedProfile = profileChecks.find(item => item.id === "synod-5.6" && item.compatible)?.id
     || profileChecks.find(item => item.compatible)?.id
     || null;
@@ -94,7 +104,7 @@ export async function doctorProject(
   }
   const selectedProfile = projectCheck?.profile;
   const selectedProfileCheck = profileChecks.find(item => item.id === selectedProfile);
-  if (selectedProfileCheck && !selectedProfileCheck.compatible) {
+  if (selectedProfileCheck && !selectedProfileCheck.modelCompatible) {
     warnings.push(warning(
       WARNING_CODES.PROFILE_INCOMPATIBLE,
       `Installed model profile ${selectedProfile} is not available in this Codex runtime.`,
