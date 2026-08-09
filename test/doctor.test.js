@@ -92,11 +92,32 @@ test("doctor keeps Desktop and CLI versions scoped to their detected surface", a
   });
 });
 
-test("doctor fails closed when Desktop is detected but its executable is ambiguous", async () => {
+test("doctor prefers the surface confirmed by the initialized App Server", async () => {
   const result = await doctorProject(
     { project: false },
     {
-      clientFactory: () => fakeClient("0.147.0", models56, { surface: "desktop" }),
+      clientFactory: () => fakeClient("0.147.0", models56, {
+        surface: "desktop",
+        executable: "/Applications/ChatGPT.app/Contents/Resources/codex"
+      }),
+      runtimeResolver: () => runtime("cli", "/Applications/ChatGPT.app/Contents/Resources/codex")
+    }
+  );
+
+  assert.equal(result.codex.surface, "desktop");
+  assert.equal(result.codex.label, "Codex Desktop");
+  assert.equal(result.codex.version, "0.147.0");
+});
+
+test("doctor fails closed when Desktop is detected but its executable is ambiguous", async () => {
+  let clientCreated = false;
+  const result = await doctorProject(
+    { project: false },
+    {
+      clientFactory: () => {
+        clientCreated = true;
+        throw new Error("The PATH fallback must not start");
+      },
       runtimeResolver: () => ({
         surface: "desktop",
         executable: "codex",
@@ -107,6 +128,9 @@ test("doctor fails closed when Desktop is detected but its executable is ambiguo
   );
 
   assert.equal(result.healthy, false);
+  assert.equal(clientCreated, false);
+  assert.equal(result.codex.version, null);
+  assert.equal(result.codex.executable, null);
   assert.ok(result.issues.some(issue => issue.code === ERROR_CODES.CODEX_RUNTIME_AMBIGUOUS));
 });
 

@@ -544,15 +544,24 @@ export async function checkProject({ directory = "." } = {}) {
   const warnings = [];
 
   if (localRuntimeDescriptor) {
-    const localRuntime = await inspectLocalRuntime(targetDirectory, localRuntimeDescriptor);
-    checks.push({
+    const runtimeCheck = {
       path: ".synod/runtime",
       ownership: "runtime",
-      status: localRuntime.ready ? "ready" : "missing",
-      severity: localRuntime.ready ? "info" : "error",
       runtimeVersion: localRuntimeDescriptor.runtimeVersion,
       packageManager: localRuntimeDescriptor.packageManager
-    });
+    };
+    try {
+      const localRuntime = await inspectLocalRuntime(targetDirectory, localRuntimeDescriptor);
+      runtimeCheck.status = localRuntime.ready ? "ready" : "missing";
+      runtimeCheck.severity = localRuntime.ready ? "info" : "error";
+    } catch (error) {
+      if (error.code !== ERROR_CODES.LOCAL_RUNTIME_INVALID) throw error;
+      runtimeCheck.status = "invalid";
+      runtimeCheck.severity = "error";
+      runtimeCheck.code = error.code;
+      runtimeCheck.message = error.message;
+    }
+    checks.push(runtimeCheck);
   }
 
   for (const entry of manifest.files) {

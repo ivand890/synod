@@ -15,13 +15,14 @@ export async function doctorProject(
   } = {}
 ) {
   const runtime = runtimeResolver();
-  const client = clientFactory({ codexBin: runtime.executable });
+  const unresolvedDesktop = runtime.surface === "desktop" && !runtime.resolved;
+  const client = unresolvedDesktop ? undefined : clientFactory({ codexBin: runtime.executable });
   const issues = [];
   const warnings = [];
   let diagnostics = {};
   let models = [];
 
-  if (runtime.surface === "desktop" && !runtime.resolved) {
+  if (unresolvedDesktop) {
     issues.push({
       code: ERROR_CODES.CODEX_RUNTIME_AMBIGUOUS,
       message: "Synod is running from Codex Desktop but could not resolve the Desktop App Server executable.",
@@ -29,29 +30,31 @@ export async function doctorProject(
     });
   }
 
-  try {
-    await client.start();
-    await client.probeCapabilities();
-    models = await client.listModels();
-  } catch (error) {
-    const value = asSynodError(error);
-    issues.push({ code: value.code, message: value.message, details: value.details });
-  } finally {
-    await client.close().catch(error => {
+  if (client) {
+    try {
+      await client.start();
+      await client.probeCapabilities();
+      models = await client.listModels();
+    } catch (error) {
       const value = asSynodError(error);
       issues.push({ code: value.code, message: value.message, details: value.details });
-    });
-    diagnostics = client.getDiagnostics?.() || {};
-    warnings.push(...(client.getWarnings?.() || []));
+    } finally {
+      await client.close().catch(error => {
+        const value = asSynodError(error);
+        issues.push({ code: value.code, message: value.message, details: value.details });
+      });
+      diagnostics = client.getDiagnostics?.() || {};
+      warnings.push(...(client.getWarnings?.() || []));
+    }
   }
 
   const codexVersion = diagnostics.codexVersion;
   const reportedSurface = diagnostics.codexSurface || codexSurfaceFrom(diagnostics.codexUserAgent);
-  const codexSurface = runtime.surface || reportedSurface;
+  const codexSurface = ["desktop", "cli"].includes(reportedSurface) ? reportedSurface : runtime.surface;
   const codexRuntime = {
     surface: codexSurface,
     label: codexSurface === "desktop" ? "Codex Desktop" : codexSurface === "cli" ? "Codex CLI" : "Codex runtime",
-    executable: diagnostics.codexExecutable || runtime.executable || null,
+    executable: diagnostics.codexExecutable || (unresolvedDesktop ? null : runtime.executable) || null,
     executableSource: runtime.executableSource || null,
     home: diagnostics.codexHome || null
   };

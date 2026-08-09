@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { ERROR_CODES } from "../src/errors.js";
+import { checkProject, initProject } from "../src/lifecycle.js";
 import {
   LOCAL_RUNTIME_DESCRIPTOR_PATH,
   LOCAL_RUNTIME_DIRECTORY,
@@ -245,6 +246,47 @@ test("repairs a missing cache at its pinned version before delegation", async ()
   assert.equal((await inspectLocalRuntime(directory)).ready, true);
 });
 
+test("repairs a persisted non-version package source without an ambient override", async () => {
+  const directory = await temporaryProject();
+  const packageSpec = path.join(directory, "synod-package.tgz");
+  await writePinnedRuntime(directory, packageVersion, packageSpec);
+  await rm(path.join(directory, LOCAL_RUNTIME_DIRECTORY, "node_modules"), { recursive: true });
+  let repairOptions;
+
+  const result = await prepareLocalRuntime(["check", directory], {
+    cwd: directory,
+    env: {},
+    currentRuntime: async () => false,
+    installer: (targetDirectory, options) => {
+      repairOptions = options;
+      return installLocalRuntime(targetDirectory, { ...options, runPnpm: fakePnpmInstall });
+    },
+    executor: () => 0
+  });
+
+  assert.equal(result.action, "delegate");
+  assert.deepEqual(repairOptions, { runtimeVersion: packageVersion, packageSpec });
+  assert.equal((await readLocalRuntimeDescriptor(directory)).packageSpec, packageSpec);
+  assert.equal((await inspectLocalRuntime(directory)).ready, true);
+});
+
+test("the active-runtime marker prevents recursive delegation when paths cannot", async () => {
+  const directory = await temporaryProject();
+  await installLocalRuntime(directory, { runPnpm: fakePnpmInstall });
+  let delegated = false;
+
+  const result = await prepareLocalRuntime(["check", directory], {
+    cwd: directory,
+    env: { SYNOD_LOCAL_RUNTIME_ACTIVE: packageVersion },
+    currentRuntime: async () => false,
+    executor: () => { delegated = true; return 0; }
+  });
+
+  assert.equal(result.action, "current");
+  assert.equal(result.local, true);
+  assert.equal(delegated, false);
+});
+
 test("init and uninstall dry-runs never repair a missing runtime cache", async () => {
   const directory = await temporaryProject();
   await installLocalRuntime(directory, { runPnpm: fakePnpmInstall });
@@ -279,6 +321,24 @@ test("invalid init options fail before the runtime installer can mutate a projec
       installer: async () => { installerCalled = true; }
     }),
     error => error.code === ERROR_CODES.UNKNOWN_OPTION
+  );
+  assert.equal(installerCalled, false);
+  await assert.rejects(readFile(path.join(directory, LOCAL_RUNTIME_DESCRIPTOR_PATH), "utf8"), { code: "ENOENT" });
+});
+
+test("invalid task options fail before selecting or repairing a project runtime", async () => {
+  const directory = await temporaryProject();
+  let installerCalled = false;
+
+  await assert.rejects(
+    prepareLocalRuntime([
+      "task", "add", "T-001",
+      "--objective", "--cwd", directory
+    ], {
+      cwd: directory,
+      installer: async () => { installerCalled = true; }
+    }),
+    error => error.code === ERROR_CODES.MISSING_OPTION_VALUE
   );
   assert.equal(installerCalled, false);
   await assert.rejects(readFile(path.join(directory, LOCAL_RUNTIME_DESCRIPTOR_PATH), "utf8"), { code: "ENOENT" });
@@ -335,11 +395,25 @@ test("upgrade atomically replaces an older runtime before delegating", async () 
 test("refuses to downgrade a newer pinned runtime", async () => {
   const directory = await temporaryProject();
   await writePinnedRuntime(directory, "9.9.9");
+  let installerCalled = false;
+  let executorCalled = false;
+
+  await assert.rejects(
+    prepareLocalRuntime(["upgrade", directory, "--dry-run"], {
+      cwd: directory,
+      installer: async () => { installerCalled = true; },
+      executor: () => { executorCalled = true; return 0; },
+      currentRuntime: async () => false
+    }),
+    error => error.code === ERROR_CODES.DOWNGRADE_UNSUPPORTED
+  );
 
   await assert.rejects(
     installLocalRuntime(directory, { runPnpm: fakePnpmInstall }),
     error => error.code === ERROR_CODES.DOWNGRADE_UNSUPPORTED
   );
+  assert.equal(installerCalled, false);
+  assert.equal(executorCalled, false);
   assert.equal((await readLocalRuntimeDescriptor(directory)).runtimeVersion, "9.9.9");
 });
 
@@ -353,6 +427,37 @@ test("a failed staged upgrade preserves the prior runtime", async () => {
     }),
     error => error.code === ERROR_CODES.LOCAL_RUNTIME_INSTALL_FAILED
   );
+  assert.equal((await readLocalRuntimeDescriptor(directory)).runtimeVersion, "0.4.0");
+  assert.equal((await inspectLocalRuntime(directory)).descriptor.runtimeVersion, "0.4.0");
+});
+
+test("a commit-stage failure restores both the prior runtime and descriptor", async () => {
+  const directory = await temporaryProject();
+  await writePinnedRuntime(directory, "0.4.0");
+  const descriptorPath = path.join(directory, LOCAL_RUNTIME_DESCRIPTOR_PATH);
+  let injected = false;
+
+  await assert.rejects(
+    installLocalRuntime(directory, {
+      runPnpm: fakePnpmInstall,
+      async renamePath(source, destination) {
+        const sourceName = path.basename(source);
+        if (
+          !injected
+          && destination === descriptorPath
+          && sourceName.startsWith(".runtime-descriptor-")
+          && !sourceName.startsWith(".runtime-descriptor-backup-")
+        ) {
+          injected = true;
+          throw new Error("injected descriptor commit failure");
+        }
+        return rename(source, destination);
+      }
+    }),
+    error => error.code === ERROR_CODES.LOCAL_RUNTIME_INSTALL_FAILED
+  );
+
+  assert.equal(injected, true);
   assert.equal((await readLocalRuntimeDescriptor(directory)).runtimeVersion, "0.4.0");
   assert.equal((await inspectLocalRuntime(directory)).descriptor.runtimeVersion, "0.4.0");
 });
@@ -392,6 +497,25 @@ test("detects descriptor and installed-package version divergence", async () => 
     inspectLocalRuntime(directory),
     error => error.code === ERROR_CODES.LOCAL_RUNTIME_INVALID
   );
+});
+
+test("check reports an invalid local runtime while preserving the remaining checks", async () => {
+  const directory = await temporaryProject();
+  await installLocalRuntime(directory, { runPnpm: fakePnpmInstall });
+  await initProject({ directory });
+  const packagePath = path.join(directory, LOCAL_RUNTIME_DIRECTORY, "node_modules", ...packageName.split("/"), "package.json");
+  const metadata = JSON.parse(await readFile(packagePath, "utf8"));
+  metadata.version = "9.9.9";
+  await writeFile(packagePath, `${JSON.stringify(metadata)}\n`);
+
+  const result = await checkProject({ directory });
+  const runtimeCheck = result.checks.find(item => item.path === ".synod/runtime");
+
+  assert.equal(result.healthy, false);
+  assert.equal(runtimeCheck.status, "invalid");
+  assert.equal(runtimeCheck.severity, "error");
+  assert.equal(runtimeCheck.code, ERROR_CODES.LOCAL_RUNTIME_INVALID);
+  assert.ok(result.checks.some(item => item.path === "AGENTS.md"));
 });
 
 test("rejects a malformed runtime descriptor without touching it", async () => {

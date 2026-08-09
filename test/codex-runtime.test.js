@@ -92,6 +92,21 @@ test("keeps an explicit executable override scoped to the detected surface", () 
   });
 });
 
+test("classifies an explicit Desktop executable without relying on process ancestry", () => {
+  const executable = "/Applications/ChatGPT.app/Contents/Resources/codex";
+  assert.deepEqual(resolveCodexRuntime({
+    env: { SYNOD_CODEX_BIN: executable },
+    platform: "darwin",
+    parentPid: 30,
+    inspect: () => undefined
+  }), {
+    surface: "desktop",
+    executable,
+    executableSource: "SYNOD_CODEX_BIN",
+    resolved: true
+  });
+});
+
 test("marks an unresolved Desktop executable instead of silently treating PATH as Desktop", () => {
   assert.deepEqual(resolveCodexRuntime({
     env: { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: "Codex Desktop" },

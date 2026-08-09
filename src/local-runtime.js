@@ -13,6 +13,7 @@ import {
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { parseCheckpointArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs } from "./command-options.js";
 import { compareVersions, parseVersion } from "./compatibility.js";
 import { ERROR_CODES, SynodError } from "./errors.js";
 import { inspectPath, pathType, resolveProjectPath, unsafeAncestor } from "./filesystem.js";
@@ -25,7 +26,6 @@ export const LOCAL_RUNTIME_EXECUTABLE = `${LOCAL_RUNTIME_DIRECTORY}/node_modules
 
 const currentPackageRoot = fileURLToPath(new URL("..", import.meta.url));
 const lifecycleCommands = new Set(["init", "upgrade", "check", "status", "doctor", "uninstall"]);
-const cwdCommands = new Set(["task", "usage"]);
 
 function boundedOutput(value) {
   const output = String(value || "").trim();
@@ -55,8 +55,6 @@ function serializeRuntimeDescriptor(runtimeVersion, packageSpec) {
 }
 
 function validateRuntimeDescriptor(descriptor) {
-  const packageSpecAllowed = descriptor?.packageSpec === descriptor?.runtimeVersion
-    || descriptor?.packageSpec === process.env.SYNOD_RUNTIME_PACKAGE_SPEC;
   if (
     !descriptor
     || typeof descriptor !== "object"
@@ -65,7 +63,6 @@ function validateRuntimeDescriptor(descriptor) {
     || !parseVersion(descriptor.runtimeVersion)
     || typeof descriptor.packageSpec !== "string"
     || descriptor.packageSpec.length === 0
-    || !packageSpecAllowed
     || descriptor.packageName !== packageName
     || descriptor.packageManager !== "pnpm"
     || descriptor.runtimeDirectory !== LOCAL_RUNTIME_DIRECTORY
@@ -260,7 +257,7 @@ async function verifyStagedRuntime(stageDirectory, runtimeVersion) {
   }
 }
 
-async function commitStagedRuntime(targetDirectory, stageDirectory, descriptorContent) {
+async function commitStagedRuntime(targetDirectory, stageDirectory, descriptorContent, { renamePath = rename } = {}) {
   const paths = runtimePaths(targetDirectory);
   const token = randomUUID();
   const runtimeBackup = path.join(paths.synodDirectory, `.runtime-backup-${token}`);
@@ -279,10 +276,10 @@ async function commitStagedRuntime(targetDirectory, stageDirectory, descriptorCo
       });
     }
     if (runtimeType === "directory") {
-      await rename(paths.runtime, runtimeBackup);
+      await renamePath(paths.runtime, runtimeBackup);
       runtimeBackedUp = true;
     }
-    await rename(stageDirectory, paths.runtime);
+    await renamePath(stageDirectory, paths.runtime);
     runtimeCommitted = true;
 
     const descriptorType = await pathType(paths.descriptor);
@@ -292,16 +289,16 @@ async function commitStagedRuntime(targetDirectory, stageDirectory, descriptorCo
       });
     }
     if (descriptorType === "file") {
-      await rename(paths.descriptor, descriptorBackup);
+      await renamePath(paths.descriptor, descriptorBackup);
       descriptorBackedUp = true;
     }
-    await rename(descriptorTemporary, paths.descriptor);
+    await renamePath(descriptorTemporary, paths.descriptor);
     descriptorCommitted = true;
   } catch (error) {
     if (descriptorCommitted) await unlink(paths.descriptor).catch(() => {});
-    if (descriptorBackedUp) await rename(descriptorBackup, paths.descriptor).catch(() => {});
+    if (descriptorBackedUp) await renamePath(descriptorBackup, paths.descriptor).catch(() => {});
     if (runtimeCommitted) await rm(paths.runtime, { recursive: true, force: true }).catch(() => {});
-    if (runtimeBackedUp) await rename(runtimeBackup, paths.runtime).catch(() => {});
+    if (runtimeBackedUp) await renamePath(runtimeBackup, paths.runtime).catch(() => {});
     throw error instanceof SynodError ? error : new SynodError(
       ERROR_CODES.LOCAL_RUNTIME_INSTALL_FAILED,
       `Synod could not commit the project runtime: ${error.message}`,
@@ -317,9 +314,10 @@ async function commitStagedRuntime(targetDirectory, stageDirectory, descriptorCo
 export async function installLocalRuntime(targetDirectory, {
   runtimeVersion = packageVersion,
   packageSpec = process.env.SYNOD_RUNTIME_PACKAGE_SPEC || runtimeVersion,
-  runPnpm = defaultRunPnpm
+  runPnpm = defaultRunPnpm,
+  renamePath = rename
 } = {}) {
-  if (!parseVersion(runtimeVersion) || (packageSpec !== runtimeVersion && packageSpec !== process.env.SYNOD_RUNTIME_PACKAGE_SPEC)) {
+  if (!parseVersion(runtimeVersion) || typeof packageSpec !== "string" || packageSpec.length === 0) {
     throw new SynodError(ERROR_CODES.LOCAL_RUNTIME_INVALID, "The requested Synod local runtime version or package source is invalid.", {
       details: { runtimeVersion }
     });
@@ -367,7 +365,7 @@ export async function installLocalRuntime(targetDirectory, {
     await writeFile(path.join(stageDirectory, ".gitignore"), "node_modules/\n", { flag: "wx" });
     await runPnpm(stageDirectory, { packageSpec, runtimeVersion, packageName, packageManager });
     await verifyStagedRuntime(stageDirectory, runtimeVersion);
-    await commitStagedRuntime(targetDirectory, stageDirectory, serializeRuntimeDescriptor(runtimeVersion, packageSpec));
+    await commitStagedRuntime(targetDirectory, stageDirectory, serializeRuntimeDescriptor(runtimeVersion, packageSpec), { renamePath });
   } catch (error) {
     await rm(stageDirectory, { recursive: true, force: true }).catch(() => {});
     if (createdSynodDirectory) await rmdir(paths.synodDirectory).catch(() => {});
@@ -379,66 +377,31 @@ export async function installLocalRuntime(targetDirectory, {
   return inspectLocalRuntime(targetDirectory);
 }
 
-function lifecycleDirectoryArgument(args, cwd) {
-  const command = args[0];
-  const valueOptions = new Set([...(command === "init" || command === "upgrade" ? ["--profile"] : [])]);
-  const flagOptions = new Set(["--json", "-h", "--help"]);
-  if (["init", "upgrade", "uninstall"].includes(command)) {
-    flagOptions.add("--dry-run");
-    flagOptions.add("--force");
+function lifecycleOptions(command, args) {
+  const lifecycleArgs = args.slice(1);
+  if (command === "init" || command === "upgrade") {
+    return parseLifecycleArgs(lifecycleArgs, { allowDryRun: true, allowForce: true, allowProfile: true });
   }
-  let directory;
-  for (let index = 1; index < args.length; index += 1) {
-    const arg = args[index];
-    if (arg === "-h" || arg === "--help") break;
-    if (valueOptions.has(arg)) {
-      const value = args[index + 1];
-      if (!value || value.startsWith("-")) {
-        throw new SynodError(ERROR_CODES.MISSING_OPTION_VALUE, `Missing value for ${arg}.`, {
-          details: { option: arg }
-        });
-      }
-      index += 1;
-      continue;
-    }
-    if (flagOptions.has(arg)) continue;
-    if (arg.startsWith("-")) {
-      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, {
-        details: { option: arg }
-      });
-    }
-    if (directory !== undefined) {
-      throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, {
-        details: { argument: arg }
-      });
-    }
-    directory = arg;
+  if (command === "uninstall") {
+    return parseLifecycleArgs(lifecycleArgs, { allowDryRun: true, allowForce: true });
   }
-  return path.resolve(cwd, directory || ".");
+  return parseLifecycleArgs(lifecycleArgs);
 }
 
 function directoryArgument(args, cwd) {
   const command = args[0];
-  if (lifecycleCommands.has(command)) return lifecycleDirectoryArgument(args, cwd);
+  if (lifecycleCommands.has(command)) {
+    return path.resolve(cwd, lifecycleOptions(command, args).directory || ".");
+  }
   if (command === "profiles") return path.resolve(cwd);
   if (command === "checkpoint") {
-    let directory;
-    for (let index = 1; index < args.length; index += 1) {
-      const arg = args[index];
-      if (arg === "-h" || arg === "--help") break;
-      if (["--actor", "--message", "--cwd"].includes(arg)) {
-        const value = args[index + 1];
-        if (arg === "--cwd" && value && !value.startsWith("-")) directory = value;
-        index += 1;
-      } else if (!arg.startsWith("-") && directory === undefined) {
-        directory = arg;
-      }
-    }
-    return path.resolve(cwd, directory || ".");
+    return path.resolve(cwd, parseCheckpointArgs(args.slice(1)).directory || ".");
   }
-  if (cwdCommands.has(command)) {
-    const cwdIndex = args.lastIndexOf("--cwd");
-    return path.resolve(cwd, cwdIndex >= 0 && args[cwdIndex + 1] ? args[cwdIndex + 1] : ".");
+  if (command === "task") {
+    return path.resolve(cwd, parseTaskArgs(args.slice(1)).directory || ".");
+  }
+  if (command === "usage") {
+    return path.resolve(cwd, parseUsageArgs(args.slice(1), { cwd }).cwd || ".");
   }
   return path.resolve(cwd);
 }
@@ -465,7 +428,8 @@ export async function prepareLocalRuntime(args, {
   cwd = process.cwd(),
   installer = installLocalRuntime,
   executor = executeLocalRuntime,
-  currentRuntime = isCurrentLocalRuntime
+  currentRuntime = isCurrentLocalRuntime,
+  env = process.env
 } = {}) {
   const targetDirectory = directoryArgument(args, cwd);
   if (!targetDirectory) return { action: "current", targetDirectory: undefined, local: false };
@@ -475,20 +439,30 @@ export async function prepareLocalRuntime(args, {
   if (helpRequested) return { action: "current", targetDirectory, local: false };
   const descriptor = await readLocalRuntimeDescriptor(targetDirectory);
   let localRuntime = descriptor ? await inspectLocalRuntime(targetDirectory, descriptor) : undefined;
-  const currentLocal = await currentRuntime(localRuntime);
+  const activeLocal = Boolean(
+    localRuntime?.ready
+    && env.SYNOD_LOCAL_RUNTIME_ACTIVE
+    && env.SYNOD_LOCAL_RUNTIME_ACTIVE === descriptor.runtimeVersion
+  );
+  const currentLocal = activeLocal || await currentRuntime(localRuntime);
   if (currentLocal) return {
     action: "current",
     targetDirectory,
     local: true,
     localRuntime,
     runtimePlan: {
-      action: process.env.SYNOD_LOCAL_RUNTIME_ACTION || "unchanged",
+      action: env.SYNOD_LOCAL_RUNTIME_ACTION || "unchanged",
       runtimeVersion: descriptor.runtimeVersion,
       packageManager: "pnpm"
     }
   };
 
   if (command === "upgrade" && dryRun) {
+    if (descriptor && compareVersions(descriptor.runtimeVersion, packageVersion) > 0) {
+      throw new SynodError(ERROR_CODES.DOWNGRADE_UNSUPPORTED, "Refusing to replace a newer local Synod runtime with an older version.", {
+        details: { installed: descriptor.runtimeVersion, requested: packageVersion }
+      });
+    }
     return {
       action: "current",
       targetDirectory,

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { errorEnvelope } from "../src/contracts.js";
-import { asSynodError } from "../src/errors.js";
+import { asSynodError, withErrorDetails } from "../src/errors.js";
 import { prepareLocalRuntime, removeLocalRuntime } from "../src/local-runtime.js";
 import { run } from "../src/cli.js";
 
@@ -26,12 +26,19 @@ try {
   if (runtime.action === "delegate") {
     process.exitCode = runtime.status;
   } else {
-    const buffer = runtime.local && command === "uninstall" && !args.includes("--dry-run")
-      ? bufferedConsole()
-      : undefined;
+    const removesRuntime = runtime.local && command === "uninstall" && !args.includes("--dry-run");
+    const buffer = removesRuntime ? bufferedConsole() : undefined;
     const status = await run(args, buffer?.output || console, { localRuntimePlan: runtime.runtimePlan });
-    if (status === 0 && runtime.local && command === "uninstall" && !args.includes("--dry-run")) {
-      await removeLocalRuntime(runtime.targetDirectory);
+    if (status === 0 && removesRuntime) {
+      try {
+        await removeLocalRuntime(runtime.targetDirectory);
+      } catch (error) {
+        if (!jsonRequested) buffer.flush();
+        throw withErrorDetails(error, {
+          projectUninstall: "completed",
+          runtimeRemoval: "failed"
+        });
+      }
     }
     buffer?.flush();
     process.exitCode = status;

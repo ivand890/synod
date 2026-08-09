@@ -107,7 +107,9 @@ export function resolveCodexRuntime({
 } = {}) {
   const originatorDesktop = /desktop/i.test(env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE || "");
   const ancestorExecutable = findCodexAncestor(parentPid, platform, inspect, originatorDesktop);
-  const desktop = originatorDesktop || isDesktopCodexExecutable(ancestorExecutable);
+  const desktop = originatorDesktop
+    || isDesktopCodexExecutable(env.SYNOD_CODEX_BIN)
+    || isDesktopCodexExecutable(ancestorExecutable);
   const surface = desktop ? "desktop" : "cli";
   if (env.SYNOD_CODEX_BIN) {
     return {

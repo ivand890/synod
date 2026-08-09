@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Made tag publishing recoverable and fail closed across npm and GitHub Releases, with draft staging, exact `gitHead` checks, a durable tag FIFO, and enforced `latest` parity.
+- Hardened local-runtime routing, cache restoration, recursion prevention, rollback, uninstall reporting, and project checks while keeping Desktop diagnostics fail closed when its executable cannot be resolved.
 
 ## [0.5.1] - 2026-08-08
 

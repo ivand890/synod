@@ -202,6 +202,29 @@ test("doctor text identifies the Desktop executable, version, and shared Codex h
   assert.match(messages[0], /Codex home: \/Users\/test\/\.codex/);
 });
 
+test("doctor text never renders an undefined Codex surface", async () => {
+  const messages = [];
+  const output = { log: message => messages.push(message), warn() {}, error() {} };
+  const status = await run(["doctor"], output, {
+    doctorRuntimeResolver: () => ({
+      surface: undefined,
+      executable: "codex",
+      executableSource: "PATH-unresolved",
+      resolved: false
+    }),
+    doctorClientFactory: () => ({
+      async start() { throw new Error("spawn failed"); },
+      async close() {},
+      getWarnings() { return []; },
+      getDiagnostics() { return {}; }
+    })
+  });
+
+  assert.equal(status, 1);
+  assert.match(messages[0], /Codex runtime: unavailable \(unsupported; unknown surface\)/);
+  assert.doesNotMatch(messages[0], /undefined/);
+});
+
 test("task and status commands expose canonical orchestration through schema-1 envelopes", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-orchestration-json-test-"));
   const messages = [];

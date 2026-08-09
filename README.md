@@ -27,7 +27,9 @@ cd your-project
 pnpm dlx @ivand890/synod init
 ```
 
-Fresh installs default to the conservative `portable` profile. Run `synod doctor` before opting into `synod-5.6` so the exact model and reasoning capabilities are verified for the installed Codex runtime and account.
+Fresh installs default to the conservative `portable` profile. Run `pnpm dlx @ivand890/synod doctor` (or `synod doctor` with the optional global installation) before opting into `synod-5.6` so the exact model and reasoning capabilities are verified for the installed Codex runtime and account.
+
+The examples below use the shorter `synod` form, which requires the optional global installation. Without it, prefix each command with `pnpm dlx @ivand890/synod`, for example `pnpm dlx @ivand890/synod doctor`.
 
 Select a model profile, preview changes first, or replace conflicting Synod-managed files:
 
