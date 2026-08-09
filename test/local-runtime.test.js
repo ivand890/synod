@@ -188,6 +188,34 @@ test("project-scoped commands without directory arguments still delegate locally
   assert.deepEqual(delegated, { version: packageVersion, args: ["profiles", "--json"] });
 });
 
+test("a positional checkpoint directory selects that project's pinned runtime", async () => {
+  const callerDirectory = await temporaryProject();
+  const projectDirectory = await temporaryProject();
+  await installLocalRuntime(projectDirectory, { runPnpm: fakePnpmInstall });
+  let delegated;
+
+  const result = await prepareLocalRuntime([
+    "checkpoint",
+    projectDirectory,
+    "--message", "Accept reviewed state"
+  ], {
+    cwd: callerDirectory,
+    currentRuntime: async () => false,
+    executor(localRuntime, args) {
+      delegated = { targetDirectory: projectDirectory, version: localRuntime.descriptor.runtimeVersion, args };
+      return 0;
+    }
+  });
+
+  assert.equal(result.action, "delegate");
+  assert.equal(result.targetDirectory, projectDirectory);
+  assert.deepEqual(delegated, {
+    targetDirectory: projectDirectory,
+    version: packageVersion,
+    args: ["checkpoint", projectDirectory, "--message", "Accept reviewed state"]
+  });
+});
+
 test("repairs a missing cache at its pinned version before delegation", async () => {
   const directory = await temporaryProject();
   await writePinnedRuntime(directory, "0.4.0");
@@ -215,6 +243,30 @@ test("repairs a missing cache at its pinned version before delegation", async ()
   assert.equal(installs, 1);
   assert.equal(delegatedVersion, "0.4.0");
   assert.equal((await inspectLocalRuntime(directory)).ready, true);
+});
+
+test("init and uninstall dry-runs never repair a missing runtime cache", async () => {
+  const directory = await temporaryProject();
+  await installLocalRuntime(directory, { runPnpm: fakePnpmInstall });
+  await rm(path.join(directory, LOCAL_RUNTIME_DIRECTORY, "node_modules"), { recursive: true });
+  let installs = 0;
+
+  for (const command of ["init", "uninstall"]) {
+    await assert.rejects(
+      prepareLocalRuntime([command, directory, "--dry-run"], {
+        cwd: directory,
+        installer: async () => { installs += 1; },
+        currentRuntime: async () => false
+      }),
+      error => error.code === ERROR_CODES.LOCAL_RUNTIME_INVALID
+    );
+  }
+
+  assert.equal(installs, 0);
+  await assert.rejects(
+    readFile(path.join(directory, LOCAL_RUNTIME_DIRECTORY, "node_modules", packageName, "package.json"), "utf8"),
+    { code: "ENOENT" }
+  );
 });
 
 test("invalid init options fail before the runtime installer can mutate a project", async () => {

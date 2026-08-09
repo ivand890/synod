@@ -25,7 +25,7 @@ export const LOCAL_RUNTIME_EXECUTABLE = `${LOCAL_RUNTIME_DIRECTORY}/node_modules
 
 const currentPackageRoot = fileURLToPath(new URL("..", import.meta.url));
 const lifecycleCommands = new Set(["init", "upgrade", "check", "status", "doctor", "uninstall"]);
-const cwdCommands = new Set(["checkpoint", "task", "usage"]);
+const cwdCommands = new Set(["task", "usage"]);
 
 function boundedOutput(value) {
   const output = String(value || "").trim();
@@ -421,6 +421,21 @@ function directoryArgument(args, cwd) {
   const command = args[0];
   if (lifecycleCommands.has(command)) return lifecycleDirectoryArgument(args, cwd);
   if (command === "profiles") return path.resolve(cwd);
+  if (command === "checkpoint") {
+    let directory;
+    for (let index = 1; index < args.length; index += 1) {
+      const arg = args[index];
+      if (arg === "-h" || arg === "--help") break;
+      if (["--actor", "--message", "--cwd"].includes(arg)) {
+        const value = args[index + 1];
+        if (arg === "--cwd" && value && !value.startsWith("-")) directory = value;
+        index += 1;
+      } else if (!arg.startsWith("-") && directory === undefined) {
+        directory = arg;
+      }
+    }
+    return path.resolve(cwd, directory || ".");
+  }
   if (cwdCommands.has(command)) {
     const cwdIndex = args.lastIndexOf("--cwd");
     return path.resolve(cwd, cwdIndex >= 0 && args[cwdIndex + 1] ? args[cwdIndex + 1] : ".");
@@ -486,6 +501,14 @@ export async function prepareLocalRuntime(args, {
         packageManager: "pnpm"
       }
     };
+  }
+
+  if (dryRun && descriptor && !localRuntime.ready) {
+    throw new SynodError(
+      ERROR_CODES.LOCAL_RUNTIME_INVALID,
+      "Dry-run will not restore a missing project-local Synod runtime cache.",
+      { details: { runtimeVersion: descriptor.runtimeVersion, path: LOCAL_RUNTIME_DIRECTORY } }
+    );
   }
 
   if (command === "upgrade" && !dryRun) {
