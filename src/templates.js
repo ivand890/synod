@@ -39,6 +39,8 @@ function replacements(version, profile) {
     __SYNOD_SUPERVISOR_MODEL__: roles.supervisor.model,
     __SYNOD_SUPERVISOR_EFFORT__: roles.supervisor.effort,
     __SYNOD_PLAN_EFFORT__: roles.supervisor.planEffort,
+    __SYNOD_DEFAULT_SUBAGENT_MODEL__: profile.defaultSubagent.model,
+    __SYNOD_DEFAULT_SUBAGENT_EFFORT__: profile.defaultSubagent.effort,
     __SYNOD_IMPLEMENTER_MODEL__: roles.implementer.model,
     __SYNOD_IMPLEMENTER_EFFORT__: roles.implementer.effort,
     __SYNOD_EXPLORER_MODEL__: roles.explorer.model,

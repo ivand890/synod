@@ -7,5 +7,5 @@ plan_mode_reasoning_effort = "__SYNOD_PLAN_EFFORT__"
 [agents]
 enabled = true
 max_concurrent_threads_per_session = 3
-default_subagent_model = "__SYNOD_IMPLEMENTER_MODEL__"
-default_subagent_reasoning_effort = "__SYNOD_IMPLEMENTER_EFFORT__"
+default_subagent_model = "__SYNOD_DEFAULT_SUBAGENT_MODEL__"
+default_subagent_reasoning_effort = "__SYNOD_DEFAULT_SUBAGENT_EFFORT__"

@@ -197,7 +197,7 @@ synod profiles
 synod profiles --json
 ```
 
-- `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. It requires Codex 0.147.0 or later within the supported range, including eligible previews such as `0.147.1-alpha.1`, and verifies each model and reasoning effort through `model/list`.
+- `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. Its global subagent fallback is Terra because current Codex 0.147 validates that fallback against the narrower spawn override set before applying a selected custom-agent file; Luna remains valid inside the implementer and mechanical agent files. The profile requires Codex 0.147.0 or later within the supported range, including eligible previews such as `0.147.1-alpha.1`, and verifies the fallback plus each role model and reasoning effort through `model/list`.
 - `portable` uses GPT-5.5 at role-specific reasoning efforts. It is the conservative fallback verified across both known-good Codex versions and account-specific model catalogs.
 
 `synod doctor` identifies whether Synod is running from Codex CLI or Codex Desktop and probes that surface's own App Server executable. It resolves the active Codex process from the process ancestry, falling back to `codex` from `PATH` for a standalone CLI invocation. An explicit `SYNOD_CODEX_BIN` still takes precedence. If Desktop is detected but its executable cannot be resolved, `doctor` fails closed instead of silently reporting the CLI version as the Desktop version.
@@ -219,7 +219,7 @@ The numeric version range determines `codex.status` and version eligibility; onl
 - The configured implementer completes atomic tasks with explicit write scope and acceptance criteria.
 - Explorer, reviewer, verifier, and mechanical roles use the selected profile's declared models and reasoning efforts.
 - Spawn a configured custom agent by its name with a fresh fork and a self-contained contract. Do not send explicit model or reasoning overrides: the custom agent file resolves first, followed by `[agents]` defaults and then the parent configuration. Full-history forks inherit the parent agent type.
-- The spawn tool's explicit override list is not the complete subagent model catalog. `synod doctor` verifies the broader model capabilities; a controlled child `turn_context` is the final check when default resolution is in doubt.
+- The spawn tool's explicit override list is not the complete custom-agent model catalog: a custom agent file can select Luna even when explicit per-call overrides list only Sol and Terra. The global `[agents].default_subagent_model` is different because current Codex validates it through that narrower spawn path before applying the custom-agent layer. Synod therefore keeps a Terra global fallback while role files retain their own models. `synod doctor` verifies the broader model capabilities; a controlled child `turn_context` is the final check when resolution is in doubt.
 
 The supervisor does not perform routine implementation. It may make only a minimal integration repair when delegating that repair would cost more than the change, and must record the exception.
 

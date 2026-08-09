@@ -205,7 +205,7 @@ test("keeps the primary agent supervisory and delegates routine implementation",
   assert.match(decisions, /Cost-efficient agents perform implementation/);
 });
 
-test("renders the GPT-5.6 profile with Luna resolved through custom-agent defaults", async () => {
+test("renders the GPT-5.6 profile with a spawn-safe default and Luna custom-agent overrides", async () => {
   const directory = await temporaryProject();
   await initProject({ directory, profile: "synod-5.6" });
 
@@ -215,7 +215,8 @@ test("renders the GPT-5.6 profile with Luna resolved through custom-agent defaul
   const skill = await readFile(path.join(directory, ".agents/skills/synod-advisor/SKILL.md"), "utf8");
 
   assert.match(config, /model = "gpt-5\.6-sol"/);
-  assert.match(config, /default_subagent_model = "gpt-5\.6-luna"/);
+  assert.match(config, /default_subagent_model = "gpt-5\.6-terra"/);
+  assert.match(config, /default_subagent_reasoning_effort = "max"/);
   assert.match(implementer, /model = "gpt-5\.6-luna"/);
   assert.match(mechanical, /model = "gpt-5\.6-luna"/);
   assert.match(skill, /Omit explicit `model` and `reasoning_effort` spawn overrides/);
