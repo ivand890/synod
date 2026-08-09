@@ -246,20 +246,40 @@ test("repairs a missing cache at its pinned version before delegation", async ()
   assert.equal((await inspectLocalRuntime(directory)).ready, true);
 });
 
-test("repairs a persisted non-version package source without an ambient override", async () => {
+test("reads a persisted non-version source but requires matching opt-in before repair", async () => {
   const directory = await temporaryProject();
   const packageSpec = path.join(directory, "synod-package.tgz");
   await writePinnedRuntime(directory, packageVersion, packageSpec);
   await rm(path.join(directory, LOCAL_RUNTIME_DIRECTORY, "node_modules"), { recursive: true });
   let repairOptions;
 
+  await assert.rejects(
+    prepareLocalRuntime(["check", directory], {
+      cwd: directory,
+      env: {},
+      currentRuntime: async () => false,
+      installer: (targetDirectory, options) => installLocalRuntime(targetDirectory, {
+        ...options,
+        runPnpm: fakePnpmInstall
+      }),
+      executor: () => 0
+    }),
+    error => error.code === ERROR_CODES.LOCAL_RUNTIME_INVALID
+      && error.details.requiredOptIn === "SYNOD_RUNTIME_PACKAGE_SPEC"
+  );
+  assert.equal((await readLocalRuntimeDescriptor(directory)).packageSpec, packageSpec);
+
   const result = await prepareLocalRuntime(["check", directory], {
     cwd: directory,
-    env: {},
+    env: { SYNOD_RUNTIME_PACKAGE_SPEC: packageSpec },
     currentRuntime: async () => false,
     installer: (targetDirectory, options) => {
       repairOptions = options;
-      return installLocalRuntime(targetDirectory, { ...options, runPnpm: fakePnpmInstall });
+      return installLocalRuntime(targetDirectory, {
+        ...options,
+        trustedPackageSpec: packageSpec,
+        runPnpm: fakePnpmInstall
+      });
     },
     executor: () => 0
   });
@@ -518,6 +538,43 @@ test("a commit-stage failure restores both the prior runtime and descriptor", as
   assert.equal(injected, true);
   assert.equal((await readLocalRuntimeDescriptor(directory)).runtimeVersion, "0.4.0");
   assert.equal((await inspectLocalRuntime(directory)).descriptor.runtimeVersion, "0.4.0");
+});
+
+test("a failed runtime rollback reports every restoration failure", async () => {
+  const directory = await temporaryProject();
+  await writePinnedRuntime(directory, "0.4.0");
+  const descriptorPath = path.join(directory, LOCAL_RUNTIME_DESCRIPTOR_PATH);
+
+  await assert.rejects(
+    installLocalRuntime(directory, {
+      runPnpm: fakePnpmInstall,
+      async renamePath(source, destination) {
+        const sourceName = path.basename(source);
+        if (
+          destination === descriptorPath
+          && sourceName.startsWith(".runtime-descriptor-")
+        ) {
+          throw new Error(sourceName.startsWith(".runtime-descriptor-backup-")
+            ? "injected descriptor restore failure"
+            : "injected descriptor commit failure");
+        }
+        return rename(source, destination);
+      }
+    }),
+    error => error.code === ERROR_CODES.ROLLBACK_FAILED
+      && error.details.originalCode === ERROR_CODES.LOCAL_RUNTIME_INSTALL_FAILED
+      && error.details.rollbackFailures.some(item => item.operation === "restore-descriptor")
+  );
+
+  assert.equal((await inspectLocalRuntime(directory, {
+    schemaVersion: 1,
+    runtimeVersion: "0.4.0",
+    packageSpec: "0.4.0",
+    packageName,
+    packageManager: "pnpm",
+    runtimeDirectory: LOCAL_RUNTIME_DIRECTORY,
+    executable: `${LOCAL_RUNTIME_DIRECTORY}/node_modules/${packageName}/bin/synod.js`
+  })).ready, true);
 });
 
 test("removes only a validated local runtime installation", async () => {

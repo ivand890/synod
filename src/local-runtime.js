@@ -303,10 +303,40 @@ async function commitStagedRuntime(targetDirectory, stageDirectory, descriptorCo
     await renamePath(descriptorTemporary, paths.descriptor);
     descriptorCommitted = true;
   } catch (error) {
-    if (descriptorCommitted) await unlink(paths.descriptor).catch(() => {});
-    if (descriptorBackedUp) await renamePath(descriptorBackup, paths.descriptor).catch(() => {});
-    if (runtimeCommitted) await rm(paths.runtime, { recursive: true, force: true }).catch(() => {});
-    if (runtimeBackedUp) await renamePath(runtimeBackup, paths.runtime).catch(() => {});
+    const rollbackFailures = [];
+    const rollback = async (operation, target, action) => {
+      try {
+        await action();
+      } catch (rollbackError) {
+        rollbackFailures.push({
+          operation,
+          target,
+          code: rollbackError.code,
+          message: rollbackError.message
+        });
+      }
+    };
+    if (descriptorCommitted) {
+      await rollback("remove-new-descriptor", LOCAL_RUNTIME_DESCRIPTOR_PATH, () => unlink(paths.descriptor));
+    }
+    if (descriptorBackedUp) {
+      await rollback("restore-descriptor", LOCAL_RUNTIME_DESCRIPTOR_PATH, () => renamePath(descriptorBackup, paths.descriptor));
+    }
+    if (runtimeCommitted) {
+      await rollback("remove-new-runtime", LOCAL_RUNTIME_DIRECTORY, () => rm(paths.runtime, { recursive: true, force: true }));
+    }
+    if (runtimeBackedUp) {
+      await rollback("restore-runtime", LOCAL_RUNTIME_DIRECTORY, () => renamePath(runtimeBackup, paths.runtime));
+    }
+    if (rollbackFailures.length > 0) {
+      throw new SynodError(ERROR_CODES.ROLLBACK_FAILED, "Synod could not fully restore the previous project runtime.", {
+        cause: error,
+        details: {
+          originalCode: error.code || ERROR_CODES.LOCAL_RUNTIME_INSTALL_FAILED,
+          rollbackFailures
+        }
+      });
+    }
     throw error instanceof SynodError ? error : new SynodError(
       ERROR_CODES.LOCAL_RUNTIME_INSTALL_FAILED,
       `Synod could not commit the project runtime: ${error.message}`,
@@ -443,13 +473,25 @@ async function acquireRuntimeInstallLock(paths, {
 export async function installLocalRuntime(targetDirectory, {
   runtimeVersion = packageVersion,
   packageSpec = process.env.SYNOD_RUNTIME_PACKAGE_SPEC || runtimeVersion,
+  trustedPackageSpec = process.env.SYNOD_RUNTIME_PACKAGE_SPEC,
   runPnpm = defaultRunPnpm,
   renamePath = rename,
   lockOptions
 } = {}) {
-  if (!parseVersion(runtimeVersion) || typeof packageSpec !== "string" || packageSpec.length === 0) {
+  if (
+    !parseVersion(runtimeVersion)
+    || typeof packageSpec !== "string"
+    || packageSpec.length === 0
+    || (packageSpec !== runtimeVersion && packageSpec !== trustedPackageSpec)
+  ) {
     throw new SynodError(ERROR_CODES.LOCAL_RUNTIME_INVALID, "The requested Synod local runtime version or package source is invalid.", {
-      details: { runtimeVersion }
+      details: {
+        runtimeVersion,
+        ...(packageSpec !== runtimeVersion ? {
+          packageSpec,
+          requiredOptIn: "SYNOD_RUNTIME_PACKAGE_SPEC"
+        } : {})
+      }
     });
   }
   const targetType = await pathType(targetDirectory);
