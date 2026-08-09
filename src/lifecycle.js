@@ -61,17 +61,21 @@ const CURRENT_GUIDANCE_PATHS = [
   ".agents/skills/synod-advisor/SKILL.md"
 ];
 
-function shellQuoteArgument(value) {
+function shellQuoteArgument(value, platform = process.platform) {
   const stringValue = String(value);
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(stringValue)) return stringValue;
+  const safePattern = platform === "win32"
+    ? /^[A-Za-z0-9_@+=:,./\\-]+$/
+    : /^[A-Za-z0-9_@%+=:,./-]+$/;
+  if (safePattern.test(stringValue)) return stringValue;
+  if (platform === "win32") return `"${stringValue.replaceAll('"', '""')}"`;
   return `'${stringValue.replaceAll("'", `'"'"'`)}'`;
 }
 
-function renderUpgradeCommand({ directory, targetDirectory, requestedProfile, profileId }) {
+function renderUpgradeCommand({ directory, targetDirectory, requestedProfile, profileId, platform }) {
   const args = ["pnpm", "dlx", `${packageName}@${packageVersion}`, "upgrade"];
   if (directory !== ".") args.push(targetDirectory);
   if (requestedProfile) args.push("--profile", profileId);
-  return args.map(shellQuoteArgument).join(" ");
+  return args.map(argument => shellQuoteArgument(argument, platform)).join(" ");
 }
 
 function preservedGuidanceWarning(relativePath) {
@@ -238,7 +242,8 @@ export async function initProject(
       directory,
       targetDirectory,
       requestedProfile,
-      profileId
+      profileId,
+      platform: dependencies.platform || process.platform
     });
     throw new SynodError(ERROR_CODES.UPGRADE_REQUIRED, `This project is already managed by another Synod template or profile. Run \`${recommendedCommand}\`.`, {
       details: {

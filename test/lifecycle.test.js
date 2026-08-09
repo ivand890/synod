@@ -200,6 +200,27 @@ test("init recommends an upgrade for the validated project and requested profile
   );
 });
 
+test("init renders Windows-compatible quoting in upgrade recovery commands", async () => {
+  const parent = await temporaryProject();
+  const directory = path.join(parent, "project with spaces");
+  await mkdir(directory);
+  await initProject({ directory, profile: "portable" });
+
+  await assert.rejects(
+    initProject(
+      { directory, profile: "synod-5.6" },
+      { platform: "win32" }
+    ),
+    error => {
+      const expected = `pnpm dlx ${packageName}@${packageVersion} upgrade "${directory}" --profile synod-5.6`;
+      assert.equal(error.code, ERROR_CODES.UPGRADE_REQUIRED);
+      assert.equal(error.details.recommendedCommand, expected);
+      assert.doesNotMatch(error.details.recommendedCommand, /'[^']*'/);
+      return true;
+    }
+  );
+});
+
 test("upgrade preserves stale user guidance and emits an explicit repair path", async () => {
   const directory = await temporaryProject();
   await initProject({ directory, profile: "portable" });
