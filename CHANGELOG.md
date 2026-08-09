@@ -11,8 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - Documented and generated the correct custom-agent spawn contract so Luna resolves from the agent file or `[agents]` defaults instead of being incorrectly rejected from the narrower explicit-override list.
-- Accepted preview Codex builds whose numeric base remains inside the supported range when their required App Server and model capability probes pass, while keeping them distinct from known-good CI versions.
-- Made generated project guidance invoke the exact installed Synod version through `pnpm dlx`, while requiring version upgrades to select their target bootstrap explicitly, so a project-local installation no longer implies that a bare `synod` executable exists in `PATH`.
+- Accepted preview Codex builds whose numeric base remains inside the supported range when their required App Server and model capability probes pass, while reporting version eligibility separately from model compatibility and known-good CI versions.
+- Made generated project guidance invoke the exact installed Synod version through `pnpm dlx`, while requiring version upgrades to select their target bootstrap explicitly, generating project/profile-aware recovery commands, and warning when preserved user-owned guidance needs manual refresh.
 
 ## [0.6.0] - 2026-08-08
 

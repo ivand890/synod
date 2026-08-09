@@ -40,7 +40,7 @@ synod init --dry-run
 synod init --force
 ```
 
-Synod preserves an existing user-owned `.codex/config.toml`. It reports the file so you can merge the recommended model and agent defaults deliberately. It also never overwrites the user-owned goal, plan, state notes, decisions, or worklog under `docs/synod/`, even with `--force`; only the generated `STATUS.md` record is updated by orchestration commands.
+Synod preserves an existing user-owned `.codex/config.toml`. It reports the file so you can merge the recommended model and agent defaults deliberately. It also never overwrites the user-owned goal, plan, state notes, decisions, or worklog under `docs/synod/`, even with `--force`; only the generated `STATUS.md` record is updated by orchestration commands. When an upgrade finds operational guidance in `DECISIONS.md`, `PLAN.md`, or `STATE.md` that differs from the current templates, it emits `SYNOD_DURABLE_STATE_PRESERVED`. Review the current managed instructions in `AGENTS.md` and `.agents/skills/synod-advisor/SKILL.md`, then update the preserved file manually if its Synod examples are stale.
 
 If `AGENTS.md` contains multiple complete Synod managed blocks, initialization stops without writing. `synod init --force` consolidates those blocks into one canonical block and preserves surrounding user content. Incomplete, nested, or orphaned Synod markers are always rejected because their ownership boundary cannot be repaired safely.
 
@@ -197,7 +197,7 @@ synod profiles
 synod profiles --json
 ```
 
-- `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. It requires Codex 0.147.0 or a preview of that base version within the supported range, and verifies each model and reasoning effort through `model/list`.
+- `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. It requires Codex 0.147.0 or later within the supported range, including eligible previews such as `0.147.1-alpha.1`, and verifies each model and reasoning effort through `model/list`.
 - `portable` uses GPT-5.5 at role-specific reasoning efforts. It is the conservative fallback verified across both known-good Codex versions and account-specific model catalogs.
 
 `synod doctor` identifies whether Synod is running from Codex CLI or Codex Desktop and probes that surface's own App Server executable. It resolves the active Codex process from the process ancestry, falling back to `codex` from `PATH` for a standalone CLI invocation. An explicit `SYNOD_CODEX_BIN` still takes precedence. If Desktop is detected but its executable cannot be resolved, `doctor` fails closed instead of silently reporting the CLI version as the Desktop version.
@@ -208,10 +208,10 @@ It then classifies that surface's Codex version independently from model availab
 
 - Supported: `>=0.142.0 <0.148.0`.
 - Known-good and exercised in CI: `0.142.0`, `0.147.0`.
-- Supported but not known-good: stable or preview builds whose numeric base is inside the range and whose required App Server and model capabilities pass live probes.
+- Supported but not known-good: stable or preview builds whose numeric base is inside the range. This version classification alone does not assert profile availability.
 - Unsupported: versions below the range and versions at or above `0.148.0`, including previews of those versions, until the CI contract is deliberately expanded.
 
-Inside the supported range, unlisted patch/minor versions are reported as `supported`; only matrix-tested versions are `known-good`. A supported binary can still lack a selected model profile, which `doctor` reports separately.
+The numeric version range determines `codex.status` and version eligibility; only matrix-tested versions are `known-good`. Live App Server and model probes independently determine `modelCompatible` and profile compatibility. Overall health requires both an eligible version and the selected profile's required capabilities.
 
 ## Advisor routing
 
