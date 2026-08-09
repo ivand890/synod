@@ -100,11 +100,50 @@ test("spawns, initializes, probes, and resolves App Server responses", async () 
   }]);
   assert.deepEqual(response, { value: 42 });
   assert.deepEqual(models.map(model => model.id), ["gpt-test", "gpt-second"]);
+  assert.equal(diagnostics.codexExecutable, "custom-codex");
+  assert.equal(diagnostics.codexHome, "/tmp/codex");
+  assert.equal(diagnostics.codexSurface, "cli");
   assert.equal(diagnostics.codexVersion, "0.142.0");
   assert.equal(diagnostics.appServer.capabilities.initialize, true);
   assert.equal(diagnostics.appServer.capabilities.threadList, true);
   assert.equal(diagnostics.appServer.capabilities.modelList, true);
   assert.deepEqual(child.signals, ["SIGTERM"]);
+});
+
+test("distinguishes Codex Desktop from Codex CLI user agents", async () => {
+  const child = respondingChild();
+  const desktopChild = new FakeChild((message, value) => {
+    if (message.method === "initialize") value.respond(message.id, {
+      ...initializedResponse(),
+      userAgent: "Codex Desktop/0.147.0-alpha.6.5"
+    });
+  });
+  const cliClient = new CodexAppServerClient({ spawnProcess: () => child });
+  const desktopClient = new CodexAppServerClient({
+    codexBin: "/Applications/ChatGPT.app/Contents/Resources/codex",
+    spawnProcess: () => desktopChild
+  });
+
+  await cliClient.start();
+  await desktopClient.start();
+
+  assert.deepEqual(
+    {
+      surface: cliClient.getDiagnostics().codexSurface,
+      version: cliClient.getDiagnostics().codexVersion
+    },
+    { surface: "cli", version: "0.142.0" }
+  );
+  assert.deepEqual(
+    {
+      surface: desktopClient.getDiagnostics().codexSurface,
+      version: desktopClient.getDiagnostics().codexVersion
+    },
+    { surface: "desktop", version: "0.147.0-alpha.6.5" }
+  );
+
+  await cliClient.close();
+  await desktopClient.close();
 });
 
 test("rejects repeated model pagination cursors", async () => {

@@ -21,6 +21,7 @@ import {
 } from "./manifest.js";
 import { migrateManifest } from "./migrations/index.js";
 import { packageVersion } from "./package.js";
+import { inspectLocalRuntime, readLocalRuntimeDescriptor } from "./local-runtime.js";
 import { DEFAULT_PROFILE, getProfile } from "./profiles.js";
 import {
   agentsBlockSeparator,
@@ -184,6 +185,12 @@ export async function initProject(
   dependencies = {}
 ) {
   const targetDirectory = await validateTarget(directory);
+  const localRuntimeDescriptor = await readLocalRuntimeDescriptor(targetDirectory);
+  const localRuntimePlan = dependencies.localRuntimePlan || (localRuntimeDescriptor ? {
+    action: "unchanged",
+    runtimeVersion: localRuntimeDescriptor.runtimeVersion,
+    packageManager: localRuntimeDescriptor.packageManager
+  } : undefined);
   const existingManifest = await readManifest(targetDirectory, { required: false });
   const profileId = requestedProfile || existingManifest?.profile || DEFAULT_PROFILE;
   if (existingManifest && (
@@ -356,6 +363,8 @@ export async function initProject(
   }
 
   const result = resultFromPlan(targetDirectory, dryRun, operations, states, warnings, conflicts, {
+    runtimeVersion: localRuntimePlan?.runtimeVersion || null,
+    runtimeAction: localRuntimePlan?.action || null,
     templateVersion: packageVersion,
     profile: profile.id
   });
@@ -370,6 +379,12 @@ export async function upgradeProject(
   dependencies = {}
 ) {
   const targetDirectory = await validateTarget(directory);
+  const localRuntimeDescriptor = await readLocalRuntimeDescriptor(targetDirectory);
+  const localRuntimePlan = dependencies.localRuntimePlan || (localRuntimeDescriptor ? {
+    action: "unchanged",
+    runtimeVersion: localRuntimeDescriptor.runtimeVersion,
+    packageManager: localRuntimeDescriptor.packageManager
+  } : undefined);
   const rawManifest = await readManifest(targetDirectory);
   const { manifest: installed, applied } = await migrateManifest(targetDirectory, rawManifest);
   if (compareVersions(installed.templateVersion, packageVersion) > 0) {
@@ -506,6 +521,8 @@ export async function upgradeProject(
   }
 
   const result = resultFromPlan(targetDirectory, dryRun, operations, states, warnings, conflicts, {
+    runtimeVersion: localRuntimePlan?.runtimeVersion || null,
+    runtimeAction: localRuntimePlan?.action || null,
     fromTemplateVersion: installed.templateVersion,
     templateVersion: packageVersion,
     profile: profile.id,
@@ -520,10 +537,32 @@ export async function upgradeProject(
 
 export async function checkProject({ directory = "." } = {}) {
   const targetDirectory = await validateTarget(directory);
+  const localRuntimeDescriptor = await readLocalRuntimeDescriptor(targetDirectory);
   const rawManifest = await readManifest(targetDirectory);
   const { manifest, applied } = await migrateManifest(targetDirectory, rawManifest);
   const checks = [];
   const warnings = [];
+
+  if (localRuntimeDescriptor) {
+    const runtimeCheck = {
+      path: ".synod/runtime",
+      ownership: "runtime",
+      runtimeVersion: localRuntimeDescriptor.runtimeVersion,
+      packageManager: localRuntimeDescriptor.packageManager
+    };
+    try {
+      const localRuntime = await inspectLocalRuntime(targetDirectory, localRuntimeDescriptor);
+      runtimeCheck.status = localRuntime.ready ? "ready" : "missing";
+      runtimeCheck.severity = localRuntime.ready ? "info" : "error";
+    } catch (error) {
+      if (error.code !== ERROR_CODES.LOCAL_RUNTIME_INVALID) throw error;
+      runtimeCheck.status = "invalid";
+      runtimeCheck.severity = "error";
+      runtimeCheck.code = error.code;
+      runtimeCheck.message = error.message;
+    }
+    checks.push(runtimeCheck);
+  }
 
   for (const entry of manifest.files) {
     const inspected = await inspectManagedPath(targetDirectory, entry.path);
@@ -612,6 +651,7 @@ export async function checkProject({ directory = "." } = {}) {
   return {
     targetDirectory,
     healthy,
+    runtimeVersion: localRuntimeDescriptor?.runtimeVersion || null,
     templateVersion: manifest.templateVersion,
     profile: manifest.profile,
     manifestSchemaVersion: rawManifest.schemaVersion,
@@ -627,6 +667,12 @@ export async function uninstallProject(
   dependencies = {}
 ) {
   const targetDirectory = await validateTarget(directory);
+  const localRuntimeDescriptor = await readLocalRuntimeDescriptor(targetDirectory);
+  const localRuntimePlan = dependencies.localRuntimePlan || (localRuntimeDescriptor ? {
+    action: "remove",
+    runtimeVersion: localRuntimeDescriptor.runtimeVersion,
+    packageManager: localRuntimeDescriptor.packageManager
+  } : undefined);
   const rawManifest = await readManifest(targetDirectory);
   const { manifest } = await migrateManifest(targetDirectory, rawManifest);
   const operations = [];
@@ -692,6 +738,8 @@ export async function uninstallProject(
   }
 
   const result = resultFromPlan(targetDirectory, dryRun, operations, states, warnings, conflicts, {
+    runtimeVersion: localRuntimePlan?.runtimeVersion || null,
+    runtimeAction: localRuntimePlan?.action || null,
     templateVersion: manifest.templateVersion,
     profile: manifest.profile
   });

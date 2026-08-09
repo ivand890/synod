@@ -6,9 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-08
+
+### Added
+
+- Added a per-project, version-pinned Synod runtime under `.synod/runtime`, bootstrapped through `pnpm dlx`, with delegation from external installations, atomic upgrades, dry-run planning, and validated uninstall cleanup.
+- Made `synod doctor` distinguish Codex CLI from Codex Desktop, select the active surface's executable, and report its version, executable source, and shared Codex home without conflating separate installations.
+
 ### Fixed
 
 - Made tag publishing recoverable and fail closed across npm and GitHub Releases, with draft staging, exact `gitHead` checks, a durable tag FIFO, and enforced `latest` parity.
+- Hardened local-runtime routing, cache restoration, recursion prevention, rollback, uninstall reporting, and project checks while keeping Desktop diagnostics fail closed when its executable cannot be resolved.
 
 ## [0.5.1] - 2026-08-08
 
@@ -93,7 +101,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/ivand890/synod/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/ivand890/synod/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ivand890/synod/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/ivand890/synod/compare/v0.3.2...v0.4.0

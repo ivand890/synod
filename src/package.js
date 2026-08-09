@@ -5,3 +5,5 @@ const packagePath = fileURLToPath(new URL("../package.json", import.meta.url));
 const packageJson = JSON.parse(readFileSync(packagePath, "utf8"));
 
 export const packageVersion = packageJson.version;
+export const packageName = packageJson.name;
+export const packageManager = packageJson.packageManager;

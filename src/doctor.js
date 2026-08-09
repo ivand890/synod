@@ -1,41 +1,66 @@
 import process from "node:process";
-import { CodexAppServerClient } from "./app-server.js";
+import { CodexAppServerClient, codexSurfaceFrom } from "./app-server.js";
+import { resolveCodexRuntime } from "./codex-runtime.js";
 import { classifyCodexVersion, CODEX_COMPATIBILITY, compareVersions, parseVersion } from "./compatibility.js";
 import { WARNING_CODES, warning } from "./contracts.js";
-import { asSynodError } from "./errors.js";
+import { ERROR_CODES, asSynodError } from "./errors.js";
 import { checkProject } from "./lifecycle.js";
 import { listProfiles, evaluateProfile } from "./profiles.js";
 
 export async function doctorProject(
   { directory = ".", project = true } = {},
-  { clientFactory = () => new CodexAppServerClient() } = {}
+  {
+    clientFactory = options => new CodexAppServerClient(options),
+    runtimeResolver = resolveCodexRuntime
+  } = {}
 ) {
-  const client = clientFactory();
+  const runtime = runtimeResolver();
+  const unresolvedDesktop = runtime.surface === "desktop" && !runtime.resolved;
+  const client = unresolvedDesktop ? undefined : clientFactory({ codexBin: runtime.executable });
   const issues = [];
   const warnings = [];
   let diagnostics = {};
   let models = [];
 
-  try {
-    await client.start();
-    await client.probeCapabilities();
-    models = await client.listModels();
-  } catch (error) {
-    const value = asSynodError(error);
-    issues.push({ code: value.code, message: value.message, details: value.details });
-  } finally {
-    await client.close().catch(error => {
+  if (unresolvedDesktop) {
+    issues.push({
+      code: ERROR_CODES.CODEX_RUNTIME_AMBIGUOUS,
+      message: "Synod is running from Codex Desktop but could not resolve the Desktop App Server executable.",
+      details: runtime
+    });
+  }
+
+  if (client) {
+    try {
+      await client.start();
+      await client.probeCapabilities();
+      models = await client.listModels();
+    } catch (error) {
       const value = asSynodError(error);
       issues.push({ code: value.code, message: value.message, details: value.details });
-    });
-    diagnostics = client.getDiagnostics?.() || {};
-    warnings.push(...(client.getWarnings?.() || []));
+    } finally {
+      await client.close().catch(error => {
+        const value = asSynodError(error);
+        issues.push({ code: value.code, message: value.message, details: value.details });
+      });
+      diagnostics = client.getDiagnostics?.() || {};
+      warnings.push(...(client.getWarnings?.() || []));
+    }
   }
 
   const codexVersion = diagnostics.codexVersion;
+  const reportedSurface = diagnostics.codexSurface || codexSurfaceFrom(diagnostics.codexUserAgent);
+  const codexSurface = ["desktop", "cli"].includes(reportedSurface) ? reportedSurface : runtime.surface;
+  const codexRuntime = {
+    surface: codexSurface,
+    label: codexSurface === "desktop" ? "Codex Desktop" : codexSurface === "cli" ? "Codex CLI" : "Codex runtime",
+    executable: diagnostics.codexExecutable || (unresolvedDesktop ? null : runtime.executable) || null,
+    executableSource: runtime.executableSource || null,
+    home: diagnostics.codexHome || null
+  };
   const compatibility = codexVersion
-    ? { version: codexVersion, ...classifyCodexVersion(codexVersion), range: CODEX_COMPATIBILITY.supported, knownGood: [...CODEX_COMPATIBILITY.knownGood] }
-    : { version: null, status: "unsupported", reason: "version_unavailable", range: CODEX_COMPATIBILITY.supported, knownGood: [...CODEX_COMPATIBILITY.knownGood] };
+    ? { ...codexRuntime, version: codexVersion, ...classifyCodexVersion(codexVersion), range: CODEX_COMPATIBILITY.supported, knownGood: [...CODEX_COMPATIBILITY.knownGood] }
+    : { ...codexRuntime, version: null, status: "unsupported", reason: "version_unavailable", range: CODEX_COMPATIBILITY.supported, knownGood: [...CODEX_COMPATIBILITY.knownGood] };
   if (compatibility.status === "unsupported") {
     warnings.push(warning(
       WARNING_CODES.CODEX_VERSION_UNSUPPORTED,

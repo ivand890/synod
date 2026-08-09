@@ -4,32 +4,32 @@ Synod installs a persistent, reviewed advisor loop for Codex projects. The selec
 
 ## Install
 
-Install from npm:
-
-```bash
-pnpm add --global @ivand890/synod
-```
-
-Or run it without a global installation:
+The default and supported bootstrap path is `pnpm dlx`:
 
 ```bash
 pnpm dlx @ivand890/synod init
 ```
 
-You can also install directly from the public GitHub repository:
+This installs the exact Synod version selected by `pnpm dlx` into `.synod/runtime` in the project. Each project therefore keeps an independent runtime and can upgrade on its own schedule. A global installation remains optional:
 
 ```bash
-pnpm add --global github:ivand890/synod
+pnpm add --global @ivand890/synod
 ```
+
+When a global or `pnpm dlx` entry point runs inside an initialized project, it delegates to that project's pinned local runtime. `pnpm` is the only bootstrap package manager exercised and supported for this initial implementation.
+
+The local `node_modules/` directory is a disposable cache. After cloning a project, invoking Synod through `pnpm dlx` or an optional global installation reconstructs the exact version in `.synod/runtime.json` before delegating.
 
 ## Initialize a project
 
 ```bash
 cd your-project
-synod init
+pnpm dlx @ivand890/synod init
 ```
 
-Fresh installs default to the conservative `portable` profile. Run `synod doctor` before opting into `synod-5.6` so the exact model and reasoning capabilities are verified for the installed Codex runtime and account.
+Fresh installs default to the conservative `portable` profile. Run `pnpm dlx @ivand890/synod doctor` (or `synod doctor` with the optional global installation) before opting into `synod-5.6` so the exact model and reasoning capabilities are verified for the installed Codex runtime and account.
+
+The examples below use the shorter `synod` form, which requires the optional global installation. Without it, prefix each command with `pnpm dlx @ivand890/synod`, for example `pnpm dlx @ivand890/synod doctor`.
 
 Select a model profile, preview changes first, or replace conflicting Synod-managed files:
 
@@ -46,6 +46,8 @@ If `AGENTS.md` contains multiple complete Synod managed blocks, initialization s
 
 Synod keeps canonical orchestration state in `.synod/state.json`, an append-only audit stream in `.synod/events.jsonl`, and a generated human view in `docs/synod/STATUS.md`. Goal, decision, plan, state-note, and worklog Markdown remain user-owned supporting context. Upgrades and uninstall preserve both kinds of durable records.
 
+The bootstrap records `.synod/runtime.json` schema 1 and creates an isolated pnpm project under `.synod/runtime/`. Its `package.json` and `pnpm-lock.yaml` pin the runtime, while its `.gitignore` excludes only `node_modules/`. Runtime metadata is deliberately separate from `.synod/manifest.json`: `runtimeVersion` identifies the executable, `templateVersion` identifies installed project content, and each descriptor keeps its own `schemaVersion`.
+
 ## Safe project lifecycle
 
 Every installation records `.synod/manifest.json` schema 3 with the template version, selected profile, ownership, and a normalized SHA-256 hash for each managed path. Synod owns its generated infrastructure, shares ownership of only the marked block in `AGENTS.md`, and classifies canonical state, its event log, and the generated status view as mutable durable records that are preserved on uninstall.
@@ -59,7 +61,7 @@ synod check --json
 synod doctor --json
 ```
 
-Preview and apply a versioned migration or profile change:
+Preview and apply a template migration or profile change with the pinned runtime:
 
 ```bash
 synod upgrade --dry-run
@@ -68,9 +70,18 @@ synod upgrade --profile portable --dry-run
 synod upgrade --profile portable
 ```
 
+To upgrade the project runtime, select the desired bootstrap version explicitly. The dry run reports the runtime and template plan without installing or replacing the project-local runtime or changing project files; the apply replaces the local runtime atomically before running the template migration:
+
+```bash
+pnpm dlx @ivand890/synod@<version> upgrade --dry-run
+pnpm dlx @ivand890/synod@<version> upgrade
+```
+
+Synod rejects attempts to replace a newer project runtime with an older one. A failed staged install leaves the previously pinned runtime and descriptor intact.
+
 Initialization, upgrade, and uninstall recheck every destination immediately before mutation, replace files atomically, and roll back already-applied operations when a later operation fails. Modified Synod-owned files are conflicts; `--force` is required to replace or remove them. User-owned files are preserved even under `--force`.
 
-Uninstall the managed infrastructure while retaining `docs/synod/` and surrounding user content in `AGENTS.md`:
+Uninstall the managed infrastructure and project-local runtime while retaining `docs/synod/`, canonical orchestration records, and surrounding user content in `AGENTS.md`:
 
 ```bash
 synod uninstall --dry-run
@@ -163,7 +174,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
   "data": {},
   "warnings": [],
   "diagnostics": {
-    "synodVersion": "0.5.0",
+    "synodVersion": "0.6.0",
     "nodeVersion": "24.12.0",
     "platform": "darwin",
     "codexVersion": "0.142.0"
@@ -173,7 +184,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
 
 Failures set `ok` to `false`, omit `data`, include `error: { code, message, details? }`, and return a non-zero exit status. Warnings use `{ code, message, details? }`. Codes are stable within schema version 1.
 
-Lifecycle errors include stable codes for invalid/unsupported manifests, required upgrades, conflicts, unsafe paths, destination races, transaction rollback, and unsupported downgrades. Orchestration errors identify invalid state/logs, state-log mismatch, held locks, invalid tasks or transitions, stale revisions, missing evidence, and checkpoint drift. Existing command, App Server, session, and JSON codes remain stable within envelope schema version 1.
+Lifecycle errors include stable codes for invalid/unsupported manifests, invalid or conflicting local runtimes, failed runtime installation or execution, required upgrades, conflicts, unsafe paths, destination races, transaction rollback, and unsupported downgrades. Orchestration errors identify invalid state/logs, state-log mismatch, held locks, invalid tasks or transitions, stale revisions, missing evidence, and checkpoint drift. Existing command, App Server, session, and JSON codes remain stable within envelope schema version 1.
 
 Warnings identify preserved user state, available upgrades, missing user-owned files, incompatible profiles, unsupported Codex versions, and bounded App Server cleanup fallbacks.
 
@@ -189,7 +200,11 @@ synod profiles --json
 - `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. It requires Codex 0.147.0 or newer within the supported range and verifies each model and reasoning effort through `model/list`.
 - `portable` uses GPT-5.5 at role-specific reasoning efforts. It is the conservative fallback verified across both known-good Codex versions and account-specific model catalogs.
 
-`synod doctor` classifies the installed Codex binary independently from model availability:
+`synod doctor` identifies whether Synod is running from Codex CLI or Codex Desktop and probes that surface's own App Server executable. It resolves the active Codex process from the process ancestry, falling back to `codex` from `PATH` for a standalone CLI invocation. An explicit `SYNOD_CODEX_BIN` still takes precedence. If Desktop is detected but its executable cannot be resolved, `doctor` fails closed instead of silently reporting the CLI version as the Desktop version.
+
+CLI and Desktop may share `~/.codex` while running different Codex versions. Inspect the `codex` object under `data` on success or `error.details` on failure—especially `surface`, `version`, `executable`, `executableSource`, and `home`—instead of assuming the two installations match.
+
+It then classifies that surface's Codex version independently from model availability:
 
 - Supported: `>=0.142.0 <0.148.0`.
 - Known-good and exercised in CI: `0.142.0`, `0.147.0`.

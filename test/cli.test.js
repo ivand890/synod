@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -11,17 +11,40 @@ import { packageVersion } from "../src/package.js";
 
 const bin = path.resolve("bin/synod.js");
 
-test("the installed entry point initializes a target directory", async () => {
+test("the installed entry point keeps init dry-run free of runtime and project writes", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-test-"));
 
   try {
-    const result = spawnSync(process.execPath, [bin, "init", directory], {
+    const result = spawnSync(process.execPath, [bin, "init", directory, "--dry-run"], {
       encoding: "utf8"
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Synod init completed/);
-    assert.match(await readFile(path.join(directory, "docs/synod/PLAN.md"), "utf8"), /Synod Execution Plan/);
+    assert.ok(result.stdout.includes(`Runtime: ${packageVersion} (install)`));
+    assert.match(result.stdout, /Synod init plan is valid/);
+    await assert.rejects(readFile(path.join(directory, "docs/synod/PLAN.md"), "utf8"), { code: "ENOENT" });
+    await assert.rejects(readFile(path.join(directory, ".synod/runtime.json"), "utf8"), { code: "ENOENT" });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the installed entry point emits one stable JSON error for an unmanaged runtime", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-runtime-conflict-test-"));
+
+  try {
+    await mkdir(path.join(directory, ".synod/runtime"), { recursive: true });
+    const result = spawnSync(process.execPath, [bin, "init", directory, "--json"], {
+      encoding: "utf8"
+    });
+    const envelope = JSON.parse(result.stdout);
+
+    assert.equal(result.status, 1);
+    assert.equal(result.stderr, "");
+    assert.equal(envelope.schemaVersion, 1);
+    assert.equal(envelope.ok, false);
+    assert.equal(envelope.error.code, ERROR_CODES.LOCAL_RUNTIME_CONFLICT);
+    assert.equal((await stat(path.join(directory, ".synod/runtime"))).isDirectory(), true);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -137,6 +160,69 @@ test("check and doctor emit failure JSON when their health gates fail", async ()
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("doctor text identifies the Desktop executable, version, and shared Codex home", async () => {
+  const messages = [];
+  const output = { log: message => messages.push(message), warn() {}, error() {} };
+  const executable = "/Applications/ChatGPT.app/Contents/Resources/codex";
+  const status = await run(["doctor"], output, {
+    doctorRuntimeResolver: () => ({
+      surface: "desktop",
+      executable,
+      executableSource: "desktop-process",
+      resolved: true
+    }),
+    doctorClientFactory: options => ({
+      async start() { assert.equal(options.codexBin, executable); },
+      async probeCapabilities() {},
+      async listModels() {
+        return [{
+          id: "gpt-5.5",
+          supportedReasoningEfforts: ["low", "medium", "high", "xhigh"].map(reasoningEffort => ({ reasoningEffort }))
+        }];
+      },
+      async close() {},
+      getWarnings() { return []; },
+      getDiagnostics() {
+        return {
+          codexExecutable: executable,
+          codexHome: "/Users/test/.codex",
+          codexSurface: "desktop",
+          codexVersion: "0.147.0",
+          appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
+        };
+      }
+    })
+  });
+
+  assert.equal(status, 0);
+  assert.match(messages[0], /Codex Desktop: 0\.147\.0 \(known-good; desktop\)/);
+  assert.match(messages[0], /Codex executable: \/Applications\/ChatGPT\.app\/Contents\/Resources\/codex \(desktop-process\)/);
+  assert.match(messages[0], /Codex home: \/Users\/test\/\.codex/);
+});
+
+test("doctor text never renders an undefined Codex surface", async () => {
+  const messages = [];
+  const output = { log: message => messages.push(message), warn() {}, error() {} };
+  const status = await run(["doctor"], output, {
+    doctorRuntimeResolver: () => ({
+      surface: undefined,
+      executable: "codex",
+      executableSource: "PATH-unresolved",
+      resolved: false
+    }),
+    doctorClientFactory: () => ({
+      async start() { throw new Error("spawn failed"); },
+      async close() {},
+      getWarnings() { return []; },
+      getDiagnostics() { return {}; }
+    })
+  });
+
+  assert.equal(status, 1);
+  assert.match(messages[0], /Codex runtime: unavailable \(unsupported; unknown surface\)/);
+  assert.doesNotMatch(messages[0], /undefined/);
 });
 
 test("task and status commands expose canonical orchestration through schema-1 envelopes", async () => {
