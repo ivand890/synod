@@ -189,7 +189,11 @@ synod profiles --json
 - `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. It requires Codex 0.147.0 or newer within the supported range and verifies each model and reasoning effort through `model/list`.
 - `portable` uses GPT-5.5 at role-specific reasoning efforts. It is the conservative fallback verified across both known-good Codex versions and account-specific model catalogs.
 
-`synod doctor` classifies the installed Codex binary independently from model availability:
+`synod doctor` identifies whether Synod is running from Codex CLI or Codex Desktop and probes that surface's own App Server executable. It resolves the active Codex process from the process ancestry, falling back to `codex` from `PATH` for a standalone CLI invocation. An explicit `SYNOD_CODEX_BIN` still takes precedence. If Desktop is detected but its executable cannot be resolved, `doctor` fails closed instead of silently reporting the CLI version as the Desktop version.
+
+CLI and Desktop may share `~/.codex` while running different Codex versions. Inspect the `codex` object under `data` on success or `error.details` on failure—especially `surface`, `version`, `executable`, `executableSource`, and `home`—instead of assuming the two installations match.
+
+It then classifies that surface's Codex version independently from model availability:
 
 - Supported: `>=0.142.0 <0.148.0`.
 - Known-good and exercised in CI: `0.142.0`, `0.147.0`.

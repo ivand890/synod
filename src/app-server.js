@@ -9,10 +9,18 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 2_000;
 const DEFAULT_FORCE_KILL_TIMEOUT_MS = 1_000;
 
-function codexVersionFrom(userAgent) {
+export function codexVersionFrom(userAgent) {
   if (typeof userAgent !== "string") return undefined;
   const codexVersion = userAgent.match(/codex[^/ ]*[ /]v?(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)/i);
   return codexVersion?.[1] || userAgent.match(/\b(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)\b/)?.[1];
+}
+
+export function codexSurfaceFrom(userAgent) {
+  if (typeof userAgent !== "string") return "unknown";
+  const product = userAgent.split("/", 1)[0].trim().toLowerCase();
+  if (product.includes("desktop")) return "desktop";
+  if (/^(?:codex(?:[-_ ]?cli(?:_rs)?)?|synod_cli)$/.test(product)) return "cli";
+  return "unknown";
 }
 
 function boundedLine(line) {
@@ -38,6 +46,9 @@ export class CodexAppServerClient {
     this.stderr = "";
     this.warnings = [];
     this.diagnostics = {
+      codexExecutable: this.codexBin,
+      codexHome: undefined,
+      codexSurface: undefined,
       codexVersion: undefined,
       codexUserAgent: undefined,
       appServer: {
@@ -127,6 +138,8 @@ export class CodexAppServerClient {
       );
     }
 
+    this.diagnostics.codexHome = typeof initialized.codexHome === "string" ? initialized.codexHome : null;
+    this.diagnostics.codexSurface = codexSurfaceFrom(initialized.userAgent);
     this.diagnostics.codexUserAgent = initialized.userAgent;
     this.diagnostics.codexVersion = codexVersionFrom(initialized.userAgent) || null;
     this.diagnostics.appServer.platformFamily = initialized.platformFamily;

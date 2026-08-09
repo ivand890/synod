@@ -139,6 +139,46 @@ test("check and doctor emit failure JSON when their health gates fail", async ()
   }
 });
 
+test("doctor text identifies the Desktop executable, version, and shared Codex home", async () => {
+  const messages = [];
+  const output = { log: message => messages.push(message), warn() {}, error() {} };
+  const executable = "/Applications/ChatGPT.app/Contents/Resources/codex";
+  const status = await run(["doctor"], output, {
+    doctorRuntimeResolver: () => ({
+      surface: "desktop",
+      executable,
+      executableSource: "desktop-process",
+      resolved: true
+    }),
+    doctorClientFactory: options => ({
+      async start() { assert.equal(options.codexBin, executable); },
+      async probeCapabilities() {},
+      async listModels() {
+        return [{
+          id: "gpt-5.5",
+          supportedReasoningEfforts: ["low", "medium", "high", "xhigh"].map(reasoningEffort => ({ reasoningEffort }))
+        }];
+      },
+      async close() {},
+      getWarnings() { return []; },
+      getDiagnostics() {
+        return {
+          codexExecutable: executable,
+          codexHome: "/Users/test/.codex",
+          codexSurface: "desktop",
+          codexVersion: "0.147.0",
+          appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
+        };
+      }
+    })
+  });
+
+  assert.equal(status, 0);
+  assert.match(messages[0], /Codex Desktop: 0\.147\.0 \(known-good; desktop\)/);
+  assert.match(messages[0], /Codex executable: \/Applications\/ChatGPT\.app\/Contents\/Resources\/codex \(desktop-process\)/);
+  assert.match(messages[0], /Codex home: \/Users\/test\/\.codex/);
+});
+
 test("task and status commands expose canonical orchestration through schema-1 envelopes", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-orchestration-json-test-"));
   const messages = [];

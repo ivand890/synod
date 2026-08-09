@@ -248,7 +248,9 @@ function textCheck(result) {
 function textDoctor(result) {
   const lines = [`Synod doctor: ${result.healthy ? "healthy" : "attention required"}`];
   lines.push(`Node: ${result.node.version} (${result.node.supported ? "supported" : "unsupported"})`);
-  lines.push(`Codex: ${result.codex.version || "unavailable"} (${result.codex.status})`);
+  lines.push(`${result.codex.label}: ${result.codex.version || "unavailable"} (${result.codex.status}; ${result.codex.surface})`);
+  lines.push(`Codex executable: ${result.codex.executable || "unavailable"} (${result.codex.executableSource || "unknown source"})`);
+  lines.push(`Codex home: ${result.codex.home || "unavailable"}`);
   lines.push(`Supported Codex: ${result.codex.range}`);
   lines.push(`Known-good Codex: ${result.codex.knownGood.join(", ")}`);
   lines.push(`Recommended profile: ${result.recommendedProfile || "none"}`);
@@ -403,7 +405,10 @@ export async function run(args, output = console, dependencies = {}) {
     if (command === "doctor") {
       const options = parseLifecycleArgs(args.slice(1));
       if (options.help) { output.log(HELP); return 0; }
-      const result = await doctorProject(options, { clientFactory: dependencies.doctorClientFactory || dependencies.clientFactory });
+      const result = await doctorProject(options, {
+        clientFactory: dependencies.doctorClientFactory || dependencies.clientFactory,
+        runtimeResolver: dependencies.doctorRuntimeResolver
+      });
       if (options.json) {
         const { warnings, diagnostics, ...data } = result;
         const envelope = result.healthy
