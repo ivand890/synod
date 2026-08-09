@@ -1,8 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
-  lstat,
-  link,
   mkdir,
   open,
   readFile,
@@ -32,7 +30,6 @@ const lifecycleCommands = new Set(["init", "upgrade", "check", "status", "doctor
 const LOCAL_RUNTIME_INSTALL_LOCK_PATH = ".synod/runtime-install.lock";
 const LOCAL_RUNTIME_INSTALL_LOCK_TIMEOUT_MS = 130_000;
 const LOCAL_RUNTIME_INSTALL_LOCK_RETRY_MS = 25;
-const LOCAL_RUNTIME_INSTALL_LOCK_GRACE_MS = 1_000;
 
 function boundedOutput(value) {
   const output = String(value || "").trim();
@@ -373,54 +370,6 @@ function runtimeInstallLockOwner(content) {
   }
 }
 
-async function reclaimRuntimeInstallLock(lockPath, existing, now) {
-  const owner = runtimeInstallLockOwner(existing.content);
-  if (owner && liveProcess(owner.pid)) return false;
-  if (!owner) {
-    const stats = await lstat(lockPath).catch(error => error.code === "ENOENT" ? undefined : Promise.reject(error));
-    if (!stats || now() - stats.mtimeMs < LOCAL_RUNTIME_INSTALL_LOCK_GRACE_MS) return false;
-  }
-  const claimId = createHash("sha256").update(existing.content, "utf8").digest("hex");
-  const claimPath = `${lockPath}.reclaim-${claimId}`;
-  let claimed = false;
-  try {
-    await link(lockPath, claimPath);
-    claimed = true;
-  } catch (error) {
-    if (error.code === "ENOENT") return true;
-    if (error.code !== "EEXIST") throw error;
-    try {
-      const [lockStats, claimStats] = await Promise.all([
-        lstat(lockPath, { bigint: true }),
-        lstat(claimPath, { bigint: true })
-      ]);
-      claimed = lockStats.dev === claimStats.dev && lockStats.ino === claimStats.ino;
-    } catch (inspectionError) {
-      if (inspectionError.code === "ENOENT") return false;
-      throw inspectionError;
-    }
-    if (!claimed) return false;
-  }
-  try {
-    const [claim, current] = await Promise.all([
-      inspectPath(claimPath),
-      inspectPath(lockPath)
-    ]);
-    if (
-      claim.type !== "file"
-      || claim.content !== existing.content
-      || current.type !== "file"
-      || current.content !== existing.content
-    ) return false;
-    await unlink(lockPath).catch(error => {
-      if (error.code !== "ENOENT") throw error;
-    });
-    return true;
-  } finally {
-    if (claimed) await unlink(claimPath).catch(() => {});
-  }
-}
-
 async function acquireRuntimeInstallLock(paths, {
   timeoutMs = LOCAL_RUNTIME_INSTALL_LOCK_TIMEOUT_MS,
   retryMs = LOCAL_RUNTIME_INSTALL_LOCK_RETRY_MS,
@@ -458,11 +407,19 @@ async function acquireRuntimeInstallLock(paths, {
           details: { path: LOCAL_RUNTIME_INSTALL_LOCK_PATH, actualType: existing.type }
         });
       }
-      if (await reclaimRuntimeInstallLock(paths.installLock, existing, now)) continue;
+      const owner = runtimeInstallLockOwner(existing.content);
+      if (!owner || !liveProcess(owner.pid)) {
+        throw new SynodError(ERROR_CODES.LOCAL_RUNTIME_CONFLICT, "A stale or invalid Synod runtime install lock requires explicit cleanup.", {
+          details: {
+            path: LOCAL_RUNTIME_INSTALL_LOCK_PATH,
+            stale: true,
+            ...(owner ? { pid: owner.pid } : {})
+          }
+        });
+      }
       if (now() - startedAt >= timeoutMs) {
-        const owner = runtimeInstallLockOwner(existing.content);
         throw new SynodError(ERROR_CODES.LOCAL_RUNTIME_CONFLICT, "Another Synod runtime installation holds the project lock.", {
-          details: { path: LOCAL_RUNTIME_INSTALL_LOCK_PATH, ...(owner ? { pid: owner.pid } : {}) }
+          details: { path: LOCAL_RUNTIME_INSTALL_LOCK_PATH, pid: owner.pid }
         });
       }
       await new Promise(resolve => setTimeout(resolve, retryMs));

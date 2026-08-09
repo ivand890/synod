@@ -454,20 +454,24 @@ test("concurrent cross-version installs cannot commit a downgrade", async () => 
   assert.equal((await inspectLocalRuntime(directory)).descriptor.runtimeVersion, "0.7.0");
 });
 
-test("a stale runtime install lock is reclaimed", async () => {
+test("a stale runtime install lock fails closed without mutating the project", async () => {
   const directory = await temporaryProject();
   const lockPath = path.join(directory, ".synod/runtime-install.lock");
   await mkdir(path.dirname(lockPath), { recursive: true });
-  await writeFile(lockPath, `${JSON.stringify({
+  const lockContent = `${JSON.stringify({
     pid: 2_147_483_647,
     token: "stale-runtime-owner",
     createdAt: new Date(0).toISOString()
-  })}\n`);
+  })}\n`;
+  await writeFile(lockPath, lockContent);
 
-  const installed = await installLocalRuntime(directory, { runPnpm: fakePnpmInstall });
-
-  assert.equal(installed.ready, true);
-  await assert.rejects(readFile(lockPath, "utf8"), { code: "ENOENT" });
+  await assert.rejects(
+    installLocalRuntime(directory, { runPnpm: fakePnpmInstall }),
+    error => error.code === ERROR_CODES.LOCAL_RUNTIME_CONFLICT
+      && error.details.stale === true
+  );
+  assert.equal(await readFile(lockPath, "utf8"), lockContent);
+  await assert.rejects(readFile(path.join(directory, LOCAL_RUNTIME_DESCRIPTOR_PATH), "utf8"), { code: "ENOENT" });
 });
 
 test("refuses to downgrade a newer pinned runtime", async () => {
