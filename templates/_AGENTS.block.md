@@ -6,7 +6,7 @@ Use the project skill `$synod-advisor` for multi-phase, delegated, or cross-sess
 - Treat Git and observed runtime behavior as technical truth.
 - Treat `.synod/state.json` as canonical orchestration state and `.synod/events.jsonl` as its append-only audit log. Read `docs/synod/STATUS.md` as the generated durable human view.
 - Treat `docs/synod/GOAL.md` and `DECISIONS.md` as supporting human-owned context, not as substitutes for canonical task state.
-- Invoke Synod through the version-pinned bootstrap `__SYNOD_COMMAND__`; do not require a global `synod` command or execute a cached `node_modules` path directly.
+- Invoke normal Synod commands through the version-pinned bootstrap `__SYNOD_COMMAND__`; do not require a global `synod` command or execute a cached `node_modules` path directly. For a runtime version upgrade, explicitly select the target with `pnpm dlx @ivand890/synod@<target-version> upgrade [directory]` instead of reusing the installed version.
 - At session start, run `__SYNOD_COMMAND__ status`; stop and reconcile or checkpoint any reported branch, `HEAD`, or working-tree drift before continuing.
 - Keep the primary advisor responsible for architecture, planning, atomic task contracts, supervision, review, integration, and final verification.
 - Delegate routine implementation to `synod_implementer`; use the configured explorer and reviewer agents for analysis and escalation.

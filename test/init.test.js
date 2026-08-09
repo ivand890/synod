@@ -38,6 +38,7 @@ test("initializes a fresh project with durable state, agents, and skill", async 
   assert.match(agents, /<!-- synod:start -->/);
   assert.match(agents, /\$synod-advisor/);
   assert.ok(agents.includes(`pnpm dlx @ivand890/synod@${packageVersion} status`));
+  assert.ok(agents.includes("pnpm dlx @ivand890/synod@<target-version> upgrade [directory]"));
 
   const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
   assert.equal(manifest.schemaVersion, 3);
@@ -221,6 +222,7 @@ test("renders the GPT-5.6 profile with Luna resolved through custom-agent defaul
   assert.match(skill, /full-history fork inherits the parent agent type/);
   assert.match(skill, /persisted `turn_context`/);
   assert.ok(skill.includes(`pnpm dlx @ivand890/synod@${packageVersion} doctor`));
+  assert.ok(skill.includes("pnpm dlx @ivand890/synod@<target-version> upgrade [directory]"));
 });
 
 test("rejects duplicate complete AGENTS.md blocks unless force repairs them", async () => {

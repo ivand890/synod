@@ -7,7 +7,7 @@ description: Run or resume Synod's persistent, cost-efficient advisor loop for c
 
 Advance the project to its next verified checkpoint. Keep the primary agent in the supervisory loop and move routine implementation to cost-efficient workers while treating Git and runtime evidence as authoritative.
 
-Use `__SYNOD_COMMAND__` for every Synod command. This version-pinned bootstrap restores and delegates to the project-local runtime without requiring `synod` in `PATH`.
+Use `__SYNOD_COMMAND__` for normal Synod commands. This version-pinned bootstrap restores and delegates to the project-local runtime without requiring `synod` in `PATH`. To upgrade the runtime to a different version, explicitly select the desired target with `pnpm dlx @ivand890/synod@<target-version> upgrade [directory]`; the invoking bootstrap version is the upgrade target.
 
 ## Load durable state
 
