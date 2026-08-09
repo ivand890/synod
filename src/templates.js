@@ -2,6 +2,7 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ERROR_CODES, SynodError } from "./errors.js";
+import { packageName } from "./package.js";
 
 export const templatesDirectory = fileURLToPath(new URL("../templates", import.meta.url));
 export const agentsStart = "<!-- synod:start -->";
@@ -33,6 +34,7 @@ function replacements(version, profile) {
   const roles = profile.roles;
   return {
     __SYNOD_VERSION__: version,
+    __SYNOD_COMMAND__: `pnpm dlx ${packageName}@${version}`,
     __SYNOD_PROFILE__: profile.id,
     __SYNOD_SUPERVISOR_MODEL__: roles.supervisor.model,
     __SYNOD_SUPERVISOR_EFFORT__: roles.supervisor.effort,

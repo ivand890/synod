@@ -198,7 +198,7 @@ export async function initProject(
     existingManifest.templateVersion !== packageVersion ||
     existingManifest.profile !== profileId
   )) {
-    throw new SynodError(ERROR_CODES.UPGRADE_REQUIRED, "This project is already managed by another Synod template or profile. Run `synod upgrade`.", {
+    throw new SynodError(ERROR_CODES.UPGRADE_REQUIRED, `This project is already managed by another Synod template or profile. Run \`pnpm dlx @ivand890/synod@${packageVersion} upgrade\`.`, {
       details: {
         installedTemplateVersion: existingManifest.templateVersion,
         installedProfile: existingManifest.profile,

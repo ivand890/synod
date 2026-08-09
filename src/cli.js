@@ -100,7 +100,14 @@ function textDoctor(result) {
   lines.push(`Supported Codex: ${result.codex.range}`);
   lines.push(`Known-good Codex: ${result.codex.knownGood.join(", ")}`);
   lines.push(`Recommended profile: ${result.recommendedProfile || "none"}`);
-  for (const profile of result.profiles) lines.push(`Profile ${profile.id}: ${profile.compatible ? "compatible" : "unavailable"}`);
+  for (const profile of result.profiles) {
+    const status = profile.compatible
+      ? "compatible"
+      : profile.modelCompatible
+        ? "Codex version ineligible"
+        : "model unavailable";
+    lines.push(`Profile ${profile.id}: ${status}`);
+  }
   for (const issue of result.issues) lines.push(`Error [${issue.code}]: ${issue.message}`);
   return lines.join("\n");
 }

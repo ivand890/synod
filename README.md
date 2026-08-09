@@ -10,7 +10,7 @@ The default and supported bootstrap path is `pnpm dlx`:
 pnpm dlx @ivand890/synod init
 ```
 
-This installs the exact Synod version selected by `pnpm dlx` into `.synod/runtime` in the project. Each project therefore keeps an independent runtime and can upgrade on its own schedule. A global installation remains optional:
+This installs the exact Synod version selected by `pnpm dlx` into `.synod/runtime` in the project. Each project therefore keeps an independent runtime and can upgrade on its own schedule. The project-local installation deliberately does not add a bare `synod` command to the repository's `PATH`; generated project instructions use the version-pinned `pnpm dlx @ivand890/synod@<version>` bootstrap, which restores and delegates to the local runtime. A global installation remains optional:
 
 ```bash
 pnpm add --global @ivand890/synod
@@ -197,7 +197,7 @@ synod profiles
 synod profiles --json
 ```
 
-- `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. It requires Codex 0.147.0 or newer within the supported range and verifies each model and reasoning effort through `model/list`.
+- `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. It requires Codex 0.147.0 or a preview of that base version within the supported range, and verifies each model and reasoning effort through `model/list`.
 - `portable` uses GPT-5.5 at role-specific reasoning efforts. It is the conservative fallback verified across both known-good Codex versions and account-specific model catalogs.
 
 `synod doctor` identifies whether Synod is running from Codex CLI or Codex Desktop and probes that surface's own App Server executable. It resolves the active Codex process from the process ancestry, falling back to `codex` from `PATH` for a standalone CLI invocation. An explicit `SYNOD_CODEX_BIN` still takes precedence. If Desktop is detected but its executable cannot be resolved, `doctor` fails closed instead of silently reporting the CLI version as the Desktop version.
@@ -208,7 +208,8 @@ It then classifies that surface's Codex version independently from model availab
 
 - Supported: `>=0.142.0 <0.148.0`.
 - Known-good and exercised in CI: `0.142.0`, `0.147.0`.
-- Unsupported: versions below the range, prereleases, and versions at or above `0.148.0` until the CI contract is deliberately expanded.
+- Supported but not known-good: stable or preview builds whose numeric base is inside the range and whose required App Server and model capabilities pass live probes.
+- Unsupported: versions below the range and versions at or above `0.148.0`, including previews of those versions, until the CI contract is deliberately expanded.
 
 Inside the supported range, unlisted patch/minor versions are reported as `supported`; only matrix-tested versions are `known-good`. A supported binary can still lack a selected model profile, which `doctor` reports separately.
 
@@ -217,6 +218,8 @@ Inside the supported range, unlisted patch/minor versions are reported as `suppo
 - The configured supervisor plans, decomposes, supervises, reviews, integrates, and verifies.
 - The configured implementer completes atomic tasks with explicit write scope and acceptance criteria.
 - Explorer, reviewer, verifier, and mechanical roles use the selected profile's declared models and reasoning efforts.
+- Spawn a configured custom agent by its name with a fresh fork and a self-contained contract. Do not send explicit model or reasoning overrides: the custom agent file resolves first, followed by `[agents]` defaults and then the parent configuration. Full-history forks inherit the parent agent type.
+- The spawn tool's explicit override list is not the complete subagent model catalog. `synod doctor` verifies the broader model capabilities; a controlled child `turn_context` is the final check when default resolution is in doubt.
 
 The supervisor does not perform routine implementation. It may make only a minimal integration repair when delegating that repair would cost more than the change, and must record the exception.
 

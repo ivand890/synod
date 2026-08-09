@@ -1,6 +1,6 @@
 # Synod Execution Plan
 
-Canonical tasks live in `.synod/state.json` and are changed only with `synod task add` and `synod task transition`. The generated current view is `STATUS.md`; use this file for human planning notes that have not yet become executable task contracts.
+Canonical tasks live in `.synod/state.json` and are changed only with `__SYNOD_COMMAND__ task add` and `__SYNOD_COMMAND__ task transition`. The generated current view is `STATUS.md`; use this file for human planning notes that have not yet become executable task contracts.
 
 Allowed states: `PLANNED`, `READY`, `ACTIVE`, `REVIEW`, `ACCEPTED`, `VERIFIED`, `DONE`, `BLOCKED`, `SUPERSEDED`.
 

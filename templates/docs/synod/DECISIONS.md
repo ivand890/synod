@@ -17,7 +17,7 @@ Threads can be compacted, memories can be delayed, Markdown can be edited, and t
 
 ### Consequence
 
-Run `synod status` whenever work resumes and record intentional checkpoint changes explicitly.
+Run `__SYNOD_COMMAND__ status` whenever work resumes and record intentional checkpoint changes explicitly.
 
 ## D-002 — Cost-efficient agents perform implementation
 

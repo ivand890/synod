@@ -60,14 +60,18 @@ export function compareVersions(left, right) {
 
 export function classifyCodexVersion(version) {
   const parsed = parseVersion(version);
-  if (!parsed || parsed.prerelease !== undefined) {
-    return { status: "unsupported", reason: "invalid_or_prerelease" };
-  }
-  if (compareVersions(parsed, CODEX_COMPATIBILITY.minimum) < 0) {
+  if (!parsed) return { status: "unsupported", reason: "invalid_version" };
+  const rangeVersion = parsed.prerelease === undefined
+    ? parsed
+    : { ...parsed, prerelease: undefined };
+  if (compareVersions(rangeVersion, CODEX_COMPATIBILITY.minimum) < 0) {
     return { status: "unsupported", reason: "below_supported_range" };
   }
-  if (compareVersions(parsed, CODEX_COMPATIBILITY.maximumExclusive) >= 0) {
+  if (compareVersions(rangeVersion, CODEX_COMPATIBILITY.maximumExclusive) >= 0) {
     return { status: "unsupported", reason: "above_tested_range" };
+  }
+  if (parsed.prerelease !== undefined) {
+    return { status: "supported", reason: "preview_inside_supported_range" };
   }
   if (CODEX_COMPATIBILITY.knownGood.some(versionValue => compareVersions(parsed, versionValue) === 0)) {
     return { status: "known-good", reason: "tested_in_ci" };

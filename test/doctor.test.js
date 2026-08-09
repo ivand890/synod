@@ -92,6 +92,23 @@ test("doctor keeps Desktop and CLI versions scoped to their detected surface", a
   });
 });
 
+test("doctor accepts an in-range Desktop preview when live capabilities satisfy the profile", async () => {
+  const result = await doctorProject(
+    { project: false },
+    {
+      clientFactory: () => fakeClient("0.147.0-alpha.6.5", models56, { surface: "desktop" }),
+      runtimeResolver: () => runtime("desktop", "/Applications/ChatGPT.app/Contents/Resources/codex")
+    }
+  );
+
+  assert.equal(result.healthy, true);
+  assert.equal(result.codex.status, "supported");
+  assert.equal(result.codex.reason, "preview_inside_supported_range");
+  assert.equal(result.recommendedProfile, "synod-5.6");
+  assert.equal(result.profiles.find(item => item.id === "synod-5.6").modelCompatible, true);
+  assert.ok(!result.warnings.some(item => item.code === WARNING_CODES.CODEX_VERSION_UNSUPPORTED));
+});
+
 test("doctor prefers the surface confirmed by the initialized App Server", async () => {
   const result = await doctorProject(
     { project: false },
@@ -154,5 +171,5 @@ test("doctor reports an unparseable Codex version without throwing", async () =>
   );
 
   assert.equal(result.healthy, false);
-  assert.equal(result.codex.reason, "invalid_or_prerelease");
+  assert.equal(result.codex.reason, "invalid_version");
 });

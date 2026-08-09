@@ -14,7 +14,7 @@ import {
   resolveProjectPath,
   unsafeAncestor
 } from "./filesystem.js";
-import { packageVersion } from "./package.js";
+import { packageName, packageVersion } from "./package.js";
 import { generatedConfigMarker, removeAgentsBlocks } from "./templates.js";
 
 export const ORCHESTRATION_SCHEMA_VERSION = 1;
@@ -375,6 +375,7 @@ function checkpointLabel(checkpoint) {
 }
 
 export function renderStatusMarkdown(state, drift = { detected: false, reasons: [] }) {
+  const synodCommand = `pnpm dlx ${packageName}@${packageVersion}`;
   const lines = [
     "# Synod Status",
     "",
@@ -383,7 +384,7 @@ export function renderStatusMarkdown(state, drift = { detected: false, reasons: 
     `Updated: ${state.updatedAt}`,
     `Last event: ${state.lastEvent.sequence} (${state.lastEvent.hash})`,
     `Checkpoint: ${checkpointLabel(state.checkpoint)}`,
-    `Live drift: ${drift.detected ? "DETECTED" : "run synod status to compare the recorded checkpoint with the current worktree"}`,
+    `Live drift: ${drift.detected ? "DETECTED" : `run ${synodCommand} status to compare the recorded checkpoint with the current worktree`}`,
     "",
     "## Tasks",
     "",
