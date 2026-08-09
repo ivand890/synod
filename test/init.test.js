@@ -220,6 +220,8 @@ test("renders the GPT-5.6 profile with Luna resolved through custom-agent defaul
   assert.match(mechanical, /model = "gpt-5\.6-luna"/);
   assert.match(skill, /Omit explicit `model` and `reasoning_effort` spawn overrides/);
   assert.match(skill, /full-history fork inherits the parent agent type/);
+  assert.match(skill, /target configured custom-agent type and a fresh fork without full parent history/);
+  assert.match(skill, /Omit explicit `model` and `reasoning_effort`, then inspect/);
   assert.match(skill, /persisted `turn_context`/);
   assert.ok(skill.includes(`pnpm dlx @ivand890/synod@${packageVersion} doctor`));
   assert.ok(skill.includes("pnpm dlx @ivand890/synod@<target-version> upgrade [directory]"));
