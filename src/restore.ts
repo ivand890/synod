@@ -48,7 +48,12 @@ const RESTORE_JOURNAL_SCHEMA_VERSION = 1;
 const RESTORE_JOURNAL_NAME = "synod-recovery-journal.json";
 const MAX_GIT_OUTPUT = 260 * 1024 * 1024;
 
-type RestorePhase = "after-index" | "after-path" | "before-verify";
+type RestorePhase =
+  | "before-index-install"
+  | "after-index"
+  | "before-path-install"
+  | "after-path"
+  | "before-verify";
 
 export interface RestoreDependencies extends OrchestrationDependencies {
   restoreHook?: (phase: RestorePhase, relativePath?: string) => void | Promise<void>;
@@ -635,7 +640,12 @@ async function createJournal(
   return { journal, journalPath: locations.journalPath, backupPath, indexPath: locations.indexPath };
 }
 
-async function atomicFile(filePath: string, content: Buffer, mode: number): Promise<void> {
+async function atomicFile(
+  filePath: string,
+  content: Buffer,
+  mode: number,
+  beforeInstall?: (() => void | Promise<void>) | undefined
+): Promise<void> {
   const temporary = path.join(path.dirname(filePath), `.synod-restore-${randomUUID()}`);
   const handle = await open(temporary, "wx", mode);
   try {
@@ -645,10 +655,14 @@ async function atomicFile(filePath: string, content: Buffer, mode: number): Prom
     await handle.close();
   }
   await chmod(temporary, mode);
-  await unlink(filePath).catch(error => {
-    if (errorCode(error) !== "ENOENT") throw error;
-  });
-  await rename(temporary, filePath);
+  try {
+    await beforeInstall?.();
+    // rename-over-existing is atomic for supported local filesystems: a kill
+    // leaves either the journaled original or the complete replacement.
+    await rename(temporary, filePath);
+  } finally {
+    await unlink(temporary).catch(() => {});
+  }
 }
 
 async function ensureSafeParent(directory: string, absolutePath: string): Promise<void> {
@@ -675,7 +689,12 @@ async function ensureSafeParent(directory: string, absolutePath: string): Promis
   }
 }
 
-async function mutatePath(directory: string, relativePath: string, material: Material): Promise<void> {
+async function mutatePath(
+  directory: string,
+  relativePath: string,
+  material: Material,
+  beforeInstall?: (() => void | Promise<void>) | undefined
+): Promise<void> {
   const absolute = resolveProjectPath(directory, relativePath);
   const unsafe = await unsafeAncestor(directory, absolute);
   if (unsafe) throw new SynodError(ERROR_CODES.UNSAFE_PATH, "Recovery path acquired an unsafe ancestor.", { details: { path: relativePath, unsafeAncestor: unsafe } });
@@ -693,19 +712,20 @@ async function mutatePath(directory: string, relativePath: string, material: Mat
     throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "Recovery leaf changed to an unsupported path type.", { details: { path: relativePath } });
   }
   if (material.type === "missing") {
+    await beforeInstall?.();
     if (current !== "missing") await unlink(absolute);
     return;
   }
   if (!material.content) throw new TypeError("Recovery material is incomplete.");
   if (material.type === "file") {
     if (material.mode === null) throw new TypeError("Recovery file mode is incomplete.");
-    await atomicFile(absolute, material.content, material.mode);
+    await atomicFile(absolute, material.content, material.mode, beforeInstall);
     return;
   }
   const temporary = path.join(path.dirname(absolute), `.synod-restore-link-${randomUUID()}`);
   await symlink(material.content.toString("utf8"), temporary);
   try {
-    if (current !== "missing") await unlink(absolute);
+    await beforeInstall?.();
     await rename(temporary, absolute);
   } finally {
     await unlink(temporary).catch(() => {});
@@ -861,7 +881,12 @@ export async function restoreRecoveryBundle(
         throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "The destination index changed before recovery mutation.");
       }
       await writeGitObjects(targetDirectory, plans.indexMaterials, objectFormat);
-      await atomicFile(locations.indexPath, temporaryIndex.bytes, context.journal.indexMode);
+      await atomicFile(
+        locations.indexPath,
+        temporaryIndex.bytes,
+        context.journal.indexMode,
+        () => dependencies.restoreHook?.("before-index-install")
+      );
       await dependencies.restoreHook?.("after-index");
       for (const plan of plans.paths) {
         const journalPath = context.journal.paths.find(item => item.path === plan.path)!;
@@ -871,7 +896,12 @@ export async function restoreRecoveryBundle(
             details: { path: plan.path }
           });
         }
-        await mutatePath(targetDirectory, plan.path, plan.desired);
+        await mutatePath(
+          targetDirectory,
+          plan.path,
+          plan.desired,
+          () => dependencies.restoreHook?.("before-path-install", plan.path)
+        );
         await dependencies.restoreHook?.("after-path", plan.path);
       }
       await dependencies.restoreHook?.("before-verify");

@@ -337,7 +337,9 @@ test("failures at every restore mutation boundary roll back exact index and file
   const { directory, parent } = await fixture();
   const bundle = path.join(parent, "rollback.bundle");
   await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
-  for (const failurePhase of ["after-index", "after-path", "before-verify"] as const) {
+  for (const failurePhase of [
+    "before-index-install", "after-index", "before-path-install", "after-path", "before-verify"
+  ] as const) {
     const destination = await cloneBase(directory, parent, `rollback-${failurePhase}`);
     const indexPath = await gitPathForTest(destination, "index");
     const before = {
@@ -354,7 +356,7 @@ test("failures at every restore mutation boundary roll back exact index and file
     await assert.rejects(
       restoreRecoveryBundle({ bundle, directory: destination }, {
         restoreHook(phase) {
-          if (phase === failurePhase && (phase !== "after-path" || ++paths === 3)) {
+          if (phase === failurePhase && (!["before-path-install", "after-path"].includes(phase) || ++paths === 3)) {
             throw new Error(`injected ${failurePhase} restore failure`);
           }
         }
@@ -389,7 +391,7 @@ test("a later restore safely rolls back an interrupted durable journal before re
     import { restoreRecoveryBundle } from ${JSON.stringify(restoreModule)};
     await restoreRecoveryBundle(
       { bundle: ${JSON.stringify(bundle)}, directory: ${JSON.stringify(destination)} },
-      { restoreHook(phase) { if (phase === "after-path") process.exit(77); } }
+      { restoreHook(phase) { if (phase === "before-index-install") process.exit(77); } }
     );
   `;
   await assert.rejects(
