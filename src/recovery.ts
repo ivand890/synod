@@ -176,29 +176,38 @@ function isHash(value: unknown): value is string {
 }
 
 function isSafePath(value: unknown): value is string {
-  return typeof value === "string"
-    && value.length > 0
-    && value !== "."
-    && !value.includes("\0")
-    && !value.includes("\\")
-    && !path.posix.isAbsolute(value)
-    && value !== ".."
-    && !value.startsWith("../")
-    && path.posix.normalize(value) === value;
+  if (typeof value !== "string") return false;
+  if (value.length === 0
+    || value !== value.normalize("NFC")
+    || value === "."
+    || value.includes("\0")
+    || value.includes("\\")
+    || path.posix.isAbsolute(value)
+    || value === ".."
+    || value.startsWith("../")
+    || path.posix.normalize(value) !== value) return false;
+  return value.split("/").every(component => {
+    const stem = component.split(".")[0]!.toUpperCase();
+    return !/[\u0000-\u001f<>:"|?*]/u.test(component)
+      && !/[ .]$/u.test(component)
+      && !/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/u.test(stem);
+  });
 }
 
 function validatePathSet(entries: RecoveryEntry[]): void {
   const exact = new Set<string>();
   const folded = new Map<string, string>();
   for (const entry of entries) {
-    if (exact.has(entry.path)) invalid("Recovery bundle paths must be unique.", { path: entry.path });
-    exact.add(entry.path);
-    const key = entry.path.normalize("NFC").toLowerCase();
-    const prior = folded.get(key);
-    if (prior && prior !== entry.path) {
-      invalid("Recovery bundle paths collide under case-insensitive normalization.", { paths: [prior, entry.path] });
+    for (const relativePath of [entry.path, entry.sourcePath].filter((item): item is string => Boolean(item))) {
+      if (exact.has(relativePath)) invalid("Recovery bundle paths and rename sources must be unique.", { path: relativePath });
+      exact.add(relativePath);
+      const key = relativePath.normalize("NFC").toLowerCase();
+      const prior = folded.get(key);
+      if (prior && prior !== relativePath) {
+        invalid("Recovery bundle paths collide under case-insensitive normalization.", { paths: [prior, relativePath] });
+      }
+      folded.set(key, relativePath);
     }
-    folded.set(key, entry.path);
   }
   const sorted = [...exact].sort(compareCheckpointPaths);
   for (const relativePath of sorted) {
@@ -218,6 +227,7 @@ function validateIndexEntry(value: unknown): RecoveryIndexEntry {
     || typeof value.stage !== "number"
     || !Number.isSafeInteger(value.stage)
     || value.stage < 0
+    || value.stage > 3
     || (value.object !== null && !isHash(value.object))) {
     invalid("Recovery bundle contains an invalid index entry.");
   }
@@ -261,12 +271,25 @@ function validateEntry(value: unknown): RecoveryEntry {
     invalid("Recovery bundle path filtering metadata is inconsistent.", { path: value.path });
   }
   const index = value.index.map(validateIndexEntry);
+  const worktree = validateWorktreeEntry(value.worktree);
   if (index.some(item => item.object === null && (!value.filtered || item.mode !== "100644"))) {
     invalid("Only filtered regular-file index entries may omit recovery material.", { path: value.path });
   }
   const stages = new Set(index.map(item => item.stage));
   if (stages.size !== index.length || index.some((item, position) => position > 0 && index[position - 1]!.stage >= item.stage)) {
     invalid("Recovery index stages must be unique and sorted.", { path: value.path });
+  }
+  if (index.length > 1 && stages.has(0)) {
+    invalid("A recovery index path cannot mix stage zero with conflict stages.", { path: value.path });
+  }
+  if (value.sourcePath !== undefined && !value.status.includes("R") && !value.status.includes("C")) {
+    invalid("Recovery rename metadata does not match the path status.", { path: value.path });
+  }
+  if (value.status === "??" && (index.length > 0 || worktree.type === "missing" || value.sourcePath !== undefined)) {
+    invalid("Recovery untracked metadata is inconsistent.", { path: value.path });
+  }
+  if (value.filtered && (index.some(item => item.mode === "120000") || worktree.type === "symlink")) {
+    invalid("Filtered recovery paths must remain regular files.", { path: value.path });
   }
   return {
     path: value.path,
@@ -275,7 +298,7 @@ function validateEntry(value: unknown): RecoveryEntry {
     binary: value.binary,
     filtered: value.filtered,
     index,
-    worktree: validateWorktreeEntry(value.worktree)
+    worktree
   };
 }
 

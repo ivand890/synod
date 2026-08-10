@@ -372,6 +372,7 @@ test("bundle export and verify expose schema-1 JSON success and corruption error
   const directory = path.join(parent, "project");
   const destination = path.join(parent, "recovery.bundle");
   const textDestination = path.join(parent, "recovery-text.bundle");
+  const restoreDirectory = path.join(parent, "restored-project");
   const { messages, output } = capturedOutput();
   const git = (...args: string[]) => {
     const result = spawnSync("git", ["-C", directory, ...args], { encoding: "utf8" });
@@ -414,6 +415,17 @@ test("bundle export and verify expose schema-1 JSON success and corruption error
     assert.equal(verified.ok, true);
     assert.equal(verified.data.action, "verify");
     assert.equal(verified.data.bundleId, exported.data.bundleId);
+
+    const clone = spawnSync("git", ["clone", "--no-local", directory, restoreDirectory], { encoding: "utf8" });
+    assert.equal(clone.status, 0, clone.stderr);
+    const restoreCode = await run(["bundle", "restore", destination, "--cwd", restoreDirectory, "--json"], output);
+    const restored = JSON.parse(takeMessage(messages));
+    assert.equal(restoreCode, 0);
+    assert.equal(restored.ok, true);
+    assert.equal(restored.data.action, "restore");
+    assert.equal(restored.data.bundleId, exported.data.bundleId);
+    assert.equal(restored.data.recoveredInterruptedRestore, false);
+    assert.equal(await readFile(path.join(restoreDirectory, "tracked.txt"), "utf8"), "checkpoint\n");
 
     const object = (await readdir(path.join(destination, "objects")))[0];
     assert.ok(object);

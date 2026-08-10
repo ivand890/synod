@@ -41,7 +41,14 @@ export interface BundleVerifyCommandOptions {
   json: boolean;
 }
 
-export type BundleCommandOptions = BundleExportCommandOptions | BundleVerifyCommandOptions;
+export interface BundleRestoreCommandOptions {
+  action: "restore";
+  bundle: string;
+  directory: string;
+  json: boolean;
+}
+
+export type BundleCommandOptions = BundleExportCommandOptions | BundleVerifyCommandOptions | BundleRestoreCommandOptions;
 
 interface TaskCommonOptions {
   id: string;
@@ -169,7 +176,7 @@ export function parseCheckpointArgs(args: string[]): CheckpointOptions | HelpOpt
 export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOptions {
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
-  if (action !== "export" && action !== "verify") {
+  if (action !== "export" && action !== "verify" && action !== "restore") {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown bundle action: ${action}`, { details: { action } });
   }
   const positional = args[1];
@@ -185,7 +192,7 @@ export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOpti
     if (arg === "-h" || arg === "--help") return { help: true };
     if (arg === "--json") json = true;
     else if (arg === "--include-untracked" && action === "export") includeUntracked = true;
-    else if (arg === "--cwd" && action === "export") {
+    else if (arg === "--cwd" && (action === "export" || action === "restore")) {
       directory = optionValue(args, index, arg);
       index += 1;
     } else if (arg.startsWith("-")) {
@@ -194,9 +201,9 @@ export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOpti
       throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
     }
   }
-  return action === "export"
-    ? { action, directory, destination: positional, includeUntracked, json }
-    : { action, bundle: positional, json };
+  if (action === "export") return { action, directory, destination: positional, includeUntracked, json };
+  if (action === "restore") return { action, bundle: positional, directory, json };
+  return { action, bundle: positional, json };
 }
 
 export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {

@@ -252,6 +252,22 @@ try {
   if (verifyEnvelope.ok !== true || verifyData.action !== "verify" || verifyData.bundleId !== exportData.bundleId) {
     throw new Error(`Installed CLI failed its bundle verification smoke: ${verifyOutput}`);
   }
+  const restoreDirectory = path.join(consumerDirectory, "restored-project");
+  run("git", ["clone", "--no-local", targetDirectory, restoreDirectory]);
+  const restoreOutput = runSynod(["bundle", "restore", bundleDirectory, "--cwd", restoreDirectory, "--json"], {
+    cwd: consumerDirectory,
+    capture: true,
+  });
+  const restoreEnvelope = jsonRecord(restoreOutput, "bundle restore envelope");
+  const restoreData = nestedRecord(restoreEnvelope, "data", "bundle restore envelope");
+  if (
+    restoreEnvelope.ok !== true
+    || restoreData.action !== "restore"
+    || restoreData.bundleId !== exportData.bundleId
+    || readFileSync(path.join(restoreDirectory, "package-recovery.txt"), "utf8") !== "acknowledged dirty bytes\n"
+  ) {
+    throw new Error(`Installed CLI failed its bundle restore smoke: ${restoreOutput}`);
+  }
   const statusOutput = runSynod(["status", targetDirectory, "--json"], {
     cwd: consumerDirectory,
     capture: true,
