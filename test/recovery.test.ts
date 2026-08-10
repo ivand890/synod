@@ -160,6 +160,30 @@ test("refuses existing destinations, checkpoint drift, and destinations inside t
   );
 });
 
+test("refuses canonical destination aliases and an atomically raced destination", {
+  skip: process.platform === "win32" ? "Windows symlink creation requires elevated privileges." : false
+}, async () => {
+  const { directory, parent } = await fixture();
+  const alias = path.join(parent, "project-alias");
+  await symlink(directory, alias);
+  const aliasedDestination = path.join(alias, ".synod", "inside.bundle");
+  await assert.rejects(
+    exportRecoveryBundle({ directory, destination: aliasedDestination, includeUntracked: true }),
+    { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID }
+  );
+
+  const racedDestination = path.join(parent, "raced-destination.bundle");
+  await assert.rejects(
+    exportRecoveryBundle({ directory, destination: racedDestination, includeUntracked: true }, {
+      async beforePublish(destination) {
+        await mkdir(destination);
+      }
+    }),
+    { code: ERROR_CODES.RECOVERY_DESTINATION_EXISTS }
+  );
+  assert.deepEqual(await readdir(racedDestination), []);
+});
+
 test("fails closed when source bytes race export materialization", async () => {
   const { directory, parent } = await fixture();
   const destination = path.join(parent, "raced.bundle");
@@ -323,6 +347,31 @@ test("verification rejects tampered objects, extra material, traversal, and syml
       next.objects = next.objects
         .filter((object: any) => object.hash !== previousHash)
         .concat({ hash: nextHash, size: unsafeTarget.byteLength })
+        .sort((left: any, right: any) => left.hash.localeCompare(right.hash));
+    });
+    await assert.rejects(verifyRecoveryBundle({ bundle: target }), { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID });
+  }
+
+  if (process.platform !== "win32") {
+    const target = path.join(parent, "unsafe-index-link.bundle");
+    await cp(canonical, target, { recursive: true });
+    const unsafeTarget = Buffer.from("../../index-escape", "utf8");
+    const nextHash = sha256(unsafeTarget);
+    await writeFile(path.join(target, "objects", nextHash.slice("sha256:".length)), unsafeTarget);
+    await rewriteManifest(target, manifest => {
+      const entry = manifest.entries.find((item: any) => item.index.length > 0 && item.worktree.type === "file");
+      assert.ok(entry);
+      entry.index[0].mode = "120000";
+      entry.index[0].object = nextHash;
+      const references = new Set<string>();
+      for (const item of manifest.entries) {
+        for (const index of item.index) if (index.object) references.add(index.object);
+        if (item.worktree.object) references.add(item.worktree.object);
+      }
+      manifest.objects = manifest.objects
+        .filter((object: any) => references.has(object.hash))
+        .concat({ hash: nextHash, size: unsafeTarget.byteLength })
+        .filter((object: any, index: number, values: any[]) => values.findIndex(item => item.hash === object.hash) === index)
         .sort((left: any, right: any) => left.hash.localeCompare(right.hash));
     });
     await assert.rejects(verifyRecoveryBundle({ bundle: target }), { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID });

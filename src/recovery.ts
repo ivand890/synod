@@ -9,8 +9,10 @@ import {
   readFile,
   readlink,
   readdir,
+  realpath,
   rename,
-  rm
+  rm,
+  rmdir
 } from "node:fs/promises";
 import path from "node:path";
 import { compareCheckpointPaths } from "./checkpoint.js";
@@ -34,6 +36,7 @@ type RawGitRunner = (directory: string, args: string[]) => Promise<Buffer>;
 
 export interface RecoveryDependencies extends OrchestrationDependencies {
   rawGitRunner?: RawGitRunner;
+  beforePublish?: (destination: string) => Promise<void>;
 }
 
 export interface BundleExportOptions {
@@ -545,6 +548,65 @@ async function validateDestinationParent(destination: string): Promise<void> {
   if (!stats.isDirectory() || stats.isSymbolicLink()) invalid("Recovery bundle parent must be a real directory.", { parent });
 }
 
+async function canonicalDestination(destination: string): Promise<string> {
+  const resolved = path.resolve(destination);
+  await validateDestinationParent(resolved);
+  return path.join(await realpath(path.dirname(resolved)), path.basename(resolved));
+}
+
+async function publishBundle(
+  temporary: string,
+  destination: string,
+  beforePublish?: ((destination: string) => Promise<void>) | undefined
+): Promise<void> {
+  await beforePublish?.(destination);
+  try {
+    await mkdir(destination, { mode: 0o700 });
+  } catch (error) {
+    if (errorCode(error) === "EEXIST") {
+      throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_EXISTS, "Recovery bundle destination already exists.", {
+        details: { destination }
+      });
+    }
+    throw error;
+  }
+
+  try {
+    try {
+      // POSIX atomically replaces the empty directory that this process just
+      // reserved. No competing process can create the destination in between.
+      await rename(temporary, destination);
+      return;
+    } catch (error) {
+      const code = errorCode(error);
+      if (process.platform !== "win32" || !["EEXIST", "ENOTEMPTY", "EPERM"].includes(code || "")) throw error;
+    }
+
+    // Windows does not replace an empty directory. Keep the exclusive
+    // reservation and publish manifest.json last as the atomic completion
+    // marker; verification rejects the destination before that rename.
+    if ((await readdir(destination)).length !== 0) {
+      throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_EXISTS, "Recovery bundle destination changed during publication.", {
+        details: { destination }
+      });
+    }
+    await rename(path.join(temporary, RECOVERY_OBJECTS_PATH), path.join(destination, RECOVERY_OBJECTS_PATH));
+    await rename(path.join(temporary, RECOVERY_MANIFEST_PATH), path.join(destination, RECOVERY_MANIFEST_PATH));
+    await rmdir(temporary);
+  } catch (error) {
+    // Remove only an empty reservation. If another process added anything,
+    // preserve it and fail closed instead of deleting material we do not own.
+    await rmdir(destination).catch(() => {});
+    if (["EEXIST", "ENOTEMPTY", "EPERM"].includes(errorCode(error) || "")) {
+      throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_EXISTS, "Recovery bundle destination changed during publication.", {
+        cause: error,
+        details: { destination }
+      });
+    }
+    throw error;
+  }
+}
+
 export async function verifyRecoveryBundle(
   { bundle }: BundleVerifyOptions
 ): Promise<BundleVerification> {
@@ -605,6 +667,9 @@ export async function verifyRecoveryBundle(
     material.set(object.hash, content);
   }
   for (const entry of manifest.entries) {
+    for (const item of entry.index) {
+      if (item.mode === "120000" && item.object) assertSafeSymlink(entry, material.get(item.object)!);
+    }
     if (entry.worktree.type === "symlink" && entry.worktree.object) {
       assertSafeSymlink(entry, material.get(entry.worktree.object)!);
     }
@@ -623,13 +688,12 @@ export async function exportRecoveryBundle(
   { directory = ".", destination, includeUntracked = false }: BundleExportOptions,
   dependencies: RecoveryDependencies = {}
 ): Promise<BundleExportResult> {
-  const targetDirectory = path.resolve(directory);
-  const destinationPath = path.resolve(destination);
+  const targetDirectory = await realpath(path.resolve(directory));
+  const destinationPath = await canonicalDestination(destination);
   const relativeDestination = path.relative(targetDirectory, destinationPath);
   if (relativeDestination === "" || (!relativeDestination.startsWith(`..${path.sep}`) && relativeDestination !== ".." && !path.isAbsolute(relativeDestination))) {
     invalid("Recovery bundle destination must be outside the source checkout.", { destination: destinationPath });
   }
-  await validateDestinationParent(destinationPath);
   await requireMissingDestination(destinationPath);
   const rawGitRunner = dependencies.rawGitRunner || defaultRawGitRunner;
   return await withValidatedCheckpointSource({ directory: targetDirectory }, dependencies, async source => {
@@ -727,17 +791,7 @@ export async function exportRecoveryBundle(
       await writeDurableFile(path.join(temporary, RECOVERY_MANIFEST_PATH), serializeManifest(manifest));
       await verifyRecoveryBundle({ bundle: temporary });
       await assertSourceStillMatches(source.targetDirectory, source.state.checkpoint, dependencies);
-      await requireMissingDestination(destinationPath);
-      try {
-        await rename(temporary, destinationPath);
-      } catch (error) {
-        if (["EEXIST", "ENOTEMPTY"].includes(errorCode(error) || "")) {
-          throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_EXISTS, "Recovery bundle destination already exists.", {
-            details: { destination: destinationPath }
-          });
-        }
-        throw error;
-      }
+      await publishBundle(temporary, destinationPath, dependencies.beforePublish);
       const verified = await verifyRecoveryBundle({ bundle: destinationPath });
       return { ...verified, destination: destinationPath };
     } finally {
