@@ -11,6 +11,7 @@ export interface LifecycleOptions {
   dryRun?: boolean;
   force?: boolean;
   profile?: string;
+  explain?: boolean;
 }
 
 export interface UsageOptions {
@@ -66,10 +67,11 @@ function optionValue(args: string[], index: number, option: string): string {
 
 export function parseLifecycleArgs(
   args: string[],
-  { allowDryRun = false, allowForce = false, allowProfile = false }: {
+  { allowDryRun = false, allowForce = false, allowProfile = false, allowExplain = false }: {
     allowDryRun?: boolean;
     allowForce?: boolean;
     allowProfile?: boolean;
+    allowExplain?: boolean;
   } = {}
 ): LifecycleOptions | HelpOptions {
   const options: LifecycleOptions = { directory: ".", json: false };
@@ -81,6 +83,7 @@ export function parseLifecycleArgs(
     if (arg === "--json") options.json = true;
     else if (arg === "--dry-run" && allowDryRun) options.dryRun = true;
     else if (arg === "--force" && allowForce) options.force = true;
+    else if (arg === "--explain" && allowExplain) options.explain = true;
     else if (arg === "--profile" && allowProfile) {
       options.profile = optionValue(args, index, arg);
       index += 1;

@@ -13,12 +13,31 @@ import {
   type PathInspection,
   pathType,
   resolveProjectPath,
+  type TransactionOperation,
   type TransactionHooks,
   unsafeAncestor
 } from "./filesystem.js";
 import { packageName, packageVersion } from "./package.js";
 import { generatedConfigMarker, removeAgentsBlocks } from "./templates.js";
 import { errorCode, errorMessage, isRecord, parseJson } from "./validation.js";
+import {
+  CHECKPOINT_SNAPSHOT_PATH,
+  addCommittedCheckpointChanges,
+  compareCheckpointPaths,
+  createCheckpointSnapshot,
+  explainCheckpointDelta,
+  formatCheckpointDelta,
+  serializeCheckpointSnapshot,
+  validateCheckpointSnapshot
+} from "./checkpoint.js";
+import type {
+  CheckpointDelta,
+  CommittedCheckpointChange,
+  CheckpointEntry,
+  CheckpointIndexEntry,
+  CheckpointSnapshot,
+  CheckpointSnapshotReference
+} from "./checkpoint.js";
 
 export const ORCHESTRATION_SCHEMA_VERSION = 1;
 export const ORCHESTRATION_STATE_PATH = ".synod/state.json";
@@ -51,6 +70,7 @@ export interface GitCheckpoint {
     clean: boolean;
     entries: number;
     fingerprint: string;
+    snapshot?: CheckpointSnapshotReference;
   };
 }
 
@@ -184,27 +204,13 @@ interface CheckpointPathRecord {
   contentHash?: string;
   gitHead?: string;
   worktreeFingerprint?: string;
+  binary?: boolean;
 }
 
 interface RawIndexEntry {
   mode: string;
   objectId: string;
   stage: number;
-}
-
-interface CheckpointIndexEntry {
-  mode: string;
-  stage: number;
-  objectId?: string;
-  type?: "file" | "ignored";
-  contentHash?: string;
-}
-
-interface WorktreeRecord extends CheckpointPathRecord {
-  status: string;
-  path: string;
-  sourcePath?: string;
-  index?: CheckpointIndexEntry[];
 }
 
 export interface OrchestrationStatusResult {
@@ -221,6 +227,7 @@ export interface OrchestrationStatusResult {
   taskCounts: Record<TaskState, number>;
   tasks: OrchestrationTask[];
   markdownView: string;
+  delta?: CheckpointDelta;
 }
 
 const TERMINAL_STATES: ReadonlySet<TaskState> = new Set(["DONE", "SUPERSEDED"]);
@@ -305,9 +312,16 @@ function checkpointSignature(inspected: { type?: string; contentHash?: string })
 }
 
 async function defaultGitRunner(directory: string, args: string[]): Promise<string> {
-  const result = await execFileAsync("git", ["-C", directory, ...args], {
+  const result = await execFileAsync("git", [
+    "-C", directory,
+    "-c", "core.fsmonitor=false",
+    "-c", "status.renames=true",
+    "-c", "diff.renames=true",
+    ...args
+  ], {
     encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024
+    maxBuffer: 16 * 1024 * 1024,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }
   });
   return String(result.stdout);
 }
@@ -344,7 +358,15 @@ async function checkpointPath(directory: string, relativePath: string, gitRunner
       const content = await handle.readFile();
       const filtered = checkpointContent(relativePath, content.toString("utf8"));
       if (filtered === undefined) return { type: "ignored" };
-      return { type: "file", contentHash: sha256Bytes(filtered === null ? content : filtered) };
+      const material = filtered === null ? content : filtered;
+      return {
+        type: "file",
+        contentHash: sha256Bytes(material),
+        binary: filtered === null && (
+          content.includes(0)
+          || !Buffer.from(content.toString("utf8"), "utf8").equals(content)
+        )
+      };
     } finally {
       await handle.close();
     }
@@ -368,6 +390,97 @@ function indexRecords(indexOutput: string): Map<string, RawIndexEntry[]> {
     records.set(relativePath, entries);
   }
   return records;
+}
+
+function committedChangeKind(status: string): CommittedCheckpointChange["kind"] {
+  const code = status[0];
+  if (code === "A") return "added";
+  if (code === "M") return "modified";
+  if (code === "D") return "deleted";
+  if (code === "R") return "renamed";
+  if (code === "C") return "copied";
+  if (code === "T") return "type-changed";
+  return "unmerged";
+}
+
+function parseCommittedChanges(output: string): CommittedCheckpointChange[] {
+  const fields = output.split("\0");
+  const changes: CommittedCheckpointChange[] = [];
+  for (let cursor = 0; cursor < fields.length;) {
+    const status = fields[cursor++];
+    if (!status) continue;
+    if (status.startsWith("R") || status.startsWith("C")) {
+      const sourcePath = fields[cursor++];
+      const relativePath = fields[cursor++];
+      if (sourcePath && relativePath && !isIgnoredCheckpointPath(relativePath)) {
+        changes.push({ path: relativePath, sourcePath, kind: committedChangeKind(status) });
+      }
+    } else {
+      const relativePath = fields[cursor++];
+      if (relativePath && !isIgnoredCheckpointPath(relativePath)) {
+        changes.push({ path: relativePath, kind: committedChangeKind(status) });
+      }
+    }
+  }
+  return changes;
+}
+
+function binaryPathsFromNumstat(output: string): Set<string> {
+  const fields = output.split("\0");
+  const binary = new Set<string>();
+  for (let cursor = 0; cursor < fields.length;) {
+    const header = fields[cursor++];
+    if (!header) continue;
+    const firstTab = header.indexOf("\t");
+    const secondTab = firstTab < 0 ? -1 : header.indexOf("\t", firstTab + 1);
+    if (firstTab < 0 || secondTab < 0) continue;
+    const added = header.slice(0, firstTab);
+    const deleted = header.slice(firstTab + 1, secondTab);
+    let relativePath = header.slice(secondTab + 1);
+    if (!relativePath) {
+      cursor += 1;
+      relativePath = fields[cursor++] || "";
+    }
+    if (relativePath && added === "-" && deleted === "-") binary.add(relativePath);
+  }
+  return binary;
+}
+
+async function checkpointCommitContent(
+  directory: string,
+  head: string | null,
+  relativePath: string,
+  gitRunner: GitRunner
+): Promise<Buffer | undefined> {
+  if (!head) return undefined;
+  try {
+    const content = await gitRunner(directory, ["cat-file", "blob", `${head}:${relativePath}`]);
+    const filtered = checkpointContent(relativePath, content);
+    return filtered === null ? Buffer.from(content, "utf8") : filtered;
+  } catch {
+    return undefined;
+  }
+}
+
+async function filterCommittedCheckpointChanges(
+  directory: string,
+  changes: CommittedCheckpointChange[],
+  beforeHead: string | null,
+  afterHead: string | null,
+  gitRunner: GitRunner
+): Promise<CommittedCheckpointChange[]> {
+  const included = await Promise.all(changes.map(async change => {
+    const beforePath = change.sourcePath || change.path;
+    if (!isFilteredCheckpointPath(beforePath) && !isFilteredCheckpointPath(change.path)) return change;
+    const [before, after] = await Promise.all([
+      checkpointCommitContent(directory, beforeHead, beforePath, gitRunner),
+      checkpointCommitContent(directory, afterHead, change.path, gitRunner)
+    ]);
+    if (before === undefined && after === undefined) return undefined;
+    if (before && after && before.equals(after)) return undefined;
+    return change;
+  }));
+  return included.filter((change): change is CommittedCheckpointChange => Boolean(change));
 }
 
 async function checkpointIndexEntries(
@@ -395,11 +508,12 @@ async function worktreeRecords(
   porcelain: string,
   indexOutput: string,
   overlay: Map<string, string>,
+  binaryPaths: Set<string>,
   gitRunner: GitRunner
-): Promise<WorktreeRecord[]> {
+): Promise<CheckpointEntry[]> {
   const stagedIndex = indexRecords(indexOutput);
   const fields = porcelain.split("\0");
-  const records: WorktreeRecord[] = [];
+  const records: CheckpointEntry[] = [];
   for (let cursor = 0; cursor < fields.length; cursor += 1) {
     const field = fields[cursor];
     if (!field) continue;
@@ -432,6 +546,7 @@ async function worktreeRecords(
       ...(inspected.contentHash ? { contentHash: inspected.contentHash } : {}),
       ...(inspected.gitHead ? { gitHead: inspected.gitHead } : {}),
       ...(inspected.worktreeFingerprint ? { worktreeFingerprint: inspected.worktreeFingerprint } : {}),
+      ...(inspected.binary || binaryPaths.has(relativePath) ? { binary: true } : {}),
       ...(index ? { index } : {})
     });
   }
@@ -448,44 +563,89 @@ async function worktreeRecords(
       contentHash: sha256Bytes(filtered === null ? Buffer.from(content, "utf8") : filtered)
     });
   }
-  return records.sort((left, right) => `${left.path}\0${left.sourcePath || ""}`.localeCompare(`${right.path}\0${right.sourcePath || ""}`));
+  return records.sort((left, right) => compareCheckpointPaths(
+    `${left.path}\0${left.sourcePath || ""}`,
+    `${right.path}\0${right.sourcePath || ""}`
+  ));
 }
 
-export async function captureGitCheckpoint(directory: string, {
+export async function captureGitCheckpointSnapshot(directory: string, {
   clock,
   gitRunner = defaultGitRunner,
   checkpointOverlay = new Map()
-}: OrchestrationDependencies = {}): Promise<GitCheckpoint> {
+}: OrchestrationDependencies = {}): Promise<{ checkpoint: GitCheckpoint; snapshot: CheckpointSnapshot }> {
   const capturedAt = nowIso(clock);
   const inside = await optionalGit(gitRunner, directory, ["rev-parse", "--is-inside-work-tree"]);
   if (inside !== "true") {
-    return {
+    const snapshot = validateCheckpointSnapshot(createCheckpointSnapshot({
       capturedAt,
       available: false,
       branch: null,
       head: null,
-      worktree: { clean: true, entries: 0, fingerprint: sha256("[]") }
+      worktreeFingerprint: sha256("[]"),
+      entries: []
+    }));
+    return {
+      checkpoint: {
+        capturedAt,
+        available: false,
+        branch: null,
+        head: null,
+        worktree: {
+          clean: true,
+          entries: 0,
+          fingerprint: snapshot.worktreeFingerprint,
+          snapshot: { path: CHECKPOINT_SNAPSHOT_PATH, contentHash: snapshot.contentHash }
+        }
+      },
+      snapshot
     };
   }
 
-  const [head, branch, porcelain, index] = await Promise.all([
+  const [head, branch, porcelain, index, stagedNumstat, unstagedNumstat] = await Promise.all([
     optionalGit(gitRunner, directory, ["rev-parse", "HEAD"]),
     optionalGit(gitRunner, directory, ["symbolic-ref", "--short", "-q", "HEAD"]),
     gitRunner(directory, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]),
-    gitRunner(directory, ["ls-files", "--stage", "-z", "--", "."])
+    gitRunner(directory, ["ls-files", "--stage", "-z", "--", "."]),
+    gitRunner(directory, ["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-z", "--cached", "--", "."]),
+    gitRunner(directory, ["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-z", "--", "."])
   ]);
-  const records = await worktreeRecords(directory, porcelain, index, checkpointOverlay, gitRunner);
-  return {
+  const binaryPaths = new Set([
+    ...binaryPathsFromNumstat(stagedNumstat),
+    ...binaryPathsFromNumstat(unstagedNumstat)
+  ]);
+  const records = await worktreeRecords(directory, porcelain, index, checkpointOverlay, binaryPaths, gitRunner);
+  const fingerprint = sha256(stableStringify(records));
+  const snapshot = validateCheckpointSnapshot(createCheckpointSnapshot({
     capturedAt,
     available: true,
     branch,
     head,
-    worktree: {
-      clean: records.length === 0,
-      entries: records.length,
-      fingerprint: sha256(stableStringify(records))
-    }
+    worktreeFingerprint: fingerprint,
+    entries: records
+  }));
+  return {
+    checkpoint: {
+      capturedAt,
+      available: true,
+      branch,
+      head,
+      worktree: {
+        clean: records.length === 0,
+        entries: records.length,
+        fingerprint,
+        snapshot: { path: CHECKPOINT_SNAPSHOT_PATH, contentHash: snapshot.contentHash }
+      }
+    },
+    snapshot
   };
+}
+
+export async function captureGitCheckpoint(
+  directory: string,
+  dependencies: OrchestrationDependencies = {}
+): Promise<GitCheckpoint> {
+  return (await captureGitCheckpointSnapshot(directory, dependencies)).checkpoint;
 }
 
 export function checkpointDrift(expected: GitCheckpoint, actual: GitCheckpoint): CheckpointDrift {
@@ -655,7 +815,7 @@ export async function createInitialOrchestrationFiles(
   dependencies: OrchestrationDependencies = {}
 ): Promise<Map<string, string>> {
   const timestamp = nowIso(dependencies.clock);
-  const checkpoint = await captureGitCheckpoint(targetDirectory, dependencies);
+  const { checkpoint, snapshot } = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
   const core = initialState(checkpoint, timestamp);
   const { event, state } = buildEvent(undefined, core, "project.initialized", {
     actor: "synod",
@@ -664,8 +824,44 @@ export async function createInitialOrchestrationFiles(
   return new Map([
     [ORCHESTRATION_STATE_PATH, serializeJson(state)],
     [ORCHESTRATION_EVENTS_PATH, `${JSON.stringify(event)}\n`],
-    [ORCHESTRATION_STATUS_PATH, renderStatusMarkdown(state)]
+    [ORCHESTRATION_STATUS_PATH, renderStatusMarkdown(state)],
+    [CHECKPOINT_SNAPSHOT_PATH, serializeCheckpointSnapshot(snapshot)]
   ]);
+}
+
+export type CheckpointSnapshotAdoption =
+  | { status: "current" }
+  | { status: "unavailable" }
+  | { status: "adopted"; files: Map<string, string> };
+
+export async function createCheckpointSnapshotAdoptionFiles(
+  targetDirectory: string,
+  dependencies: OrchestrationDependencies = {}
+): Promise<CheckpointSnapshotAdoption> {
+  const { state } = await validateOrchestrationReadOnly({ directory: targetDirectory });
+  if (state.checkpoint.worktree.snapshot) return { status: "current" };
+  const captured = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
+  if (checkpointDrift(state.checkpoint, captured.checkpoint).detected) return { status: "unavailable" };
+  const nextCore: OrchestrationStateCore = {
+    ...stateCore(state),
+    updatedAt: captured.checkpoint.capturedAt,
+    checkpoint: captured.checkpoint
+  };
+  const { event, state: nextState } = buildEvent(state, nextCore, "checkpoint.snapshot-adopted", {
+    actor: "synod",
+    checkpoint: captured.checkpoint,
+    payload: { source: "legacy-checkpoint" }
+  });
+  const existingEvents = await readRecord(targetDirectory, ORCHESTRATION_EVENTS_PATH);
+  return {
+    status: "adopted",
+    files: new Map([
+      [ORCHESTRATION_STATE_PATH, serializeJson(nextState)],
+      [ORCHESTRATION_EVENTS_PATH, `${existingEvents}${existingEvents.endsWith("\n") ? "" : "\n"}${JSON.stringify(event)}\n`],
+      [ORCHESTRATION_STATUS_PATH, renderStatusMarkdown(nextState)],
+      [CHECKPOINT_SNAPSHOT_PATH, serializeCheckpointSnapshot(captured.snapshot)]
+    ])
+  };
 }
 
 function invalidState(message: string, details?: unknown): never {
@@ -688,6 +884,13 @@ function isNonNegativeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && typeof value === "number" && value >= 0;
 }
 
+function isCheckpointSnapshotReference(value: unknown): value is CheckpointSnapshotReference {
+  return isRecord(value)
+    && value.path === CHECKPOINT_SNAPSHOT_PATH
+    && typeof value.contentHash === "string"
+    && /^sha256:[0-9a-f]{64}$/.test(value.contentHash);
+}
+
 function isGitCheckpoint(value: unknown): value is GitCheckpoint {
   return isRecord(value)
     && typeof value.capturedAt === "string"
@@ -697,7 +900,8 @@ function isGitCheckpoint(value: unknown): value is GitCheckpoint {
     && isRecord(value.worktree)
     && typeof value.worktree.clean === "boolean"
     && isNonNegativeInteger(value.worktree.entries)
-    && typeof value.worktree.fingerprint === "string";
+    && typeof value.worktree.fingerprint === "string"
+    && (value.worktree.snapshot === undefined || isCheckpointSnapshotReference(value.worktree.snapshot));
 }
 
 function isEvidenceKind(value: unknown): value is EvidenceKind {
@@ -920,9 +1124,43 @@ async function readRecord(targetDirectory: string, relativePath: string): Promis
   return (await readRecordBytes(targetDirectory, relativePath)).toString("utf8");
 }
 
+async function readCheckpointSnapshot(
+  targetDirectory: string,
+  checkpoint: GitCheckpoint
+): Promise<CheckpointSnapshot | undefined> {
+  const reference = checkpoint.worktree.snapshot;
+  if (!reference) return undefined;
+  let snapshot: CheckpointSnapshot;
+  try {
+    snapshot = validateCheckpointSnapshot(parseJson(await readRecord(targetDirectory, reference.path)));
+  } catch (error) {
+    if (error instanceof SynodError && error.code !== ERROR_CODES.ORCHESTRATION_NOT_INITIALIZED) throw error;
+    throw new SynodError(ERROR_CODES.CHECKPOINT_SNAPSHOT_INVALID, `Could not read ${reference.path}: ${errorMessage(error)}`, {
+      cause: error,
+      details: { path: reference.path }
+    });
+  }
+  if (
+    snapshot.contentHash !== reference.contentHash
+    || snapshot.available !== checkpoint.available
+    || snapshot.branch !== checkpoint.branch
+    || snapshot.head !== checkpoint.head
+    || snapshot.worktreeFingerprint !== checkpoint.worktree.fingerprint
+  ) {
+    throw new SynodError(ERROR_CODES.CHECKPOINT_SNAPSHOT_INVALID, "The checkpoint snapshot does not match canonical state.", {
+      details: {
+        path: reference.path,
+        expectedHash: reference.contentHash,
+        actualHash: snapshot.contentHash
+      }
+    });
+  }
+  return snapshot;
+}
+
 async function readOrchestrationRaw(
   targetDirectory: string
-): Promise<{ state: OrchestrationState; events: OrchestrationEvent[] }> {
+): Promise<{ state: OrchestrationState; events: OrchestrationEvent[]; snapshot?: CheckpointSnapshot }> {
   let state: OrchestrationState;
   try {
     state = validateOrchestrationState(parseJson(await readRecord(targetDirectory, ORCHESTRATION_STATE_PATH)));
@@ -951,12 +1189,13 @@ async function readOrchestrationRaw(
       details: { stateSequence: state.lastEvent.sequence, eventSequence: last.sequence }
     });
   }
-  return { state, events };
+  const snapshot = await readCheckpointSnapshot(targetDirectory, state.checkpoint);
+  return { state, events, ...(snapshot ? { snapshot } : {}) };
 }
 
 export async function readOrchestration(
   targetDirectory: string
-): Promise<{ state: OrchestrationState; events: OrchestrationEvent[] }> {
+): Promise<{ state: OrchestrationState; events: OrchestrationEvent[]; snapshot?: CheckpointSnapshot }> {
   const release = await acquireLock(targetDirectory);
   try {
     await recoverPendingMutation(targetDirectory);
@@ -1156,6 +1395,22 @@ interface PendingMutation {
   status: string;
   expectedStateHash: string;
   expectedStatusHash: string;
+  checkpointSnapshot?: CheckpointSnapshot;
+  expectedCheckpointSnapshot?: { type: "missing" } | { type: "file"; hash: string };
+}
+
+function isExpectedCheckpointSnapshot(value: unknown): value is PendingMutation["expectedCheckpointSnapshot"] {
+  return isRecord(value)
+    && (value.type === "missing" || (value.type === "file" && typeof value.hash === "string" && /^sha256:[0-9a-f]{64}$/.test(value.hash)));
+}
+
+function isValidCheckpointSnapshot(value: unknown): value is CheckpointSnapshot {
+  try {
+    validateCheckpointSnapshot(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isPendingMutation(value: unknown): value is PendingMutation {
@@ -1165,7 +1420,11 @@ function isPendingMutation(value: unknown): value is PendingMutation {
     && isOrchestrationStateShape(value.state)
     && typeof value.status === "string"
     && typeof value.expectedStateHash === "string"
-    && typeof value.expectedStatusHash === "string";
+    && typeof value.expectedStatusHash === "string"
+    && (
+      (value.checkpointSnapshot === undefined && value.expectedCheckpointSnapshot === undefined)
+      || (isValidCheckpointSnapshot(value.checkpointSnapshot) && isExpectedCheckpointSnapshot(value.expectedCheckpointSnapshot))
+    );
 }
 
 async function readPendingMutation(
@@ -1198,6 +1457,12 @@ async function readPendingMutation(
   };
   if (stableStringify(pending.state) !== stableStringify(expectedState)) {
     throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, "Pending orchestration state does not match its event.");
+  }
+  if (
+    pending.checkpointSnapshot
+    && pending.state.checkpoint.worktree.snapshot?.contentHash !== pending.checkpointSnapshot.contentHash
+  ) {
+    throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, "Pending checkpoint snapshot does not match its canonical state reference.");
   }
   return { inspected, pending };
 }
@@ -1268,22 +1533,46 @@ async function recoverPendingMutation(targetDirectory: string): Promise<boolean>
   if (stateInspected.type !== "file" || statusInspected.type !== "file") {
     throw new SynodError(ERROR_CODES.ORCHESTRATION_NOT_INITIALIZED, "Synod orchestration state or its Markdown view is missing.");
   }
+  const snapshotInspected = pending.checkpointSnapshot
+    ? await inspectPath(resolveProjectPath(targetDirectory, CHECKPOINT_SNAPSHOT_PATH))
+    : undefined;
+  if (snapshotInspected && snapshotInspected.type !== "missing" && snapshotInspected.type !== "file") {
+    throw new SynodError(ERROR_CODES.CHECKPOINT_SNAPSHOT_INVALID, "Canonical checkpoint snapshot is not a regular file.", {
+      details: { path: CHECKPOINT_SNAPSHOT_PATH, type: snapshotInspected.type }
+    });
+  }
   const nextStateContent = serializeJson(pending.state);
   const nextStateHash = contentHash(nextStateContent);
   const nextStatusHash = contentHash(pending.status);
-  if (stateInspected.hash !== nextStateHash || statusInspected.hash !== nextStatusHash) {
+  const nextSnapshotContent = pending.checkpointSnapshot
+    ? serializeCheckpointSnapshot(pending.checkpointSnapshot)
+    : undefined;
+  const nextSnapshotHash = nextSnapshotContent ? contentHash(nextSnapshotContent) : undefined;
+  const snapshotAlreadyCommitted = snapshotInspected?.type === "file" && snapshotInspected.hash === nextSnapshotHash;
+  if (stateInspected.hash !== nextStateHash || statusInspected.hash !== nextStatusHash || (snapshotInspected && !snapshotAlreadyCommitted)) {
+    const expectedSnapshot = pending.expectedCheckpointSnapshot;
+    const snapshotCanRecover = !snapshotInspected || !expectedSnapshot || snapshotAlreadyCommitted
+      || (expectedSnapshot.type === "missing" && snapshotInspected.type === "missing")
+      || (expectedSnapshot.type === "file" && snapshotInspected.type === "file" && snapshotInspected.hash === expectedSnapshot.hash);
     if (
       ![pending.expectedStateHash, nextStateHash].includes(stateInspected.hash)
       || ![pending.expectedStatusHash, nextStatusHash].includes(statusInspected.hash)
+      || !snapshotCanRecover
     ) {
       throw new SynodError(ERROR_CODES.DESTINATION_CHANGED, "Canonical orchestration files changed while recovering a pending mutation.", {
         details: {
           state: { expected: pending.expectedStateHash, actual: stateInspected.hash },
-          status: { expected: pending.expectedStatusHash, actual: statusInspected.hash }
+          status: { expected: pending.expectedStatusHash, actual: statusInspected.hash },
+          ...(snapshotInspected ? {
+            checkpointSnapshot: {
+              expected: expectedSnapshot,
+              actual: snapshotInspected.type === "file" ? { type: "file", hash: snapshotInspected.hash } : { type: snapshotInspected.type }
+            }
+          } : {})
         }
       });
     }
-    await applyTransaction(targetDirectory, [
+    const operations: TransactionOperation[] = [
       {
         action: "write",
         path: ORCHESTRATION_STATE_PATH,
@@ -1296,7 +1585,18 @@ async function recoverPendingMutation(targetDirectory: string): Promise<boolean>
         content: pending.status,
         expected: { type: "file", hash: statusInspected.hash }
       }
-    ]);
+    ];
+    if (snapshotInspected && nextSnapshotContent && !snapshotAlreadyCommitted) {
+      operations.push({
+        action: "write",
+        path: CHECKPOINT_SNAPSHOT_PATH,
+        content: nextSnapshotContent,
+        expected: snapshotInspected.type === "file"
+          ? { type: "file", hash: snapshotInspected.hash }
+          : { type: "missing" }
+      });
+    }
+    await applyTransaction(targetDirectory, operations);
   }
   await unlink(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
   return true;
@@ -1314,7 +1614,8 @@ async function commitMutation<Result extends Record<string, unknown>>(
     await recoverPendingMutation(targetDirectory);
     const { state: current } = await readOrchestrationRaw(targetDirectory);
     const timestamp = nowIso(dependencies.clock);
-    const checkpoint = await captureGitCheckpoint(targetDirectory, dependencies);
+    const captured = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
+    const checkpoint = captured.checkpoint;
     const draft = structuredClone(current);
     const reducerResult = reducer(draft, {
       timestamp,
@@ -1329,7 +1630,14 @@ async function commitMutation<Result extends Record<string, unknown>>(
       ...metadata,
       ...reducerResult.metadata,
       actor: reducerResult.metadata?.actor ?? metadata.actor,
-      checkpoint
+      checkpoint: reducerResult.updateCheckpoint ? checkpoint : {
+        ...checkpoint,
+        worktree: {
+          clean: checkpoint.worktree.clean,
+          entries: checkpoint.worktree.entries,
+          fingerprint: checkpoint.worktree.fingerprint
+        }
+      }
     };
     const { event, state } = buildEvent(current, stateCore(draft), type, eventMetadata);
     const stateInspected = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_STATE_PATH));
@@ -1340,13 +1648,27 @@ async function commitMutation<Result extends Record<string, unknown>>(
 
     const nextStateContent = serializeJson(state);
     const nextStatusContent = renderStatusMarkdown(state);
+    const snapshotInspected = reducerResult.updateCheckpoint
+      ? await inspectPath(resolveProjectPath(targetDirectory, CHECKPOINT_SNAPSHOT_PATH))
+      : undefined;
+    if (snapshotInspected && snapshotInspected.type !== "missing" && snapshotInspected.type !== "file") {
+      throw new SynodError(ERROR_CODES.CHECKPOINT_SNAPSHOT_INVALID, "Canonical checkpoint snapshot is not a regular file.", {
+        details: { path: CHECKPOINT_SNAPSHOT_PATH, type: snapshotInspected.type }
+      });
+    }
     const pending = {
       schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
       event,
       state,
       status: nextStatusContent,
       expectedStateHash: stateInspected.hash,
-      expectedStatusHash: statusInspected.hash
+      expectedStatusHash: statusInspected.hash,
+      ...(reducerResult.updateCheckpoint && snapshotInspected ? {
+        checkpointSnapshot: captured.snapshot,
+        expectedCheckpointSnapshot: snapshotInspected.type === "file"
+          ? { type: "file" as const, hash: snapshotInspected.hash }
+          : { type: "missing" as const }
+      } : {})
     };
     await applyTransaction(targetDirectory, [{
       action: "write",
@@ -1356,7 +1678,7 @@ async function commitMutation<Result extends Record<string, unknown>>(
     }], dependencies);
     try {
       await appendEvent(targetDirectory, event);
-      await applyTransaction(targetDirectory, [
+      const operations: TransactionOperation[] = [
         {
           action: "write",
           path: ORCHESTRATION_STATE_PATH,
@@ -1369,7 +1691,18 @@ async function commitMutation<Result extends Record<string, unknown>>(
           content: nextStatusContent,
           expected: { type: "file", hash: statusInspected.hash }
         }
-      ], dependencies);
+      ];
+      if (reducerResult.updateCheckpoint && snapshotInspected) {
+        operations.push({
+          action: "write",
+          path: CHECKPOINT_SNAPSHOT_PATH,
+          content: serializeCheckpointSnapshot(captured.snapshot),
+          expected: snapshotInspected.type === "file"
+            ? { type: "file", hash: snapshotInspected.hash }
+            : { type: "missing" }
+        });
+      }
+      await applyTransaction(targetDirectory, operations, dependencies);
       await unlink(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
     } catch (error) {
       try {
@@ -1672,7 +2005,7 @@ export async function recordCheckpoint(
 }
 
 export async function orchestrationStatus(
-  { directory = "." }: { directory?: string } = {},
+  { directory = ".", explain = false }: { directory?: string; explain?: boolean } = {},
   dependencies: OrchestrationDependencies = {}
 ): Promise<OrchestrationStatusResult> {
   const targetDirectory = path.resolve(directory);
@@ -1681,11 +2014,75 @@ export async function orchestrationStatus(
   let events: OrchestrationEvent[];
   let markdown: string;
   let currentCheckpoint: GitCheckpoint;
+  let delta: CheckpointDelta | undefined;
   try {
     await recoverPendingMutation(targetDirectory);
-    ({ state, events } = await readOrchestrationRaw(targetDirectory));
+    const canonical = await readOrchestrationRaw(targetDirectory);
+    ({ state, events } = canonical);
     markdown = await readRecord(targetDirectory, ORCHESTRATION_STATUS_PATH);
-    currentCheckpoint = await captureGitCheckpoint(targetDirectory, dependencies);
+    const current = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
+    currentCheckpoint = current.checkpoint;
+    if (explain) {
+      if (!canonical.snapshot) {
+        throw new SynodError(
+          ERROR_CODES.CHECKPOINT_SNAPSHOT_UNAVAILABLE,
+          "This historical checkpoint has no normalized snapshot. Record a new checkpoint before requesting a path delta.",
+          { details: { checkpoint: state.checkpoint } }
+        );
+      }
+      delta = explainCheckpointDelta(canonical.snapshot, current.snapshot);
+      if (state.checkpoint.head !== currentCheckpoint.head && (state.checkpoint.head || currentCheckpoint.head)) {
+        const gitRunner = dependencies.gitRunner || defaultGitRunner;
+        try {
+          if (state.checkpoint.head) {
+            await gitRunner(targetDirectory, ["cat-file", "-e", `${state.checkpoint.head}^{commit}`]);
+          }
+          const committedArgs = state.checkpoint.head && currentCheckpoint.head
+            ? [state.checkpoint.head, currentCheckpoint.head, "--", "."]
+            : ["--root", "--no-commit-id", "-r", currentCheckpoint.head || state.checkpoint.head || "", "--", "."];
+          const command = state.checkpoint.head && currentCheckpoint.head ? "diff" : "diff-tree";
+          const [committed, committedNumstat] = await Promise.all([
+            gitRunner(targetDirectory, [
+              command,
+              "--no-ext-diff",
+              "--no-textconv",
+              "--name-status",
+              "-z",
+              "-M",
+              ...committedArgs
+            ]),
+            gitRunner(targetDirectory, [
+              command,
+              "--no-ext-diff",
+              "--no-textconv",
+              "--numstat",
+              "-z",
+              "-M",
+              ...committedArgs
+            ])
+          ]);
+          const committedBinary = binaryPathsFromNumstat(committedNumstat);
+          const reverseRoot = Boolean(state.checkpoint.head && !currentCheckpoint.head);
+          const committedChanges = await filterCommittedCheckpointChanges(
+            targetDirectory,
+            parseCommittedChanges(committed),
+            state.checkpoint.head,
+            currentCheckpoint.head,
+            gitRunner
+          );
+          delta = addCommittedCheckpointChanges(delta, committedChanges.map(change => ({
+            ...change,
+            ...(reverseRoot ? { kind: "deleted" as const } : {}),
+            ...(committedBinary.has(change.path) ? { binary: true } : {})
+          })));
+        } catch (error) {
+          throw new SynodError(ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE, "The checkpoint Git base is unavailable for path-level comparison.", {
+            cause: error,
+            details: { head: state.checkpoint.head }
+          });
+        }
+      }
+    }
   } finally {
     await release();
   }
@@ -1725,7 +2122,8 @@ export async function orchestrationStatus(
     drift,
     taskCounts: counts,
     tasks: taskList(state),
-    markdownView: ORCHESTRATION_STATUS_PATH
+    markdownView: ORCHESTRATION_STATUS_PATH,
+    ...(delta ? { delta } : {})
   };
 }
 
@@ -1766,6 +2164,7 @@ export function formatOrchestrationStatus(result: OrchestrationStatusResult): st
   }
   if (result.tasks.length === 0) lines.push("No tasks recorded.");
   for (const reason of result.drift.reasons) lines.push(`Drift ${reason.field}: expected ${reason.expected}, actual ${reason.actual}`);
+  if (result.delta) lines.push(...formatCheckpointDelta(result.delta));
   return lines.join("\n");
 }
 

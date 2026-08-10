@@ -93,6 +93,7 @@ test("prints version and help", () => {
   assert.match(help.stdout, /synod upgrade/);
   assert.match(help.stdout, /synod doctor/);
   assert.match(help.stdout, /synod status/);
+  assert.match(help.stdout, /--explain/);
   assert.match(help.stdout, /synod task add/);
 });
 
@@ -321,6 +322,45 @@ test("task and status commands expose canonical orchestration through schema-1 e
     assert.equal(status.command, "status");
     assert.equal(status.data.eventCount, 2);
     assert.equal(status.data.tasks[0].revision, 0);
+
+    const explainCode = await run(["status", directory, "--explain", "--json"], output);
+    const explained = JSON.parse(takeMessage(messages));
+    assert.equal(explainCode, 0);
+    assert.equal(explained.ok, true);
+    assert.equal(explained.data.delta.changed, false);
+    assert.deepEqual(explained.data.delta.paths, []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("status explain returns the path delta inside checkpoint-drift JSON", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-delta-json-test-"));
+  const { messages, output } = capturedOutput();
+  const git = (...args: string[]) => {
+    const result = spawnSync("git", ["-C", directory, ...args], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+
+  try {
+    git("init");
+    git("config", "user.name", "Synod Test");
+    git("config", "user.email", "synod@example.invalid");
+    git("config", "commit.gpgsign", "false");
+    await writeFile(path.join(directory, "source.txt"), "base\n", "utf8");
+    git("add", "source.txt");
+    git("commit", "-m", "initial");
+    await run(["init", directory], output);
+    messages.length = 0;
+    await writeFile(path.join(directory, "source.txt"), "changed\n", "utf8");
+
+    const statusCode = await run(["status", directory, "--explain", "--json"], output);
+    const envelope = JSON.parse(takeMessage(messages));
+    assert.equal(statusCode, 1);
+    assert.equal(envelope.ok, false);
+    assert.equal(envelope.error.code, ERROR_CODES.CHECKPOINT_DRIFT);
+    assert.equal(envelope.error.details.delta.paths[0].path, "source.txt");
+    assert.equal(envelope.error.details.delta.paths[0].unstaged, "modified");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

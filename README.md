@@ -44,7 +44,7 @@ Synod preserves an existing user-owned `.codex/config.toml`. It reports the file
 
 If `AGENTS.md` contains multiple complete Synod managed blocks, initialization stops without writing. `synod init --force` consolidates those blocks into one canonical block and preserves surrounding user content. Incomplete, nested, or orphaned Synod markers are always rejected because their ownership boundary cannot be repaired safely.
 
-Synod keeps canonical orchestration state in `.synod/state.json`, an append-only audit stream in `.synod/events.jsonl`, and a generated human view in `docs/synod/STATUS.md`. Goal, decision, plan, state-note, and worklog Markdown remain user-owned supporting context. Upgrades and uninstall preserve both kinds of durable records.
+Synod keeps canonical orchestration state in `.synod/state.json`, an append-only audit stream in `.synod/events.jsonl`, the normalized acknowledged worktree snapshot in `.synod/checkpoint.json`, and a generated human view in `docs/synod/STATUS.md`. Goal, decision, plan, state-note, and worklog Markdown remain user-owned supporting context. Upgrades and uninstall preserve both kinds of durable records.
 
 The bootstrap records `.synod/runtime.json` schema 1 and creates an isolated pnpm project under `.synod/runtime/`. Its `package.json` and `pnpm-lock.yaml` pin the runtime, while its `.gitignore` excludes only `node_modules/`. Runtime metadata is deliberately separate from `.synod/manifest.json`: `runtimeVersion` identifies the executable, `templateVersion` identifies installed project content, and each descriptor keeps its own `schemaVersion`.
 
@@ -132,16 +132,17 @@ Read actual state and compare its last checkpoint with the current repository:
 
 ```bash
 synod status
+synod status --explain
 synod status --json
 ```
 
-`status` exits non-zero with `SYNOD_CHECKPOINT_DRIFT` when branch, `HEAD`, or relevant working-tree content differs. Synod-owned infrastructure and orchestration records are excluded so Synod does not create its own drift. After investigating a deliberate change, accept it explicitly:
+`status` exits non-zero with `SYNOD_CHECKPOINT_DRIFT` when branch, `HEAD`, or relevant working-tree content differs. `status --explain` adds a read-only path delta in text or JSON that distinguishes committed, staged, unstaged, untracked, deleted, renamed, resolved, and binary paths since the acknowledged checkpoint. Synod-owned infrastructure and orchestration records are excluded so Synod does not create its own drift. After investigating a deliberate change, accept it explicitly:
 
 ```bash
 synod checkpoint --message "Accepted the integrated revision"
 ```
 
-Do not hand-edit `.synod/state.json`, `.synod/events.jsonl`, or `docs/synod/STATUS.md`. A broken event sequence, hash chain, state/log match, or Markdown projection fails closed.
+Do not hand-edit `.synod/state.json`, `.synod/events.jsonl`, `.synod/checkpoint.json`, or `docs/synod/STATUS.md`. A broken event sequence, hash chain, state/log match, checkpoint snapshot, or Markdown projection fails closed. Historical checkpoints created before snapshot support remain valid for summary status, but path-level explanation requires recording a new checkpoint when the historical worktree no longer matches the live checkout.
 
 ## Token usage by model
 
