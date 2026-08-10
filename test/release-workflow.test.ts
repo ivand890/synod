@@ -8,11 +8,12 @@ const workflowPath = new URL("../.github/workflows/publish.yml", import.meta.url
 const ciWorkflowPath = new URL("../.github/workflows/ci.yml", import.meta.url);
 const packagePath = new URL("../package.json", import.meta.url);
 
-test("Git dependency prepack does not require pnpm or Corepack", async () => {
+test("Git dependency build lifecycles do not require pnpm or Corepack", async () => {
   const packageJson = parseJson(await readFile(packagePath, "utf8"));
   assert.ok(isRecord(packageJson) && isRecord(packageJson.scripts));
 
   assert.equal(packageJson.scripts.prepack, "npm run build");
+  assert.equal(packageJson.scripts.prepare, "npm run build");
   const buildScript = packageJson.scripts.build;
   assert.ok(typeof buildScript === "string");
   assert.doesNotMatch(buildScript, /\bpnpm\b/);

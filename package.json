@@ -29,7 +29,8 @@
     "test:integration": "pnpm typecheck && tsx --test test/cli.test.ts",
     "test:package": "pnpm build && tsx scripts/package-smoke.ts",
     "test:codex-compatibility": "pnpm build && tsx scripts/codex-compatibility-smoke.ts",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "prepare": "npm run build"
   },
   "engines": {
     "node": ">=20"
