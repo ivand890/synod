@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -182,6 +182,21 @@ test("refuses canonical destination aliases and an atomically raced destination"
     { code: ERROR_CODES.RECOVERY_DESTINATION_EXISTS }
   );
   assert.deepEqual(await readdir(racedDestination), []);
+
+  const outputParent = path.join(parent, "replaceable-output");
+  const movedParent = path.join(parent, "moved-output");
+  const redirectedDestination = path.join(outputParent, "redirected.bundle");
+  await mkdir(outputParent);
+  await assert.rejects(
+    exportRecoveryBundle({ directory, destination: redirectedDestination, includeUntracked: true }, {
+      async beforePublish() {
+        await rename(outputParent, movedParent);
+        await symlink(path.join(directory, ".synod"), outputParent);
+      }
+    }),
+    { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID }
+  );
+  await assert.rejects(readFile(path.join(directory, ".synod", "redirected.bundle", "manifest.json")), { code: "ENOENT" });
 });
 
 test("fails closed when source bytes race export materialization", async () => {
@@ -327,6 +342,17 @@ test("verification rejects tampered objects, extra material, traversal, and syml
     await rewriteManifest(target, manifest => {
       manifest.entries[0].path = "collision";
       manifest.entries[1].path = "collision/child";
+    });
+    await assert.rejects(verifyRecoveryBundle({ bundle: target }), { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID });
+  }
+
+  {
+    const target = path.join(parent, "gitlink-index.bundle");
+    await cp(canonical, target, { recursive: true });
+    await rewriteManifest(target, manifest => {
+      const entry = manifest.entries.find((item: any) => item.index.length > 0);
+      assert.ok(entry);
+      entry.index[0].mode = "160000";
     });
     await assert.rejects(verifyRecoveryBundle({ bundle: target }), { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID });
   }

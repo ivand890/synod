@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import {
   lstat,
+  link,
   mkdir,
   mkdtemp,
   open,
@@ -10,7 +11,6 @@ import {
   readlink,
   readdir,
   realpath,
-  rename,
   rm,
   rmdir
 } from "node:fs/promises";
@@ -214,7 +214,7 @@ function validateIndexEntry(value: unknown): RecoveryIndexEntry {
   if (!isRecord(value)
     || !exactKeys(value, ["mode", "stage", "object"])
     || typeof value.mode !== "string"
-    || !/^[0-7]{6}$/.test(value.mode)
+    || !["100644", "100755", "120000"].includes(value.mode)
     || typeof value.stage !== "number"
     || !Number.isSafeInteger(value.stage)
     || value.stage < 0
@@ -228,7 +228,7 @@ function validateWorktreeEntry(value: unknown): RecoveryWorktreeEntry {
   if (!isRecord(value)
     || !exactKeys(value, ["type", "mode", "object"])
     || !["file", "symlink", "missing", "ignored"].includes(String(value.type))
-    || (value.mode !== null && (typeof value.mode !== "string" || !/^[0-7]{6}$/.test(value.mode)))
+    || (value.mode !== null && (typeof value.mode !== "string" || !["100644", "100755", "120000"].includes(value.mode)))
     || (value.object !== null && !isHash(value.object))) {
     invalid("Recovery bundle contains an invalid worktree entry.");
   }
@@ -238,6 +238,9 @@ function validateWorktreeEntry(value: unknown): RecoveryWorktreeEntry {
   }
   if ((type === "missing" || type === "ignored") && value.mode !== null) {
     invalid("Absent or ignored recovery paths cannot declare a mode.");
+  }
+  if ((type === "file" && value.mode === "120000") || (type === "symlink" && value.mode !== "120000")) {
+    invalid("Recovery worktree mode does not match its path type.");
   }
   return { type, mode: value.mode as string | null, object: value.object as string | null };
 }
@@ -258,6 +261,9 @@ function validateEntry(value: unknown): RecoveryEntry {
     invalid("Recovery bundle path filtering metadata is inconsistent.", { path: value.path });
   }
   const index = value.index.map(validateIndexEntry);
+  if (index.some(item => item.object === null && (!value.filtered || item.mode !== "100644"))) {
+    invalid("Only filtered regular-file index entries may omit recovery material.", { path: value.path });
+  }
   const stages = new Set(index.map(item => item.stage));
   if (stages.size !== index.length || index.some((item, position) => position > 0 && index[position - 1]!.stage >= item.stage)) {
     invalid("Recovery index stages must be unique and sorted.", { path: value.path });
@@ -537,6 +543,39 @@ async function requireMissingDestination(destination: string): Promise<void> {
   }
 }
 
+interface DirectoryIdentity {
+  path: string;
+  dev: bigint;
+  ino: bigint;
+}
+
+async function directoryIdentity(directory: string): Promise<DirectoryIdentity> {
+  let stats;
+  try {
+    stats = await lstat(directory, { bigint: true });
+  } catch (error) {
+    invalid(`Recovery bundle directory is unavailable: ${errorMessage(error)}`, { directory });
+  }
+  if (!stats.isDirectory() || stats.isSymbolicLink()) invalid("Recovery bundle directory must be a real directory.", { directory });
+  return { path: directory, dev: stats.dev, ino: stats.ino };
+}
+
+async function assertDirectoryIdentity(expected: DirectoryIdentity, label: string): Promise<void> {
+  let actual: DirectoryIdentity;
+  try {
+    actual = await directoryIdentity(expected.path);
+  } catch (error) {
+    invalid(`${label} changed during recovery bundle publication.`, { path: expected.path, cause: errorMessage(error) });
+  }
+  if (actual.dev !== expected.dev || actual.ino !== expected.ino) {
+    invalid(`${label} changed during recovery bundle publication.`, {
+      path: expected.path,
+      expected: { dev: expected.dev.toString(), ino: expected.ino.toString() },
+      actual: { dev: actual.dev.toString(), ino: actual.ino.toString() }
+    });
+  }
+}
+
 async function validateDestinationParent(destination: string): Promise<void> {
   const parent = path.dirname(destination);
   let stats;
@@ -548,18 +587,21 @@ async function validateDestinationParent(destination: string): Promise<void> {
   if (!stats.isDirectory() || stats.isSymbolicLink()) invalid("Recovery bundle parent must be a real directory.", { parent });
 }
 
-async function canonicalDestination(destination: string): Promise<string> {
+async function canonicalDestination(destination: string): Promise<{ path: string; parent: DirectoryIdentity }> {
   const resolved = path.resolve(destination);
   await validateDestinationParent(resolved);
-  return path.join(await realpath(path.dirname(resolved)), path.basename(resolved));
+  const parentPath = await realpath(path.dirname(resolved));
+  return { path: path.join(parentPath, path.basename(resolved)), parent: await directoryIdentity(parentPath) };
 }
 
 async function publishBundle(
   temporary: string,
   destination: string,
+  parent: DirectoryIdentity,
   beforePublish?: ((destination: string) => Promise<void>) | undefined
 ): Promise<void> {
   await beforePublish?.(destination);
+  await assertDirectoryIdentity(parent, "Recovery bundle parent");
   try {
     await mkdir(destination, { mode: 0o700 });
   } catch (error) {
@@ -570,29 +612,29 @@ async function publishBundle(
     }
     throw error;
   }
-
+  await assertDirectoryIdentity(parent, "Recovery bundle parent");
+  const reservation = await directoryIdentity(destination);
   try {
-    try {
-      // POSIX atomically replaces the empty directory that this process just
-      // reserved. No competing process can create the destination in between.
-      await rename(temporary, destination);
-      return;
-    } catch (error) {
-      const code = errorCode(error);
-      if (process.platform !== "win32" || !["EEXIST", "ENOTEMPTY", "EPERM"].includes(code || "")) throw error;
-    }
-
-    // Windows does not replace an empty directory. Keep the exclusive
-    // reservation and publish manifest.json last as the atomic completion
-    // marker; verification rejects the destination before that rename.
     if ((await readdir(destination)).length !== 0) {
       throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_EXISTS, "Recovery bundle destination changed during publication.", {
         details: { destination }
       });
     }
-    await rename(path.join(temporary, RECOVERY_OBJECTS_PATH), path.join(destination, RECOVERY_OBJECTS_PATH));
-    await rename(path.join(temporary, RECOVERY_MANIFEST_PATH), path.join(destination, RECOVERY_MANIFEST_PATH));
-    await rmdir(temporary);
+    await assertDirectoryIdentity(parent, "Recovery bundle parent");
+    await assertDirectoryIdentity(reservation, "Recovery bundle reservation");
+    const sourceObjects = path.join(temporary, RECOVERY_OBJECTS_PATH);
+    const destinationObjects = path.join(destination, RECOVERY_OBJECTS_PATH);
+    await mkdir(destinationObjects, { mode: 0o700 });
+    for (const name of (await readdir(sourceObjects)).sort(compareCheckpointPaths)) {
+      await link(path.join(sourceObjects, name), path.join(destinationObjects, name));
+    }
+    await assertDirectoryIdentity(parent, "Recovery bundle parent");
+    await assertDirectoryIdentity(reservation, "Recovery bundle reservation");
+    // manifest.json is the atomic completion marker on every platform.
+    // Until this final no-replace hard link, verification rejects the reserved
+    // destination as incomplete. Hard-link publication cannot overwrite a
+    // raced manifest path.
+    await link(path.join(temporary, RECOVERY_MANIFEST_PATH), path.join(destination, RECOVERY_MANIFEST_PATH));
   } catch (error) {
     // Remove only an empty reservation. If another process added anything,
     // preserve it and fail closed instead of deleting material we do not own.
@@ -689,7 +731,8 @@ export async function exportRecoveryBundle(
   dependencies: RecoveryDependencies = {}
 ): Promise<BundleExportResult> {
   const targetDirectory = await realpath(path.resolve(directory));
-  const destinationPath = await canonicalDestination(destination);
+  const resolvedDestination = await canonicalDestination(destination);
+  const destinationPath = resolvedDestination.path;
   const relativeDestination = path.relative(targetDirectory, destinationPath);
   if (relativeDestination === "" || (!relativeDestination.startsWith(`..${path.sep}`) && relativeDestination !== ".." && !path.isAbsolute(relativeDestination))) {
     invalid("Recovery bundle destination must be outside the source checkout.", { destination: destinationPath });
@@ -781,8 +824,10 @@ export async function exportRecoveryBundle(
     await assertSourceStillMatches(source.targetDirectory, source.state.checkpoint, dependencies);
 
     const parent = path.dirname(destinationPath);
+    await assertDirectoryIdentity(resolvedDestination.parent, "Recovery bundle parent");
     const temporary = await mkdtemp(path.join(parent, `.${path.basename(destinationPath)}.synod-`));
     try {
+      await assertDirectoryIdentity(resolvedDestination.parent, "Recovery bundle parent");
       const objectDirectory = path.join(temporary, RECOVERY_OBJECTS_PATH);
       await mkdir(objectDirectory, { mode: 0o700 });
       for (const [hash, content] of [...objects.entries()].sort(([left], [right]) => compareCheckpointPaths(left, right))) {
@@ -791,7 +836,7 @@ export async function exportRecoveryBundle(
       await writeDurableFile(path.join(temporary, RECOVERY_MANIFEST_PATH), serializeManifest(manifest));
       await verifyRecoveryBundle({ bundle: temporary });
       await assertSourceStillMatches(source.targetDirectory, source.state.checkpoint, dependencies);
-      await publishBundle(temporary, destinationPath, dependencies.beforePublish);
+      await publishBundle(temporary, destinationPath, resolvedDestination.parent, dependencies.beforePublish);
       const verified = await verifyRecoveryBundle({ bundle: destinationPath });
       return { ...verified, destination: destinationPath };
     } finally {
