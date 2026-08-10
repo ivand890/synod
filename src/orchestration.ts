@@ -792,6 +792,33 @@ export async function createInitialOrchestrationFiles(
   ]);
 }
 
+export async function createCheckpointSnapshotAdoptionFiles(
+  targetDirectory: string,
+  dependencies: OrchestrationDependencies = {}
+): Promise<Map<string, string> | undefined> {
+  const { state } = await validateOrchestrationReadOnly({ directory: targetDirectory });
+  if (state.checkpoint.worktree.snapshot) return undefined;
+  const captured = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
+  if (checkpointDrift(state.checkpoint, captured.checkpoint).detected) return undefined;
+  const nextCore: OrchestrationStateCore = {
+    ...stateCore(state),
+    updatedAt: captured.checkpoint.capturedAt,
+    checkpoint: captured.checkpoint
+  };
+  const { event, state: nextState } = buildEvent(state, nextCore, "checkpoint.snapshot-adopted", {
+    actor: "synod",
+    checkpoint: captured.checkpoint,
+    payload: { source: "legacy-checkpoint" }
+  });
+  const existingEvents = await readRecord(targetDirectory, ORCHESTRATION_EVENTS_PATH);
+  return new Map([
+    [ORCHESTRATION_STATE_PATH, serializeJson(nextState)],
+    [ORCHESTRATION_EVENTS_PATH, `${existingEvents}${existingEvents.endsWith("\n") ? "" : "\n"}${JSON.stringify(event)}\n`],
+    [ORCHESTRATION_STATUS_PATH, renderStatusMarkdown(nextState)],
+    [CHECKPOINT_SNAPSHOT_PATH, serializeCheckpointSnapshot(captured.snapshot)]
+  ]);
+}
+
 function invalidState(message: string, details?: unknown): never {
   throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, message, { details });
 }
@@ -1959,39 +1986,41 @@ export async function orchestrationStatus(
         );
       }
       delta = explainCheckpointDelta(canonical.snapshot, current.snapshot);
-      if (state.checkpoint.head !== currentCheckpoint.head && state.checkpoint.head && currentCheckpoint.head) {
+      if (state.checkpoint.head !== currentCheckpoint.head && (state.checkpoint.head || currentCheckpoint.head)) {
         const gitRunner = dependencies.gitRunner || defaultGitRunner;
         try {
-          await gitRunner(targetDirectory, ["cat-file", "-e", `${state.checkpoint.head}^{commit}`]);
+          if (state.checkpoint.head) {
+            await gitRunner(targetDirectory, ["cat-file", "-e", `${state.checkpoint.head}^{commit}`]);
+          }
+          const committedArgs = state.checkpoint.head && currentCheckpoint.head
+            ? [state.checkpoint.head, currentCheckpoint.head, "--", "."]
+            : ["--root", "--no-commit-id", "-r", currentCheckpoint.head || state.checkpoint.head || "", "--", "."];
+          const command = state.checkpoint.head && currentCheckpoint.head ? "diff" : "diff-tree";
           const [committed, committedNumstat] = await Promise.all([
             gitRunner(targetDirectory, [
-              "diff",
+              command,
               "--no-ext-diff",
               "--no-textconv",
               "--name-status",
               "-z",
               "-M",
-              state.checkpoint.head,
-              currentCheckpoint.head,
-              "--",
-              "."
+              ...committedArgs
             ]),
             gitRunner(targetDirectory, [
-              "diff",
+              command,
               "--no-ext-diff",
               "--no-textconv",
               "--numstat",
               "-z",
               "-M",
-              state.checkpoint.head,
-              currentCheckpoint.head,
-              "--",
-              "."
+              ...committedArgs
             ])
           ]);
           const committedBinary = binaryPathsFromNumstat(committedNumstat);
+          const reverseRoot = Boolean(state.checkpoint.head && !currentCheckpoint.head);
           delta = addCommittedCheckpointChanges(delta, parseCommittedChanges(committed).map(change => ({
             ...change,
+            ...(reverseRoot ? { kind: "deleted" as const } : {}),
             ...(committedBinary.has(change.path) ? { binary: true } : {})
           })));
         } catch (error) {

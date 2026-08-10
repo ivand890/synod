@@ -429,6 +429,24 @@ test("status explain fails closed when its checkpoint Git base is unavailable", 
   );
 });
 
+test("status explain treats the first commit after an unborn checkpoint as committed additions", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-unborn-head-test-"));
+  temporaryDirectories.add(directory);
+  await git(directory, "init");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "user.email", "synod@example.invalid");
+  await git(directory, "config", "commit.gpgsign", "false");
+  await initProject({ directory });
+  await writeFile(path.join(directory, "first.txt"), "first commit\n", "utf8");
+  await git(directory, "add", "first.txt");
+  await git(directory, "commit", "-m", "first commit");
+
+  const result = await orchestrationStatus({ directory, explain: true });
+  const first = result.delta?.paths.find(item => item.path === "first.txt");
+  assert.equal(first?.committed, "added");
+  assert.equal(result.delta?.counts.committed, 1);
+});
+
 test("checkpoint snapshot participates in pending mutation recovery", async () => {
   const directory = await temporaryProject();
   await writeFile(path.join(directory, "proposal.txt"), "recover me\n", "utf8");

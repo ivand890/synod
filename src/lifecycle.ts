@@ -44,6 +44,7 @@ import {
   ORCHESTRATION_EVENTS_PATH,
   ORCHESTRATION_STATE_PATH,
   ORCHESTRATION_STATUS_PATH,
+  createCheckpointSnapshotAdoptionFiles,
   createInitialOrchestrationFiles,
   orchestrationStatus,
   validateOrchestrationReadOnly
@@ -554,11 +555,16 @@ export async function upgradeProject(
   }
   const profile = getProfile(requestedProfile || installed.profile || DEFAULT_PROFILE);
   const templates = await loadTemplateSet(packageVersion, profile);
+  const previous = manifestFileMap(installed);
+  const legacyOrchestrationPaths = [ORCHESTRATION_STATE_PATH, ORCHESTRATION_EVENTS_PATH, ORCHESTRATION_STATUS_PATH];
+  const checkpointAdoption = legacyOrchestrationPaths.every(relativePath => previous.get(relativePath)?.ownership === "record")
+    ? await createCheckpointSnapshotAdoptionFiles(targetDirectory, dependencies)
+    : undefined;
   const orchestrationDependencies = { ...dependencies, checkpointOverlay: templates.files };
   for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, orchestrationDependencies)) {
     templates.files.set(relativePath, content);
   }
-  const previous = manifestFileMap(installed);
+  for (const [relativePath, content] of checkpointAdoption || []) templates.files.set(relativePath, content);
   const nextEntries = new Map<string, ManifestEntry>();
   const operations: TransactionOperation[] = [];
   const states: LifecycleState[] = [];
@@ -599,6 +605,14 @@ export async function upgradeProject(
 
     if (inspected.type === "unsafe" || (inspected.type !== "missing" && inspected.type !== "file")) {
       state = { path: relativePath, conflict: true };
+    } else if (checkpointAdoption?.has(relativePath)) {
+      ownership = "record";
+      if (inspected.type === "file" && normalizeText(inspected.content) === normalizeText(templateContent)) {
+        state = { path: relativePath, action: "unchanged" };
+      } else {
+        state = { path: relativePath, action: inspected.type === "missing" ? "create" : "update" };
+        operations.push(operationForWrite(relativePath, templateContent, inspected));
+      }
     } else if (old?.ownership === "record") {
       if (inspected.type === "missing") {
         state = { path: relativePath, conflict: true };
@@ -650,7 +664,9 @@ export async function upgradeProject(
       continue;
     }
     const installedHash = ownership === "record"
-      ? old?.contentHash || inspectionHash(inspected) || contentHash(templateContent)
+      ? checkpointAdoption?.has(relativePath)
+        ? contentHash(templateContent)
+        : old?.contentHash || inspectionHash(inspected) || contentHash(templateContent)
       : ownership === "user"
         ? old?.contentHash || inspectionHash(inspected) || contentHash(templateContent)
         : contentHash(templateContent);

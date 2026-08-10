@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { WARNING_CODES } from "../src/contracts.js";
+import { stableCheckpointStringify } from "../src/checkpoint.js";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
 import { applyTransaction, contentHash } from "../src/filesystem.js";
 import { checkProject, initProject, uninstallProject, upgradeProject } from "../src/lifecycle.js";
 import { migrateManifest } from "../src/migrations/index.js";
 import { LEGACY_V1_HASHES } from "../src/migrations/legacy-v1-hashes.js";
 import { packageName, packageVersion } from "../src/package.js";
+import { renderStatusMarkdown } from "../src/orchestration.js";
 import { isRecord } from "../src/validation.js";
 
 const temporaryDirectories = new Set<string>();
@@ -420,6 +423,45 @@ test("schema 2 upgrade creates canonical orchestration records through migration
   assert.equal(upgraded.files.find((entry: { path?: unknown }) => entry.path === ".synod/state.json")?.ownership, "record");
   assert.equal(state.schemaVersion, 1);
   assert.equal(state.lastEvent.sequence, 1);
+});
+
+test("upgrade atomically adopts a matching legacy checkpoint snapshot", async () => {
+  const directory = await temporaryProject();
+  const manifestPath = path.join(directory, ".synod/manifest.json");
+  const statePath = path.join(directory, ".synod/state.json");
+  const eventsPath = path.join(directory, ".synod/events.jsonl");
+  const statusPath = path.join(directory, "docs/synod/STATUS.md");
+  const checkpointPath = path.join(directory, ".synod/checkpoint.json");
+  await initProject({ directory, profile: "portable" });
+
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  const event = JSON.parse(await readFile(eventsPath, "utf8"));
+  delete state.checkpoint.worktree.snapshot;
+  delete event.checkpoint.worktree.snapshot;
+  delete event.state.checkpoint.worktree.snapshot;
+  const unsignedEvent = Object.fromEntries(Object.entries(event).filter(([key]) => key !== "eventHash"));
+  event.eventHash = `sha256:${createHash("sha256").update(stableCheckpointStringify(unsignedEvent), "utf8").digest("hex")}`;
+  state.lastEvent.hash = event.eventHash;
+  await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await writeFile(eventsPath, `${JSON.stringify(event)}\n`, "utf8");
+  await writeFile(statusPath, renderStatusMarkdown(state), "utf8");
+  await unlink(checkpointPath);
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.files = manifest.files.filter((entry: { path?: unknown }) => entry.path !== ".synod/checkpoint.json");
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+  const result = await upgradeProject({ directory, profile: "portable" });
+  const adoptedState = JSON.parse(await readFile(statePath, "utf8"));
+  const adoptedEvents = (await readFile(eventsPath, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  const snapshot = JSON.parse(await readFile(checkpointPath, "utf8"));
+
+  assert.deepEqual(result.conflicts, []);
+  assert.equal(adoptedState.lastEvent.sequence, 2);
+  assert.equal(adoptedEvents[1]?.type, "checkpoint.snapshot-adopted");
+  assert.equal(adoptedState.checkpoint.worktree.snapshot.path, ".synod/checkpoint.json");
+  assert.equal(adoptedState.checkpoint.worktree.snapshot.contentHash, snapshot.contentHash);
+  assert.equal(snapshot.worktreeFingerprint, adoptedState.checkpoint.worktree.fingerprint);
+  assert.ok(result.updated.includes(".synod/state.json"));
 });
 
 test("uninstall fails closed when a migrated AGENTS separator is ambiguous", async () => {
