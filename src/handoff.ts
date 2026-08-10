@@ -22,6 +22,7 @@ export interface HandoffOptions {
 
 export interface HandoffTaskEvidence {
   delivery: TaskEvidence[];
+  correction: TaskEvidence[];
   acceptance: TaskEvidence[];
   verification: TaskEvidence[];
 }
@@ -70,13 +71,24 @@ export interface HandoffResult {
   recoveryBundle: HandoffRecoveryBundle;
 }
 
-function currentEvidence(task: OrchestrationTask, kind: TaskEvidence["kind"]): TaskEvidence[] {
-  return task.evidence.filter(item => item.kind === kind && item.revision === task.revision);
-}
-
 function gateEvidence(task: OrchestrationTask, evidenceIds: readonly string[]): TaskEvidence[] {
   const byId = new Map(task.evidence.map(item => [item.id, item]));
   return evidenceIds.map(id => byId.get(id)!);
+}
+
+function currentProposalEvidence(task: OrchestrationTask): Pick<HandoffTaskEvidence, "delivery" | "correction"> {
+  const current = task.evidence.filter(item => item.revision === task.revision);
+  const correction = current.filter(item => item.kind === "correction");
+  let latestDelivery = -1;
+  let latestCorrection = -1;
+  for (const [index, item] of current.entries()) {
+    if (item.kind === "delivery") latestDelivery = index;
+    if (item.kind === "correction") latestCorrection = index;
+  }
+  return {
+    delivery: latestCorrection > latestDelivery ? [] : current.filter(item => item.kind === "delivery"),
+    correction
+  };
 }
 
 function handoffTask(
@@ -88,6 +100,7 @@ function handoffTask(
     state: tasks[id]!.state,
     complete: tasks[id]!.state === "DONE"
   }));
+  const proposalEvidence = currentProposalEvidence(task);
   return {
     id: task.id,
     objective: task.objective,
@@ -100,7 +113,7 @@ function handoffTask(
     acceptance: { ...task.acceptance, unresolved: task.acceptance.status !== "accepted" },
     verification: { ...task.verification, unresolved: task.verification.status !== "passed" },
     evidence: {
-      delivery: currentEvidence(task, "delivery"),
+      ...proposalEvidence,
       acceptance: gateEvidence(task, task.acceptance.evidenceIds),
       verification: gateEvidence(task, task.verification.evidenceIds)
     },
@@ -207,9 +220,12 @@ export function formatHandoff(result: HandoffResult): string {
     lines.push(`  Objective: ${task.objective}`);
     lines.push(`  Dependencies: ${task.dependencies.length === 0 ? "none" : task.dependencies.map(item => `${item.id}=${item.state}`).join(", ")}`);
     lines.push(`  Blocker: ${task.blocker || "none"}`);
+    lines.push(`  Acceptance criteria: ${task.acceptance.criteria.join("; ")}`);
     lines.push(`  Acceptance: ${task.acceptance.status}; evidence ${evidenceLabel(task.evidence.acceptance)}`);
+    lines.push(`  Verification commands: ${task.verification.commands.join("; ")}`);
     lines.push(`  Verification: ${task.verification.status}; evidence ${evidenceLabel(task.evidence.verification)}`);
     lines.push(`  Delivery evidence: ${evidenceLabel(task.evidence.delivery)}`);
+    lines.push(`  Correction evidence: ${evidenceLabel(task.evidence.correction)}`);
     lines.push(`  Legal next transitions: ${task.legalNextTransitions.length === 0 ? "none" : task.legalNextTransitions.join(", ")}`);
   }
   if (result.recoveryBundle.status === "verified") {

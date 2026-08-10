@@ -120,6 +120,8 @@ test("handoff derives focus, current evidence, blockers, gates, and legal transi
   assert.equal(handoff.checkpoint.drift.detected, false);
   assert.equal(handoff.recoveryBundle.status, "not-supplied");
   assert.deepEqual(handoff.focusTaskIds, ["T-ACTIVE", "T-CORRECTION", "T-REVIEW", "T-ACCEPTED", "T-VERIFIED", "T-BLOCKED"]);
+  assert.deepEqual(byId.get("T-CORRECTION")?.evidence.delivery, []);
+  assert.deepEqual(byId.get("T-CORRECTION")?.evidence.correction.map(item => item.reference), ["correction:T-CORRECTION:r1"]);
   assert.deepEqual(byId.get("T-CORRECTION")?.evidence.acceptance, []);
   assert.equal(byId.get("T-CORRECTION")?.acceptance.unresolved, true);
   assert.deepEqual(byId.get("T-REVIEW")?.evidence.acceptance, []);
@@ -132,6 +134,9 @@ test("handoff derives focus, current evidence, blockers, gates, and legal transi
   assert.deepEqual(byId.get("T-DEPENDENT")?.legalNextTransitions, ["BLOCKED", "SUPERSEDED"]);
   assert.match(formatHandoff(handoff), /Synod canonical handoff/);
   assert.match(formatHandoff(handoff), /T-VERIFIED: VERIFIED r1/);
+  assert.match(formatHandoff(handoff), /Acceptance criteria: T-VERIFIED is accepted/);
+  assert.match(formatHandoff(handoff), /Verification commands: verify T-VERIFIED/);
+  assert.match(formatHandoff(handoff), /Correction evidence: E-\d{6}=correction:T-CORRECTION:r1/);
   assert.match(formatHandoff(handoff), /Recovery bundle: not supplied/);
 
   const after = await Promise.all(canonicalPaths.map(relativePath => readFile(path.join(directory, relativePath))));
