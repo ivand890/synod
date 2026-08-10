@@ -446,6 +446,43 @@ function binaryPathsFromNumstat(output: string): Set<string> {
   return binary;
 }
 
+async function checkpointCommitContent(
+  directory: string,
+  head: string | null,
+  relativePath: string,
+  gitRunner: GitRunner
+): Promise<Buffer | undefined> {
+  if (!head) return undefined;
+  try {
+    const content = await gitRunner(directory, ["cat-file", "blob", `${head}:${relativePath}`]);
+    const filtered = checkpointContent(relativePath, content);
+    return filtered === null ? Buffer.from(content, "utf8") : filtered;
+  } catch {
+    return undefined;
+  }
+}
+
+async function filterCommittedCheckpointChanges(
+  directory: string,
+  changes: CommittedCheckpointChange[],
+  beforeHead: string | null,
+  afterHead: string | null,
+  gitRunner: GitRunner
+): Promise<CommittedCheckpointChange[]> {
+  const included = await Promise.all(changes.map(async change => {
+    const beforePath = change.sourcePath || change.path;
+    if (!isFilteredCheckpointPath(beforePath) && !isFilteredCheckpointPath(change.path)) return change;
+    const [before, after] = await Promise.all([
+      checkpointCommitContent(directory, beforeHead, beforePath, gitRunner),
+      checkpointCommitContent(directory, afterHead, change.path, gitRunner)
+    ]);
+    if (before === undefined && after === undefined) return undefined;
+    if (before && after && before.equals(after)) return undefined;
+    return change;
+  }));
+  return included.filter((change): change is CommittedCheckpointChange => Boolean(change));
+}
+
 async function checkpointIndexEntries(
   directory: string,
   relativePath: string,
@@ -2026,7 +2063,14 @@ export async function orchestrationStatus(
           ]);
           const committedBinary = binaryPathsFromNumstat(committedNumstat);
           const reverseRoot = Boolean(state.checkpoint.head && !currentCheckpoint.head);
-          delta = addCommittedCheckpointChanges(delta, parseCommittedChanges(committed).map(change => ({
+          const committedChanges = await filterCommittedCheckpointChanges(
+            targetDirectory,
+            parseCommittedChanges(committed),
+            state.checkpoint.head,
+            currentCheckpoint.head,
+            gitRunner
+          );
+          delta = addCommittedCheckpointChanges(delta, committedChanges.map(change => ({
             ...change,
             ...(reverseRoot ? { kind: "deleted" as const } : {}),
             ...(committedBinary.has(change.path) ? { binary: true } : {})

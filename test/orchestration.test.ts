@@ -447,6 +447,31 @@ test("status explain treats the first commit after an unborn checkpoint as commi
   assert.equal(result.delta?.counts.committed, 1);
 });
 
+test("status explain filters committed Synod guidance but retains user-owned guidance", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-committed-guidance-test-"));
+  temporaryDirectories.add(directory);
+  await git(directory, "init");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "user.email", "synod@example.invalid");
+  await git(directory, "config", "commit.gpgsign", "false");
+  await writeFile(path.join(directory, "source.txt"), "base\n", "utf8");
+  await git(directory, "add", "source.txt");
+  await git(directory, "commit", "-m", "initial");
+  await initProject({ directory });
+  await git(directory, "add", "AGENTS.md", ".codex/config.toml");
+  await git(directory, "commit", "-m", "commit generated guidance");
+
+  const generatedOnly = await orchestrationStatus({ directory, explain: true });
+  assert.equal(generatedOnly.delta?.paths.some(item => item.path === "AGENTS.md"), false);
+  assert.equal(generatedOnly.delta?.paths.some(item => item.path === ".codex/config.toml"), false);
+
+  await writeFile(path.join(directory, "AGENTS.md"), `${await readFile(path.join(directory, "AGENTS.md"), "utf8")}\nUser-owned instruction.\n`, "utf8");
+  await git(directory, "add", "AGENTS.md");
+  await git(directory, "commit", "-m", "add user guidance");
+  const withUserGuidance = await orchestrationStatus({ directory, explain: true });
+  assert.equal(withUserGuidance.delta?.paths.find(item => item.path === "AGENTS.md")?.committed, "added");
+});
+
 test("checkpoint snapshot participates in pending mutation recovery", async () => {
   const directory = await temporaryProject();
   await writeFile(path.join(directory, "proposal.txt"), "recover me\n", "utf8");
