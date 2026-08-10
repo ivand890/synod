@@ -18,11 +18,12 @@ export interface ModelProfile {
   };
 }
 
-export interface ModelCapability {
-  id?: string;
-  model?: string;
-  supportedReasoningEfforts?: Array<string | { reasoningEffort?: string }>;
-}
+export type ModelCapability = (
+  | { id: string; model?: string | undefined }
+  | { id?: string | undefined; model: string }
+) & {
+  supportedReasoningEfforts?: Array<string | { reasoningEffort: string }> | undefined;
+};
 
 export interface MissingCapability {
   role: string;
@@ -84,10 +85,16 @@ export function getProfile(id: string = DEFAULT_PROFILE): ModelProfile {
   return structuredClone(profile);
 }
 
+function modelIdentity(model: ModelCapability): string {
+  if (typeof model.model === "string") return model.model;
+  if (typeof model.id === "string") return model.id;
+  throw new TypeError("Model capability is missing its identity.");
+}
+
 export function evaluateProfile(profile: ProfileRequirements, models: ModelCapability[] | undefined) {
-  const availableModels = new Map<string | undefined, Set<string | undefined>>(
+  const availableModels = new Map<string, Set<string>>(
     (models || []).map(model => [
-      model.id || model.model,
+      modelIdentity(model),
       new Set((model.supportedReasoningEfforts || []).map(item =>
         typeof item === "string" ? item : item.reasoningEffort
       ))

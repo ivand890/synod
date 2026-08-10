@@ -83,6 +83,26 @@ test("rollback preserves content changed after an earlier transaction write", as
   assert.equal(await readFile(agentsPath, "utf8"), "concurrent owner\n");
 });
 
+test("rollback recognizes unchanged Buffer writes by their persisted text hash", async () => {
+  const directory = await temporaryProject();
+  const originalPath = path.join(directory, "original.txt");
+  await writeFile(originalPath, "original\n", "utf8");
+
+  await assert.rejects(
+    applyTransaction(directory, [
+      { action: "write", path: "original.txt", content: Buffer.from("managed\n", "utf8") },
+      { action: "write", path: "later.txt", content: "later\n" }
+    ], {
+      transactionHook(_operation, index) {
+        if (index === 1) throw new Error("injected failure after Buffer write");
+      }
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.TRANSACTION_FAILED
+  );
+
+  assert.equal(await readFile(originalPath, "utf8"), "original\n");
+});
+
 test("a fresh mutation recheck backs up a concurrently created file", async () => {
   const directory = await temporaryProject();
   const concurrentPath = path.join(directory, "concurrent.txt");

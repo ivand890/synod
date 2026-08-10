@@ -36,3 +36,20 @@ test("evaluates the global subagent fallback as a profile capability", () => {
     capability: "model"
   }]);
 });
+
+test("indexes App Server capabilities by model slug before preset ID", () => {
+  const profile = {
+    id: "test",
+    defaultSubagent: { model: "runtime-model", effort: "high" },
+    roles: {}
+  };
+
+  const result = evaluateProfile(profile, [{
+    id: "display-preset",
+    model: "runtime-model",
+    supportedReasoningEfforts: [{ reasoningEffort: "high" }]
+  }]);
+
+  assert.equal(result.compatible, true);
+  assert.deepEqual(result.missing, []);
+});

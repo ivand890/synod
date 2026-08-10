@@ -5,7 +5,9 @@ export function isRecord(value: unknown): value is UnknownRecord {
 }
 
 export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) return error.message;
+  if (isRecord(error) && typeof error.message === "string") return error.message;
+  return String(error);
 }
 
 export function errorCode(error: unknown): string | undefined {

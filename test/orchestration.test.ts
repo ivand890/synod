@@ -14,6 +14,7 @@ import {
   ORCHESTRATION_EVENTS_PATH,
   ORCHESTRATION_STATE_PATH,
   ORCHESTRATION_STATUS_PATH,
+  TASK_STATES,
   addTask,
   orchestrationStatus,
   readOrchestration,
@@ -25,6 +26,11 @@ import { isRecord } from "../src/validation.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories = new Set<string>();
+
+test("keeps the exported task-state table immutable at runtime", () => {
+  assert.equal(Object.isFrozen(TASK_STATES), true);
+  assert.throws(() => Reflect.apply(Array.prototype.push, TASK_STATES, ["INVALID"]), TypeError);
+});
 
 async function temporaryProject(): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-test-"));

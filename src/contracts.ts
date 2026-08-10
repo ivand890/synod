@@ -56,10 +56,10 @@ export function warning(code: WarningCode, message: string, details?: unknown): 
 
 export function baseDiagnostics(extra: Record<string, unknown> = {}): Diagnostics {
   return {
+    ...extra,
     synodVersion: packageVersion,
     nodeVersion: process.versions.node,
-    platform: process.platform,
-    ...extra
+    platform: process.platform
   };
 }
 

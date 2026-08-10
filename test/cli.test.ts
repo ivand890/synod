@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { WARNING_CODES } from "../src/contracts.js";
-import { ERROR_CODES } from "../src/errors.js";
+import { WARNING_CODES, baseDiagnostics } from "../src/contracts.js";
+import { ERROR_CODES, asSynodError } from "../src/errors.js";
 import { run } from "../src/cli.js";
 import { packageVersion } from "../src/package.js";
 
@@ -28,6 +28,19 @@ function takeMessage(messages: string[]): string {
   assert.notEqual(message, undefined);
   return message ?? "";
 }
+
+test("keeps canonical diagnostics authoritative and preserves error-like messages", () => {
+  const diagnostics = baseDiagnostics({
+    synodVersion: "spoofed",
+    nodeVersion: 0,
+    platform: "external"
+  });
+
+  assert.equal(diagnostics.synodVersion, packageVersion);
+  assert.equal(diagnostics.nodeVersion, process.versions.node);
+  assert.equal(diagnostics.platform, process.platform);
+  assert.equal(asSynodError({ message: "injected client failure" }).message, "injected client failure");
+});
 
 test("the installed entry point keeps init dry-run free of runtime and project writes", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-test-"));
@@ -213,6 +226,48 @@ test("doctor text identifies the Desktop executable, version, and shared Codex h
   assert.match(messages[0] ?? "", /Codex Desktop: 0\.147\.0 \(known-good; desktop\)/);
   assert.match(messages[0] ?? "", /Codex executable: \/Applications\/ChatGPT\.app\/Contents\/Resources\/codex \(desktop-process\)/);
   assert.match(messages[0] ?? "", /Codex home: \/Users\/test\/\.codex/);
+});
+
+test("shared client factories receive the doctor runtime executable", async () => {
+  const { output } = capturedOutput();
+  const executable = "/opt/codex/bin/codex";
+  const receivedExecutables: Array<string | undefined> = [];
+
+  const status = await run(["doctor"], output, {
+    doctorRuntimeResolver: () => ({
+      surface: "cli",
+      executable,
+      executableSource: "path",
+      resolved: true
+    }),
+    clientFactory: options => {
+      receivedExecutables.push(options?.codexBin);
+      return {
+        async start() {},
+        async probeCapabilities() {},
+        async listModels() {
+          return [{
+            id: "gpt-5.5",
+            supportedReasoningEfforts: ["low", "medium", "high", "xhigh"]
+          }];
+        },
+        async listThreads() { return { data: [], nextCursor: null }; },
+        async close() {},
+        getWarnings() { return []; },
+        getDiagnostics() {
+          return {
+            codexExecutable: executable,
+            codexSurface: "cli",
+            codexVersion: "0.147.0",
+            appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
+          };
+        }
+      };
+    }
+  });
+
+  assert.equal(status, 0);
+  assert.deepEqual(receivedExecutables, [executable]);
 });
 
 test("doctor text never renders an undefined Codex surface", async () => {

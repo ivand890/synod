@@ -27,7 +27,7 @@ export const ORCHESTRATION_STATUS_PATH = "docs/synod/STATUS.md";
 const ORCHESTRATION_LOCK_PATH = ".synod/orchestration.lock";
 const ORCHESTRATION_PENDING_PATH = ".synod/pending-mutation.json";
 
-export const TASK_STATES = [
+export const TASK_STATES = Object.freeze([
   "PLANNED",
   "READY",
   "ACTIVE",
@@ -37,7 +37,7 @@ export const TASK_STATES = [
   "DONE",
   "BLOCKED",
   "SUPERSEDED"
-] as const;
+] as const);
 
 export type TaskState = typeof TASK_STATES[number];
 export type EvidenceKind = "delivery" | "correction" | "acceptance" | "verification";

@@ -74,7 +74,7 @@ interface CliOutput {
 }
 
 export interface CliDependencies extends LifecycleDependencies, OrchestrationDependencies {
-  clientFactory?: () => UsageClient;
+  clientFactory?: (options?: { codexBin: string }) => UsageClient;
   doctorClientFactory?: NonNullable<DoctorDependencies["clientFactory"]>;
   doctorRuntimeResolver?: NonNullable<DoctorDependencies["runtimeResolver"]>;
 }
@@ -92,7 +92,10 @@ function isHelpOptions(options: object): options is HelpOptions {
 
 function isDoctorClient(value: unknown): value is DoctorClient {
   if (!isRecord(value)) return false;
-  return typeof value.start === "function" && typeof value.close === "function";
+  return typeof value.start === "function"
+    && typeof value.probeCapabilities === "function"
+    && typeof value.listModels === "function"
+    && typeof value.close === "function";
 }
 
 function printWarnings(warnings: Warning[] | undefined, output: CliOutput): void {
@@ -308,8 +311,8 @@ export async function run(
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
       const usageClientFactory = dependencies.clientFactory;
       const doctorClientFactory = dependencies.doctorClientFactory || (usageClientFactory
-        ? () => {
-            const client: unknown = usageClientFactory();
+        ? options => {
+            const client: unknown = usageClientFactory(options);
             if (!isDoctorClient(client)) {
               throw new SynodError(ERROR_CODES.INTERNAL, "The shared CLI client factory did not return a doctor-compatible client.");
             }

@@ -66,7 +66,8 @@ export interface CleanupFailure {
 }
 
 export function normalizeText(content: unknown): string {
-  return String(content).replaceAll("\r\n", "\n");
+  const text = content instanceof Uint8Array ? Buffer.from(content).toString("utf8") : String(content);
+  return text.replaceAll("\r\n", "\n");
 }
 
 export function contentHash(content: unknown): string {
@@ -271,6 +272,8 @@ export async function applyTransaction(
         await rename(targetPath, entry.backupPath);
         entry.targetMutated = true;
         entry.appliedExpected = { type: "missing" };
+      } else {
+        throw new TypeError("Unknown transaction action.");
       }
 
       await transactionHook?.(operation, index);
