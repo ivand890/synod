@@ -2,9 +2,21 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { nextReleaseTag } from "../scripts/next-release-tag.js";
+import { isRecord, parseJson } from "../src/validation.js";
 
 const workflowPath = new URL("../.github/workflows/publish.yml", import.meta.url);
 const ciWorkflowPath = new URL("../.github/workflows/ci.yml", import.meta.url);
+const packagePath = new URL("../package.json", import.meta.url);
+
+test("Git dependency prepack does not require pnpm or Corepack", async () => {
+  const packageJson = parseJson(await readFile(packagePath, "utf8"));
+  assert.ok(isRecord(packageJson) && isRecord(packageJson.scripts));
+
+  assert.equal(packageJson.scripts.prepack, "npm run build");
+  const buildScript = packageJson.scripts.build;
+  assert.ok(typeof buildScript === "string");
+  assert.doesNotMatch(buildScript, /\bpnpm\b/);
+});
 
 test("publish workflow cannot succeed without npm and GitHub Release parity", async () => {
   const workflow = await readFile(workflowPath, "utf8");

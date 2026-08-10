@@ -23,13 +23,13 @@
   ],
   "scripts": {
     "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync(new URL('./dist/', import.meta.url), { recursive: true, force: true })\"",
-    "build": "pnpm clean && tsc -p tsconfig.build.json",
+    "build": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync(new URL('./dist/', import.meta.url), { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
     "typecheck": "pnpm build && tsc -p tsconfig.json",
     "test": "pnpm typecheck && tsx --test test/*.test.ts",
     "test:integration": "pnpm typecheck && tsx --test test/cli.test.ts",
     "test:package": "pnpm build && tsx scripts/package-smoke.ts",
     "test:codex-compatibility": "pnpm build && tsx scripts/codex-compatibility-smoke.ts",
-    "prepack": "pnpm build"
+    "prepack": "npm run build"
   },
   "engines": {
     "node": ">=20"
