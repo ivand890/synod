@@ -284,6 +284,7 @@ test("status explain distinguishes committed, staged, unstaged, untracked, delet
   await unlink(path.join(directory, "deleted.txt"));
   await git(directory, "mv", "rename.txt", "renamed.txt");
   await writeFile(path.join(directory, "untracked.txt"), "new\n", "utf8");
+  await writeFile(path.join(directory, "untracked-nul.dat"), Buffer.from([0, 65]));
   await writeFile(path.join(directory, "binary.dat"), Buffer.from([0xff]));
 
   const trackedRecords = [ORCHESTRATION_STATE_PATH, ORCHESTRATION_EVENTS_PATH, ORCHESTRATION_STATUS_PATH, CHECKPOINT_SNAPSHOT_PATH];
@@ -302,6 +303,8 @@ test("status explain distinguishes committed, staged, unstaged, untracked, delet
   assert.equal(byPath.get("renamed.txt")?.staged, "renamed");
   assert.equal(byPath.get("renamed.txt")?.sourcePath, "rename.txt");
   assert.equal(byPath.get("untracked.txt")?.untracked, true);
+  assert.equal(byPath.get("untracked-nul.dat")?.untracked, true);
+  assert.equal(byPath.get("untracked-nul.dat")?.binary, true);
   assert.equal(byPath.get("binary.dat")?.binary, true);
   const text = formatOrchestrationStatus(explained);
   assert.match(text, /committed modified/);
@@ -348,6 +351,33 @@ test("checkpoint snapshot tampering fails closed", async () => {
     orchestrationStatus({ directory, explain: true }),
     error => error instanceof SynodError && error.code === ERROR_CODES.CHECKPOINT_SNAPSHOT_INVALID
   );
+});
+
+test("checkpoint capture rejects unsafe Git paths before mutating canonical records", async t => {
+  if (process.platform === "win32") {
+    t.skip("Windows does not permit backslashes in a path component.");
+    return;
+  }
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-unsafe-path-test-"));
+  temporaryDirectories.add(directory);
+  await git(directory, "init");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "user.email", "synod@example.invalid");
+  await git(directory, "config", "commit.gpgsign", "false");
+  await writeFile(path.join(directory, "source.txt"), "base\n", "utf8");
+  await git(directory, "add", "source.txt");
+  await git(directory, "commit", "-m", "initial");
+  await initProject({ directory });
+  const recordPaths = [ORCHESTRATION_STATE_PATH, ORCHESTRATION_EVENTS_PATH, ORCHESTRATION_STATUS_PATH, CHECKPOINT_SNAPSHOT_PATH];
+  const before = await Promise.all(recordPaths.map(relativePath => readFile(path.join(directory, relativePath))));
+  await writeFile(path.join(directory, "unsafe\\name.txt"), "unsafe path\n", "utf8");
+
+  await assert.rejects(
+    recordCheckpoint({ directory }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.CHECKPOINT_SNAPSHOT_INVALID
+  );
+  const after = await Promise.all(recordPaths.map(relativePath => readFile(path.join(directory, relativePath))));
+  for (const [index, content] of before.entries()) assert.deepEqual(after[index], content);
 });
 
 test("status explain fails closed when a historical checkpoint has no snapshot", async () => {

@@ -362,7 +362,10 @@ async function checkpointPath(directory: string, relativePath: string, gitRunner
       return {
         type: "file",
         contentHash: sha256Bytes(material),
-        binary: filtered === null && !Buffer.from(content.toString("utf8"), "utf8").equals(content)
+        binary: filtered === null && (
+          content.includes(0)
+          || !Buffer.from(content.toString("utf8"), "utf8").equals(content)
+        )
       };
     } finally {
       await handle.close();
@@ -537,14 +540,14 @@ export async function captureGitCheckpointSnapshot(directory: string, {
   const capturedAt = nowIso(clock);
   const inside = await optionalGit(gitRunner, directory, ["rev-parse", "--is-inside-work-tree"]);
   if (inside !== "true") {
-    const snapshot = createCheckpointSnapshot({
+    const snapshot = validateCheckpointSnapshot(createCheckpointSnapshot({
       capturedAt,
       available: false,
       branch: null,
       head: null,
       worktreeFingerprint: sha256("[]"),
       entries: []
-    });
+    }));
     return {
       checkpoint: {
         capturedAt,
@@ -576,14 +579,14 @@ export async function captureGitCheckpointSnapshot(directory: string, {
   ]);
   const records = await worktreeRecords(directory, porcelain, index, checkpointOverlay, binaryPaths, gitRunner);
   const fingerprint = sha256(stableStringify(records));
-  const snapshot = createCheckpointSnapshot({
+  const snapshot = validateCheckpointSnapshot(createCheckpointSnapshot({
     capturedAt,
     available: true,
     branch,
     head,
     worktreeFingerprint: fingerprint,
     entries: records
-  });
+  }));
   return {
     checkpoint: {
       capturedAt,
