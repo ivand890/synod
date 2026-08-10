@@ -21,6 +21,7 @@ import type { OrchestrationDependencies } from "./orchestration.js";
 import type { UsageClient } from "./usage.js";
 import { isRecord } from "./validation.js";
 import { exportRecoveryBundle, verifyRecoveryBundle } from "./recovery.js";
+import { restoreRecoveryBundle } from "./restore.js";
 
 const HELP = `Synod ${packageVersion}
 
@@ -34,6 +35,7 @@ Usage:
   synod checkpoint [directory] [--actor <id>] [--message <text>] [--json]
   synod bundle export <destination> [--cwd <directory>] [--include-untracked] [--json]
   synod bundle verify <bundle> [--json]
+  synod bundle restore <bundle> --cwd <directory> [--json]
   synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--cwd <directory>] [--json]
   synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
   synod doctor [directory] [--json]
@@ -49,7 +51,7 @@ Commands:
   check       Verify managed-file hashes, ownership, and local project integrity.
   status      Read canonical orchestration state and detect checkpoint drift.
   checkpoint  Accept the current Git/worktree checkpoint in canonical state.
-  bundle      Export or verify a deterministic recovery bundle.
+  bundle      Export, verify, or transactionally restore a recovery bundle.
   task        Add tasks and apply validated, revision-aware state transitions.
   doctor      Probe Codex version, App Server, model, and reasoning capabilities.
   uninstall   Remove the local runtime and unchanged managed content; preserve durable state.
@@ -267,7 +269,7 @@ export async function run(
           const base = `${result.manifest.source.branch || "detached"}@${result.manifest.source.head || "no HEAD"}`;
           output.log(`Exported recovery bundle ${result.bundleId} to ${result.destination} (${result.entries} paths, ${result.objects} objects; base ${base}; fingerprint ${result.manifest.checkpoint.fingerprint}; untracked ${result.manifest.includeUntracked ? "included" : "excluded"}).`);
         }
-      } else {
+      } else if (options.action === "verify") {
         const result = await verifyRecoveryBundle(options);
         const data = {
           bundle: result.bundle,
@@ -282,6 +284,22 @@ export async function run(
         };
         if (options.json) output.log(JSON.stringify(successEnvelope("bundle", { action: "verify", ...data }), null, 2));
         else output.log(`Verified recovery bundle ${result.bundleId} (${result.entries} paths, ${result.objects} objects, ${result.bytes} bytes).`);
+      } else {
+        const result = await restoreRecoveryBundle(options, dependencies);
+        const data = {
+          bundle: result.bundle,
+          destination: result.destination,
+          bundleId: result.bundleId,
+          baseHead: result.baseHead,
+          fingerprint: result.fingerprint,
+          recoveredInterruptedRestore: result.recoveredInterruptedRestore,
+          entries: result.entries,
+          objects: result.objects,
+          bytes: result.bytes,
+          manifest: result.manifest
+        };
+        if (options.json) output.log(JSON.stringify(successEnvelope("bundle", { action: "restore", ...data }), null, 2));
+        else output.log(`Restored recovery bundle ${result.bundleId} into ${result.destination} (${result.entries} paths; base ${result.baseHead}; fingerprint ${result.fingerprint}).`);
       }
       return 0;
     }

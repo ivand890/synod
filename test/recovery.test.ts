@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readlink, readdir, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { ERROR_CODES } from "../src/errors.js";
 import { initProject } from "../src/lifecycle.js";
-import { recordCheckpoint } from "../src/orchestration.js";
+import { captureGitCheckpointSnapshot, recordCheckpoint } from "../src/orchestration.js";
 import { exportRecoveryBundle, verifyRecoveryBundle } from "../src/recovery.js";
+import { restoreRecoveryBundle } from "../src/restore.js";
+import { compareCheckpointPaths, stableCheckpointStringify } from "../src/checkpoint.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories = new Set<string>();
@@ -72,6 +74,13 @@ async function fixture(): Promise<{ directory: string; parent: string }> {
   if (process.platform !== "win32") await symlink("staged.txt", path.join(directory, "link.txt"));
   await recordCheckpoint({ directory });
   return { directory, parent };
+}
+
+async function cloneBase(source: string, parent: string, name: string): Promise<string> {
+  const destination = path.join(parent, name);
+  await execFileAsync("git", ["clone", "--no-local", source, destination], { encoding: "utf8" });
+  await git(destination, "config", "commit.gpgsign", "false");
+  return destination;
 }
 
 test.afterEach(async () => {
@@ -140,6 +149,458 @@ test("exports and verifies deterministic mixed dirty-state bundles without chang
   assert.equal(await git(directory, "for-each-ref", "--format=%(refname)%00%(objectname)"), before.refs);
   assert.equal(await git(directory, "remote", "-v"), before.remotes);
 });
+
+test("verification allows several copy destinations to reference one owned source path", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "copies.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  await rewriteManifest(bundle, manifest => {
+    const renamed = manifest.entries.find((entry: any) => entry.status.includes("R") && entry.sourcePath);
+    assert.ok(renamed);
+    for (const destination of ["copy-a.txt", "copy-b.txt"]) {
+      manifest.entries.push({ ...structuredClone(renamed), path: destination, status: "C " });
+    }
+    manifest.entries.sort((left: any, right: any) => compareCheckpointPaths(
+      `${left.path}\0${left.sourcePath || ""}`,
+      `${right.path}\0${right.sourcePath || ""}`
+    ));
+  });
+
+  const verified = await verifyRecoveryBundle({ bundle });
+  assert.deepEqual(
+    verified.manifest.entries.filter(entry => entry.status === "C ").map(entry => entry.sourcePath),
+    ["renamed.txt", "renamed.txt"]
+  );
+});
+
+test("a recreated staged-rename source overrides the rename's implicit deletion", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "synod-recovery-recreated-source-test-"));
+  temporaryDirectories.add(parent);
+  const directory = path.join(parent, "project");
+  await mkdir(directory);
+  await writeFile(path.join(directory, "old.txt"), "rename source\n");
+  await initProject({ directory });
+  await git(directory, "init");
+  await git(directory, "config", "user.email", "synod@example.test");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "commit.gpgsign", "false");
+  await git(directory, "add", ".");
+  await git(directory, "commit", "-m", "base");
+  await git(directory, "mv", "old.txt", "new.txt");
+  await writeFile(path.join(directory, "old.txt"), "recreated source\n");
+  await recordCheckpoint({ directory });
+  const bundle = path.join(parent, "recreated-source.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  const destination = await cloneBase(directory, parent, "restored-recreated-source");
+
+  await restoreRecoveryBundle({ bundle, directory: destination });
+  assert.equal(await readFile(path.join(destination, "new.txt"), "utf8"), "rename source\n");
+  assert.equal(await readFile(path.join(destination, "old.txt"), "utf8"), "recreated source\n");
+  assert.equal(
+    await git(destination, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "new.txt", "old.txt"),
+    await git(directory, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "new.txt", "old.txt")
+  );
+});
+
+test("export rejects unsupported Git intent-to-add checkpoints before publication", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "synod-recovery-intent-test-"));
+  temporaryDirectories.add(parent);
+  const directory = path.join(parent, "project");
+  await mkdir(directory);
+  await initProject({ directory });
+  await git(directory, "init");
+  await git(directory, "config", "user.email", "synod@example.test");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "commit.gpgsign", "false");
+  await git(directory, "add", ".");
+  await git(directory, "commit", "-m", "base");
+  await writeFile(path.join(directory, "future.txt"), "intent bytes\n");
+  await git(directory, "add", "-N", "future.txt");
+  await recordCheckpoint({ directory });
+  const bundle = path.join(parent, "intent.bundle");
+
+  await assert.rejects(
+    exportRecoveryBundle({ directory, destination: bundle }),
+    { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID }
+  );
+  await assert.rejects(readFile(path.join(bundle, "manifest.json")), { code: "ENOENT" });
+});
+
+test("transactionally restores a mixed dirty checkpoint into an exact clean base", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "restore.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  const destination = await cloneBase(directory, parent, "restored");
+  const refsBefore = await git(destination, "for-each-ref", "--format=%(refname)%00%(objectname)");
+  const remotesBefore = await git(destination, "remote", "-v");
+
+  const restored = await restoreRecoveryBundle({ bundle, directory: destination });
+
+  assert.equal(restored.destination, await realpath(destination));
+  assert.equal(restored.fingerprint, restored.manifest.checkpoint.fingerprint);
+  assert.equal(restored.recoveredInterruptedRestore, false);
+  assert.equal(
+    stableCheckpointStringify((await captureGitCheckpointSnapshot(destination)).snapshot.entries),
+    stableCheckpointStringify((await captureGitCheckpointSnapshot(directory)).snapshot.entries)
+  );
+  assert.equal(
+    await git(destination, "ls-files", "--stage", "-z", "--", "."),
+    await git(directory, "ls-files", "--stage", "-z", "--", ".")
+  );
+  for (const relativePath of ["staged.txt", "mixed.txt", "binary.dat", "untracked.txt", "AGENTS.md"]) {
+    assert.deepEqual(await readFile(path.join(destination, relativePath)), await readFile(path.join(directory, relativePath)));
+  }
+  await assert.rejects(readFile(path.join(destination, "deleted.txt")), { code: "ENOENT" });
+  assert.equal(await readFile(path.join(destination, "moved.txt"), "utf8"), "rename me\n");
+  if (process.platform !== "win32") {
+    assert.equal((await lstat(path.join(destination, "link.txt"))).isSymbolicLink(), true);
+    assert.equal(await readlink(path.join(destination, "link.txt")), "staged.txt");
+  }
+  assert.equal(await git(destination, "for-each-ref", "--format=%(refname)%00%(objectname)"), refsBefore);
+  assert.equal(await git(destination, "remote", "-v"), remotesBefore);
+  await assert.rejects(readFile(await gitPathForTest(destination, "synod-recovery-journal.json")), { code: "ENOENT" });
+});
+
+test("restore computes native blob identities for SHA-256 Git repositories", async t => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "synod-recovery-sha256-test-"));
+  temporaryDirectories.add(parent);
+  const directory = path.join(parent, "project");
+  await mkdir(directory);
+  await writeFile(path.join(directory, "tracked.txt"), "base\n");
+  await initProject({ directory });
+  try {
+    await git(directory, "init", "--object-format=sha256");
+  } catch {
+    t.skip("Installed Git does not support SHA-256 repositories.");
+    return;
+  }
+  await git(directory, "config", "user.email", "synod@example.test");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "commit.gpgsign", "false");
+  await git(directory, "add", ".");
+  await git(directory, "commit", "-m", "base");
+  await writeFile(path.join(directory, "tracked.txt"), "sha256 checkpoint\n");
+  await git(directory, "add", "tracked.txt");
+  await recordCheckpoint({ directory });
+  const bundle = path.join(parent, "sha256.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle });
+  assert.match((await verifyRecoveryBundle({ bundle })).manifest.source.head || "", /^[0-9a-f]{64}$/);
+  const destination = await cloneBase(directory, parent, "restored-sha256");
+
+  await restoreRecoveryBundle({ bundle, directory: destination });
+  assert.equal(await git(destination, "ls-files", "--stage", "tracked.txt"), await git(directory, "ls-files", "--stage", "tracked.txt"));
+  assert.equal(await readFile(path.join(destination, "tracked.txt"), "utf8"), "sha256 checkpoint\n");
+});
+
+test("restore reproduces an unmerged multi-stage Git index", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "synod-recovery-conflict-test-"));
+  temporaryDirectories.add(parent);
+  const directory = path.join(parent, "project");
+  await mkdir(directory);
+  await writeFile(path.join(directory, "conflict.txt"), "base\n");
+  await initProject({ directory });
+  await git(directory, "init");
+  await git(directory, "config", "user.email", "synod@example.test");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "commit.gpgsign", "false");
+  await git(directory, "add", ".");
+  await git(directory, "commit", "-m", "base");
+  const primaryBranch = (await git(directory, "symbolic-ref", "--short", "HEAD")).trim();
+  await git(directory, "switch", "-c", "side");
+  await writeFile(path.join(directory, "conflict.txt"), "side\n");
+  await git(directory, "add", "conflict.txt");
+  await git(directory, "commit", "-m", "side");
+  await git(directory, "switch", primaryBranch);
+  await writeFile(path.join(directory, "conflict.txt"), "main\n");
+  await git(directory, "add", "conflict.txt");
+  await git(directory, "commit", "-m", "main");
+  await assert.rejects(execFileAsync("git", ["-C", directory, "merge", "side"], { encoding: "utf8" }));
+  await recordCheckpoint({ directory });
+  const bundle = path.join(parent, "conflict.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle });
+  const destination = await cloneBase(directory, parent, "restored-conflict");
+
+  await restoreRecoveryBundle({ bundle, directory: destination });
+  assert.equal(
+    await git(destination, "ls-files", "--stage", "-z", "conflict.txt"),
+    await git(directory, "ls-files", "--stage", "-z", "conflict.txt")
+  );
+  assert.deepEqual(await readFile(path.join(destination, "conflict.txt")), await readFile(path.join(directory, "conflict.txt")));
+});
+
+test("restore preserves an unstaged executable-mode change", {
+  skip: process.platform === "win32" ? "Windows Git does not expose POSIX executable modes." : false
+}, async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "synod-recovery-mode-test-"));
+  temporaryDirectories.add(parent);
+  const directory = path.join(parent, "project");
+  await mkdir(directory);
+  await writeFile(path.join(directory, "tool.sh"), "#!/bin/sh\nexit 0\n");
+  await initProject({ directory });
+  await git(directory, "init");
+  await git(directory, "config", "user.email", "synod@example.test");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "commit.gpgsign", "false");
+  await git(directory, "add", ".");
+  await git(directory, "commit", "-m", "base");
+  await chmod(path.join(directory, "tool.sh"), 0o755);
+  await recordCheckpoint({ directory });
+  const bundle = path.join(parent, "mode.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle });
+  const destination = await cloneBase(directory, parent, "restored-mode");
+
+  await restoreRecoveryBundle({ bundle, directory: destination });
+  assert.equal((await lstat(path.join(destination, "tool.sh"))).mode & 0o111, 0o111);
+  assert.equal(await git(destination, "ls-files", "--stage", "tool.sh"), await git(directory, "ls-files", "--stage", "tool.sh"));
+});
+
+async function gitPathForTest(directory: string, name: string): Promise<string> {
+  const result = (await git(directory, "rev-parse", "--git-path", name)).trim();
+  return path.isAbsolute(result) ? result : path.resolve(directory, result);
+}
+
+test("restore refuses the wrong base and dirty destinations before mutation", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "precondition.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+
+  const wrongBase = await cloneBase(directory, parent, "wrong-base");
+  await writeFile(path.join(wrongBase, "later.txt"), "later\n");
+  await git(wrongBase, "add", "later.txt");
+  await git(wrongBase, "config", "user.email", "synod@example.test");
+  await git(wrongBase, "config", "user.name", "Synod Test");
+  await git(wrongBase, "commit", "-m", "later");
+  const wrongIndex = await readFile(await gitPathForTest(wrongBase, "index"));
+  await assert.rejects(
+    restoreRecoveryBundle({ bundle, directory: wrongBase }),
+    { code: ERROR_CODES.RECOVERY_BASE_MISMATCH }
+  );
+  assert.deepEqual(await readFile(await gitPathForTest(wrongBase, "index")), wrongIndex);
+
+  const dirty = await cloneBase(directory, parent, "dirty");
+  await writeFile(path.join(dirty, "staged.txt"), "destination dirt\n");
+  const dirtyIndex = await readFile(await gitPathForTest(dirty, "index"));
+  await assert.rejects(
+    restoreRecoveryBundle({ bundle, directory: dirty }),
+    { code: ERROR_CODES.RECOVERY_DESTINATION_DIRTY }
+  );
+  assert.equal(await readFile(path.join(dirty, "staged.txt"), "utf8"), "destination dirt\n");
+  assert.deepEqual(await readFile(await gitPathForTest(dirty, "index")), dirtyIndex);
+});
+
+test("restore rejects an irreproducible declared fingerprint before destination mutation", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "wrong-fingerprint.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  await rewriteManifest(bundle, manifest => {
+    manifest.checkpoint.fingerprint = `sha256:${"0".repeat(64)}`;
+  });
+  const destination = await cloneBase(directory, parent, "wrong-fingerprint");
+  const indexPath = await gitPathForTest(destination, "index");
+  const beforeIndex = await readFile(indexPath);
+  const beforeTracked = await readFile(path.join(destination, "staged.txt"));
+
+  await assert.rejects(
+    restoreRecoveryBundle({ bundle, directory: destination }),
+    { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID }
+  );
+  assert.deepEqual(await readFile(indexPath), beforeIndex);
+  assert.deepEqual(await readFile(path.join(destination, "staged.txt")), beforeTracked);
+  await assert.rejects(readFile(await gitPathForTest(destination, "synod-recovery-journal.json")), { code: "ENOENT" });
+});
+
+test("failures at every restore mutation boundary roll back exact index and filesystem bytes", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "rollback.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  for (const failurePhase of [
+    "before-index-install", "after-index", "before-path-install", "after-path", "before-verify"
+  ] as const) {
+    const destination = await cloneBase(directory, parent, `rollback-${failurePhase}`);
+    const indexPath = await gitPathForTest(destination, "index");
+    const before = {
+      index: await readFile(indexPath),
+      indexMode: (await lstat(indexPath)).mode & 0o777,
+      status: await git(destination, "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+      staged: await readFile(path.join(destination, "staged.txt")),
+      mixed: await readFile(path.join(destination, "mixed.txt")),
+      deleted: await readFile(path.join(destination, "deleted.txt")),
+      renamed: await readFile(path.join(destination, "renamed.txt")),
+      agents: await readFile(path.join(destination, "AGENTS.md"))
+    };
+    let paths = 0;
+    await assert.rejects(
+      restoreRecoveryBundle({ bundle, directory: destination }, {
+        restoreHook(phase) {
+          if (phase === failurePhase && (!["before-path-install", "after-path"].includes(phase) || ++paths === 3)) {
+            throw new Error(`injected ${failurePhase} restore failure`);
+          }
+        }
+      }),
+      (error: any) => {
+        assert.equal(error?.code, ERROR_CODES.RECOVERY_RESTORE_FAILED, `${failurePhase}: ${JSON.stringify(error?.details)}`);
+        return true;
+      }
+    );
+
+    assert.deepEqual(await readFile(indexPath), before.index, failurePhase);
+    assert.equal((await lstat(indexPath)).mode & 0o777, before.indexMode, failurePhase);
+    assert.equal(await git(destination, "status", "--porcelain=v1", "-z", "--untracked-files=all"), before.status, failurePhase);
+    assert.deepEqual(await readFile(path.join(destination, "staged.txt")), before.staged, failurePhase);
+    assert.deepEqual(await readFile(path.join(destination, "mixed.txt")), before.mixed, failurePhase);
+    assert.deepEqual(await readFile(path.join(destination, "deleted.txt")), before.deleted, failurePhase);
+    assert.deepEqual(await readFile(path.join(destination, "renamed.txt")), before.renamed, failurePhase);
+    assert.deepEqual(await readFile(path.join(destination, "AGENTS.md")), before.agents, failurePhase);
+    await assert.rejects(readFile(path.join(destination, "moved.txt")), { code: "ENOENT" });
+    await assert.rejects(readFile(path.join(destination, "untracked.txt")), { code: "ENOENT" });
+    await assert.rejects(readFile(await gitPathForTest(destination, "synod-recovery-journal.json")), { code: "ENOENT" });
+  }
+});
+
+test("a later restore safely rolls back an interrupted durable journal before retrying", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "interrupted.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  const destination = await cloneBase(directory, parent, "interrupted");
+  const restoreModule = new URL("../src/restore.ts", import.meta.url).href;
+  const script = `
+    import { restoreRecoveryBundle } from ${JSON.stringify(restoreModule)};
+    await restoreRecoveryBundle(
+      { bundle: ${JSON.stringify(bundle)}, directory: ${JSON.stringify(destination)} },
+      { restoreHook(phase) { if (phase === "before-index-install") process.exit(77); } }
+    );
+  `;
+  await assert.rejects(
+    execFileAsync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { encoding: "utf8" }),
+    (error: any) => error?.code === 77
+  );
+  assert.equal(await pathTypeForTest(await gitPathForTest(destination, "synod-recovery-journal.json")), "file");
+
+  const restored = await restoreRecoveryBundle({ bundle, directory: destination });
+  assert.equal(restored.recoveredInterruptedRestore, true);
+  assert.equal(
+    stableCheckpointStringify((await captureGitCheckpointSnapshot(destination)).snapshot.entries),
+    stableCheckpointStringify((await captureGitCheckpointSnapshot(directory)).snapshot.entries)
+  );
+  await assert.rejects(readFile(await gitPathForTest(destination, "synod-recovery-journal.json")), { code: "ENOENT" });
+});
+
+test("a retry finalizes a fully applied interrupted restore without rolling it back", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "fully-applied.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  const destination = await cloneBase(directory, parent, "fully-applied");
+  const restoreModule = new URL("../src/restore.ts", import.meta.url).href;
+  const script = `
+    import { restoreRecoveryBundle } from ${JSON.stringify(restoreModule)};
+    await restoreRecoveryBundle(
+      { bundle: ${JSON.stringify(bundle)}, directory: ${JSON.stringify(destination)} },
+      { restoreHook(phase) { if (phase === "before-verify") process.exit(79); } }
+    );
+  `;
+  await assert.rejects(
+    execFileAsync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { encoding: "utf8" }),
+    (error: any) => error?.code === 79
+  );
+
+  const restored = await restoreRecoveryBundle({ bundle, directory: destination });
+  assert.equal(restored.recoveredInterruptedRestore, true);
+  assert.equal(
+    stableCheckpointStringify((await captureGitCheckpointSnapshot(destination)).snapshot.entries),
+    stableCheckpointStringify((await captureGitCheckpointSnapshot(directory)).snapshot.entries)
+  );
+  await assert.rejects(readFile(await gitPathForTest(destination, "synod-recovery-journal.json")), { code: "ENOENT" });
+});
+
+test("interrupted rollback preserves concurrent path content and its durable journal", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "concurrent-interrupted.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  const destination = await cloneBase(directory, parent, "concurrent-interrupted");
+  const restoreModule = new URL("../src/restore.ts", import.meta.url).href;
+  const script = `
+    import { restoreRecoveryBundle } from ${JSON.stringify(restoreModule)};
+    await restoreRecoveryBundle(
+      { bundle: ${JSON.stringify(bundle)}, directory: ${JSON.stringify(destination)} },
+      { restoreHook(phase) { if (phase === "after-path") process.exit(78); } }
+    );
+  `;
+  await assert.rejects(
+    execFileAsync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { encoding: "utf8" }),
+    (error: any) => error?.code === 78
+  );
+  await writeFile(path.join(destination, "AGENTS.md"), "Concurrent user content.\n");
+
+  await assert.rejects(
+    restoreRecoveryBundle({ bundle, directory: destination }),
+    { code: ERROR_CODES.RECOVERY_ROLLBACK_FAILED }
+  );
+  assert.equal(await readFile(path.join(destination, "AGENTS.md"), "utf8"), "Concurrent user content.\n");
+  assert.equal(await pathTypeForTest(await gitPathForTest(destination, "synod-recovery-journal.json")), "file");
+});
+
+test("restore does not overwrite a path changed at its installation boundary", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "concurrent-install.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  const destination = await cloneBase(directory, parent, "concurrent-install");
+  const concurrent = "Concurrent boundary content.\n";
+
+  await assert.rejects(
+    restoreRecoveryBundle({ bundle, directory: destination }, {
+      async restoreHook(phase, relativePath) {
+        if (phase === "before-path-install" && relativePath === "AGENTS.md") {
+          await writeFile(path.join(destination, relativePath), concurrent);
+        }
+      }
+    }),
+    { code: ERROR_CODES.RECOVERY_ROLLBACK_FAILED }
+  );
+  assert.equal(await readFile(path.join(destination, "AGENTS.md"), "utf8"), concurrent);
+  assert.equal(await pathTypeForTest(await gitPathForTest(destination, "synod-recovery-journal.json")), "file");
+});
+
+test("restore holds Git's index lock across its final index installation boundary", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "concurrent-index.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  const destination = await cloneBase(directory, parent, "concurrent-index");
+  const indexPath = await gitPathForTest(destination, "index");
+  const beforeIndex = await readFile(indexPath);
+  const concurrentPath = path.join(destination, "concurrent-index.txt");
+  let writerRejected = false;
+
+  await assert.rejects(
+    restoreRecoveryBundle({ bundle, directory: destination }, {
+      async restoreHook(phase) {
+        if (phase !== "before-index-install") return;
+        await writeFile(concurrentPath, "concurrent index content\n");
+        try {
+          await git(destination, "add", "concurrent-index.txt");
+        } catch (error) {
+          writerRejected = true;
+          throw error;
+        }
+      }
+    }),
+    { code: ERROR_CODES.RECOVERY_RESTORE_FAILED }
+  );
+  assert.equal(writerRejected, true);
+  assert.deepEqual(await readFile(indexPath), beforeIndex);
+  assert.equal(await readFile(concurrentPath, "utf8"), "concurrent index content\n");
+  assert.match(await git(destination, "status", "--porcelain=v1", "--untracked-files=all"), /^\?\? concurrent-index\.txt$/m);
+  await assert.rejects(readFile(await gitPathForTest(destination, "synod-recovery-journal.json")), { code: "ENOENT" });
+});
+
+async function pathTypeForTest(candidate: string): Promise<string> {
+  try {
+    const stats = await lstat(candidate);
+    return stats.isFile() ? "file" : stats.isDirectory() ? "directory" : stats.isSymbolicLink() ? "symlink" : "other";
+  } catch (error: any) {
+    if (error?.code === "ENOENT") return "missing";
+    throw error;
+  }
+}
 
 test("refuses existing destinations, checkpoint drift, and destinations inside the source", async () => {
   const { directory, parent } = await fixture();
@@ -300,6 +761,40 @@ test("verification rejects tampered objects, extra material, traversal, and syml
     await writeFile(manifestPath, `${JSON.stringify(manifest)}\n`);
     await assert.rejects(verifyRecoveryBundle({ bundle: target }), { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID });
     await assert.rejects(readFile(path.join(parent, "escape")), { code: "ENOENT" });
+  }
+
+  {
+    const target = path.join(parent, "windows-alias.bundle");
+    await cp(canonical, target, { recursive: true });
+    await rewriteManifest(target, manifest => { manifest.entries[0].path = "CON.txt"; });
+    await assert.rejects(verifyRecoveryBundle({ bundle: target }), { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID });
+  }
+
+  {
+    const target = path.join(parent, "non-normalized.bundle");
+    await cp(canonical, target, { recursive: true });
+    await rewriteManifest(target, manifest => { manifest.entries[0].path = "cafe\u0301.txt"; });
+    await assert.rejects(verifyRecoveryBundle({ bundle: target }), { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID });
+  }
+
+  {
+    const target = path.join(parent, "surrogate-alias.bundle");
+    await cp(canonical, target, { recursive: true });
+    await rewriteManifest(target, manifest => { manifest.entries[0].path = "alias\uD800.txt"; });
+    await assert.rejects(verifyRecoveryBundle({ bundle: target }), { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID });
+  }
+
+  {
+    const target = path.join(parent, "ignored-untracked.bundle");
+    await cp(canonical, target, { recursive: true });
+    await rewriteManifest(target, manifest => {
+      const entry = manifest.entries.find((item: any) => item.path === "AGENTS.md");
+      assert.ok(entry);
+      entry.status = "??";
+      entry.index = [];
+      entry.worktree = { type: "ignored", mode: null, object: null };
+    });
+    await assert.rejects(verifyRecoveryBundle({ bundle: target }), { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID });
   }
 
   {

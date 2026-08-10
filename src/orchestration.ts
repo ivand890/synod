@@ -1379,6 +1379,23 @@ async function acquireLock(targetDirectory: string): Promise<() => Promise<void>
   });
 }
 
+export async function withOrchestrationLock<Result>(
+  targetDirectory: string,
+  action: () => Promise<Result>
+): Promise<Result> {
+  const release = await acquireLock(targetDirectory);
+  let actionFailed = false;
+  try {
+    return await action();
+  } catch (error) {
+    actionFailed = true;
+    throw error;
+  } finally {
+    if (actionFailed) await release().catch(() => {});
+    else await release();
+  }
+}
+
 async function appendEvent(targetDirectory: string, event: OrchestrationEvent): Promise<void> {
   const eventPath = resolveProjectPath(targetDirectory, ORCHESTRATION_EVENTS_PATH);
   const unsafe = await unsafeAncestor(targetDirectory, eventPath);

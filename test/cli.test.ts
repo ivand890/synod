@@ -372,6 +372,7 @@ test("bundle export and verify expose schema-1 JSON success and corruption error
   const directory = path.join(parent, "project");
   const destination = path.join(parent, "recovery.bundle");
   const textDestination = path.join(parent, "recovery-text.bundle");
+  const restoreDirectory = path.join(parent, "restored-project");
   const { messages, output } = capturedOutput();
   const git = (...args: string[]) => {
     const result = spawnSync("git", ["-C", directory, ...args], { encoding: "utf8" });
@@ -415,6 +416,17 @@ test("bundle export and verify expose schema-1 JSON success and corruption error
     assert.equal(verified.data.action, "verify");
     assert.equal(verified.data.bundleId, exported.data.bundleId);
 
+    const clone = spawnSync("git", ["clone", "--no-local", directory, restoreDirectory], { encoding: "utf8" });
+    assert.equal(clone.status, 0, clone.stderr);
+    const restoreCode = await run(["bundle", "restore", destination, "--cwd", restoreDirectory, "--json"], output);
+    const restored = JSON.parse(takeMessage(messages));
+    assert.equal(restoreCode, 0);
+    assert.equal(restored.ok, true);
+    assert.equal(restored.data.action, "restore");
+    assert.equal(restored.data.bundleId, exported.data.bundleId);
+    assert.equal(restored.data.recoveredInterruptedRestore, false);
+    assert.equal(await readFile(path.join(restoreDirectory, "tracked.txt"), "utf8"), "checkpoint\n");
+
     const object = (await readdir(path.join(destination, "objects")))[0];
     assert.ok(object);
     await writeFile(path.join(destination, "objects", object), "tampered");
@@ -426,4 +438,14 @@ test("bundle export and verify expose schema-1 JSON success and corruption error
   } finally {
     await rm(parent, { recursive: true, force: true });
   }
+});
+
+test("bundle restore requires an explicit destination checkout", async () => {
+  const { messages, output } = capturedOutput();
+  const code = await run(["bundle", "restore", "recovery.bundle", "--json"], output);
+  const envelope = JSON.parse(takeMessage(messages));
+  assert.equal(code, 1);
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error.code, ERROR_CODES.UNEXPECTED_ARGUMENT);
+  assert.equal(envelope.error.details.option, "--cwd");
 });

@@ -285,6 +285,33 @@ test("bundle export selects the source project's pinned runtime", async () => {
   });
 });
 
+test("bundle restore selects the destination project's pinned runtime", async () => {
+  const callerDirectory = await temporaryProject();
+  const projectDirectory = await temporaryProject();
+  await installLocalRuntime(projectDirectory, { runPnpm: fakePnpmInstall });
+  const bundle = path.join(callerDirectory, "recovery.bundle");
+  let delegated;
+
+  const result = await prepareLocalRuntime([
+    "bundle", "restore", bundle, "--cwd", projectDirectory, "--json"
+  ], {
+    cwd: callerDirectory,
+    currentRuntime: async () => false,
+    executor(localRuntime, args) {
+      delegated = { targetDirectory: projectDirectory, version: localRuntime.descriptor.runtimeVersion, args };
+      return 0;
+    }
+  });
+
+  assert.equal(result.action, "delegate");
+  assert.equal(result.targetDirectory, projectDirectory);
+  assert.deepEqual(delegated, {
+    targetDirectory: projectDirectory,
+    version: packageVersion,
+    args: ["bundle", "restore", bundle, "--cwd", projectDirectory, "--json"]
+  });
+});
+
 test("repairs a missing cache at its pinned version before delegation", async () => {
   const directory = await temporaryProject();
   await writePinnedRuntime(directory, "0.4.0");
