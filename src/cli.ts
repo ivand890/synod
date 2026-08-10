@@ -1,6 +1,6 @@
 import { errorEnvelope, successEnvelope } from "./contracts.js";
 import type { Warning } from "./contracts.js";
-import { parseBundleArgs, parseCheckpointArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs } from "./command-options.js";
+import { parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs } from "./command-options.js";
 import type { HelpOptions, LifecycleOptions } from "./command-options.js";
 import { doctorProject } from "./doctor.js";
 import type { DoctorClient, DoctorDependencies } from "./doctor.js";
@@ -22,6 +22,7 @@ import type { UsageClient } from "./usage.js";
 import { isRecord } from "./validation.js";
 import { exportRecoveryBundle, verifyRecoveryBundle } from "./recovery.js";
 import { restoreRecoveryBundle } from "./restore.js";
+import { formatHandoff, generateHandoff } from "./handoff.js";
 
 const HELP = `Synod ${packageVersion}
 
@@ -32,6 +33,7 @@ Usage:
   synod upgrade [directory] [--profile <id>] [--dry-run] [--force] [--json]
   synod check [directory] [--json]
   synod status [directory] [--explain] [--json]
+  synod handoff [directory] [--bundle <bundle>] [--json]
   synod checkpoint [directory] [--actor <id>] [--message <text>] [--json]
   synod bundle export <destination> [--cwd <directory>] [--include-untracked] [--json]
   synod bundle verify <bundle> [--json]
@@ -50,6 +52,7 @@ Commands:
   upgrade     Update the selected local runtime and migrate managed project content.
   check       Verify managed-file hashes, ownership, and local project integrity.
   status      Read canonical orchestration state and detect checkpoint drift.
+  handoff     Generate read-only continuation context from canonical state.
   checkpoint  Accept the current Git/worktree checkpoint in canonical state.
   bundle      Export, verify, or transactionally restore a recovery bundle.
   task        Add tasks and apply validated, revision-aware state transitions.
@@ -70,6 +73,7 @@ Options:
   --explain   Include a read-only path-level delta from the acknowledged checkpoint.
   --include-untracked
               Include acknowledged untracked files in a recovery bundle.
+  --bundle    Verify and bind a recovery bundle to a canonical handoff.
   --json      Print a versioned machine-readable success, warning, or error envelope.
   -h, --help  Show help.
   -v, --version
@@ -236,6 +240,15 @@ export async function run(
         output.log(formatOrchestrationStatus(result));
       }
       return result.healthy ? 0 : 1;
+    }
+
+    if (command === "handoff") {
+      const options = parseHandoffArgs(args.slice(1));
+      if (isHelpOptions(options)) { output.log(HELP); return 0; }
+      const result = await generateHandoff(options, dependencies);
+      if (options.json) output.log(JSON.stringify(successEnvelope("handoff", result), null, 2));
+      else output.log(formatHandoff(result));
+      return 0;
     }
 
     if (command === "checkpoint") {

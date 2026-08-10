@@ -93,6 +93,7 @@ test("prints version and help", () => {
   assert.match(help.stdout, /synod upgrade/);
   assert.match(help.stdout, /synod doctor/);
   assert.match(help.stdout, /synod status/);
+  assert.match(help.stdout, /synod handoff/);
   assert.match(help.stdout, /--explain/);
   assert.match(help.stdout, /synod task add/);
   assert.match(help.stdout, /synod bundle export/);
@@ -330,6 +331,18 @@ test("task and status commands expose canonical orchestration through schema-1 e
     assert.equal(explained.ok, true);
     assert.equal(explained.data.delta.changed, false);
     assert.deepEqual(explained.data.delta.paths, []);
+
+    const handoffCode = await run(["handoff", directory, "--json"], output);
+    const handoff = JSON.parse(takeMessage(messages));
+    assert.equal(handoffCode, 0);
+    assert.equal(handoff.ok, true);
+    assert.equal(handoff.command, "handoff");
+    assert.equal(handoff.data.tasks[0].id, "T-001");
+    assert.equal(handoff.data.recoveryBundle.status, "not-supplied");
+
+    const handoffTextCode = await run(["handoff", "--cwd", directory], output);
+    assert.equal(handoffTextCode, 0);
+    assert.match(takeMessage(messages), /T-001: PLANNED r0/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

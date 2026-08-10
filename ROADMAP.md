@@ -1,7 +1,7 @@
 # Synod Roadmap
 
 Last updated: 2026-08-10
-Current released baseline: `v0.6.3`
+Current released baseline: `v0.7.0`
 
 This roadmap converts the advisor loop's remaining operational risks into
 versioned, testable increments. It describes intended outcomes, not shipped
@@ -170,6 +170,9 @@ Synod reaches a 1.0 candidate only after all of the following are demonstrated:
 - `v0.6.3`: behavior-preserving strict TypeScript 7 migration, compiled ESM
   package output, stable JavaScript executable shim, and preserved deep-import
   compatibility.
+- `v0.7.0`: hash-bound checkpoint snapshots and path deltas, deterministic
+  local recovery bundles, transactional fresh-checkout restore, and canonical
+  text/JSON handoff context with installed cross-platform recovery smoke.
 
 The worktrees/leases and economics originally associated with `v0.6` were not
 discarded. They are deliberately sequenced after recoverable phase boundaries

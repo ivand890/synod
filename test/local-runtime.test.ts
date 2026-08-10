@@ -212,6 +212,30 @@ test("status explain selects and delegates to the pinned project runtime", async
   });
 });
 
+test("handoff selects and delegates to the pinned project runtime", async () => {
+  const callerDirectory = await temporaryProject();
+  const projectDirectory = await temporaryProject();
+  await installLocalRuntime(projectDirectory, { runPnpm: fakePnpmInstall });
+  const bundle = path.join(callerDirectory, "handoff.bundle");
+  let delegated;
+
+  const result = await prepareLocalRuntime(["handoff", projectDirectory, "--bundle", bundle, "--json"], {
+    cwd: callerDirectory,
+    currentRuntime: async () => false,
+    executor(localRuntime, args) {
+      delegated = { version: localRuntime.descriptor.runtimeVersion, args };
+      return 0;
+    }
+  });
+
+  assert.equal(result.action, "delegate");
+  assert.equal(result.targetDirectory, projectDirectory);
+  assert.deepEqual(delegated, {
+    version: packageVersion,
+    args: ["handoff", projectDirectory, "--bundle", bundle, "--json"]
+  });
+});
+
 test("project-scoped commands without directory arguments still delegate locally", async () => {
   const directory = await temporaryProject();
   await installLocalRuntime(directory, { runPnpm: fakePnpmInstall });

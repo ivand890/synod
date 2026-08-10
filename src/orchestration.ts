@@ -251,6 +251,20 @@ const TRANSITIONS: Readonly<Record<TaskState, ReadonlySet<TaskState>>> = Object.
   SUPERSEDED: new Set<TaskState>()
 });
 
+export function legalTaskTransitions(
+  task: OrchestrationTask,
+  tasks: Readonly<Record<string, OrchestrationTask>>
+): TaskState[] {
+  let allowed = [...TRANSITIONS[task.state]];
+  if (task.state === "BLOCKED") {
+    allowed = allowed.filter(target => target === "SUPERSEDED" || target === task.blockedFrom);
+  }
+  if (task.dependsOn.some(dependency => tasks[dependency]?.state !== "DONE")) {
+    allowed = allowed.filter(target => target !== "READY");
+  }
+  return allowed;
+}
+
 const execFileAsync = promisify(execFile);
 
 function nowIso(clock: Clock = () => new Date()): string {
@@ -2030,7 +2044,7 @@ export async function recordCheckpoint(
 }
 
 export async function orchestrationStatus(
-  { directory = ".", explain = false }: { directory?: string; explain?: boolean } = {},
+  { directory = ".", explain = false, readOnly = false }: { directory?: string; explain?: boolean; readOnly?: boolean } = {},
   dependencies: OrchestrationDependencies = {}
 ): Promise<OrchestrationStatusResult> {
   const targetDirectory = path.resolve(directory);
@@ -2041,7 +2055,16 @@ export async function orchestrationStatus(
   let currentCheckpoint: GitCheckpoint;
   let delta: CheckpointDelta | undefined;
   try {
-    await recoverPendingMutation(targetDirectory);
+    if (readOnly) {
+      const pending = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
+      if (pending.type !== "missing") {
+        throw new SynodError(
+          ERROR_CODES.ORCHESTRATION_STATE_INVALID,
+          "Pending orchestration recovery is required; refusing to mutate records during read-only validation.",
+          { details: { path: ORCHESTRATION_PENDING_PATH, type: pending.type } }
+        );
+      }
+    } else await recoverPendingMutation(targetDirectory);
     const canonical = await readOrchestrationRaw(targetDirectory);
     ({ state, events } = canonical);
     markdown = await readRecord(targetDirectory, ORCHESTRATION_STATUS_PATH);

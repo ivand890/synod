@@ -144,6 +144,22 @@ synod checkpoint --message "Accepted the integrated revision"
 
 Do not hand-edit `.synod/state.json`, `.synod/events.jsonl`, `.synod/checkpoint.json`, or `docs/synod/STATUS.md`. A broken event sequence, hash chain, state/log match, checkpoint snapshot, or Markdown projection fails closed. Historical checkpoints created before snapshot support remain valid for summary status, but path-level explanation requires recording a new checkpoint when the historical worktree no longer matches the live checkout.
 
+## Canonical handoff
+
+Generate read-only continuation context directly from canonical task records and the live checkpoint delta:
+
+```bash
+synod handoff
+synod handoff --bundle ../project-recovery.bundle
+synod handoff --json
+```
+
+The handoff reports the acknowledged and current checkpoints, drift and path delta, focus tasks, blockers, incomplete dependencies, unresolved acceptance and verification gates, current-revision evidence, and legal next transitions. It does not treat `GOAL.md`, `PLAN.md`, `STATE.md`, `WORKLOG.md`, or chat history as authoritative, and it does not update canonical records or `STATUS.md`. If pending orchestration recovery would require a write, handoff fails closed instead.
+
+An optional bundle must pass full verification and match the canonical checkpoint fingerprint and snapshot hash. A bundle exported earlier at that checkpoint remains valid after later task events; handoff labels its event identity as older instead of pretending it is current. A bundle from another checkpoint is rejected.
+
+`DONE` means only that Synod's local delivery, acceptance, and verification transitions completed for the recorded task revision. It does not mean the work is committed, pushed, reviewed by a hosting provider, deployed, externally approved, or operationally verified; those outcomes require their own evidence.
+
 ## Local recovery bundles
 
 Export the exact acknowledged dirty checkpoint to a deterministic directory bundle outside the source checkout, then verify it without changing either checkout or bundle:
@@ -162,9 +178,9 @@ Export requires an acknowledged Git `HEAD`; the live branch, `HEAD`, Git index, 
 
 A schema-1 bundle contains canonical `manifest.json` plus raw content-addressed objects under `objects/`. The manifest binds the bundle ID to source branch/`HEAD`, checkpoint and snapshot hashes, last event identity, path modes and types, object sizes and SHA-256 values, and whether untracked material was included. Its deterministic `createdAt` is the acknowledged snapshot capture time, so repeated exports of the same checkpoint with the same Synod version serialize identically. Bundles can contain source code, secrets, binary data, and symlink targets, so keep them local and protect them like the checkout itself.
 
-Verification parses external JSON fail-closed, requires canonical serialization, rejects unknown fields and unsafe or colliding paths, and checks the exact object inventory, sizes, hashes, and symlink boundaries without writing. Dirty submodules are deliberately unsupported by bundle schema 1 and return `SYNOD_RECOVERY_SUBMODULE_UNSUPPORTED`.
+Verification parses external JSON fail-closed, requires canonical serialization, rejects unknown fields and unsafe or colliding paths, and checks the exact object inventory, sizes, hashes, and symlink boundaries without writing. Dirty submodules and Git intent-to-add entries are deliberately unsupported by bundle schema 1; dirty submodules return `SYNOD_RECOVERY_SUBMODULE_UNSUPPORTED`, while intent-to-add material is rejected as an invalid or incomplete schema-1 bundle.
 
-Restore requires a destination checkout at the bundle's exact base `HEAD` with no relevant staged, unstaged, or untracked changes. It derives the expected normalized checkpoint fingerprint before mutation, writes required content-addressed blobs without changing commits or refs, constructs a private temporary index, and journals the exact prior index bytes and every affected filesystem path inside the destination Git directory. The operation commits only after a fresh capture exactly matches the bundled fingerprint. Any ordinary failure restores the prior index and worktree; a killed process leaves the durable journal, and the next restore invocation safely rolls it back before retrying. If a journaled path or index changed outside Synod, rollback fails closed with `SYNOD_RECOVERY_ROLLBACK_FAILED` and preserves the journal instead of overwriting concurrent content.
+Restore requires a destination checkout at the bundle's exact base `HEAD` with no relevant staged, unstaged, or untracked changes. It derives the expected normalized checkpoint fingerprint before mutation, writes required content-addressed blobs without changing commits or refs, constructs a private temporary index, and journals the exact prior index bytes and every affected filesystem path inside the destination Git directory. It holds Git's standard `index.lock` across final index installation so another Git writer cannot be overwritten. The operation commits only after a fresh capture exactly matches the bundled fingerprint. Any ordinary failure restores the prior index and worktree; a killed process leaves the durable journal, and the next restore invocation safely rolls it back before retrying. If a journaled path, index, or index lock changed outside Synod, rollback fails closed with `SYNOD_RECOVERY_ROLLBACK_FAILED` and preserves the journal instead of overwriting concurrent content.
 
 ## Token usage by model
 
@@ -197,7 +213,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
   "data": {},
   "warnings": [],
   "diagnostics": {
-    "synodVersion": "0.6.0",
+    "synodVersion": "0.7.0",
     "nodeVersion": "24.12.0",
     "platform": "darwin",
     "codexVersion": "0.142.0"
