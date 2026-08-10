@@ -144,6 +144,23 @@ synod checkpoint --message "Accepted the integrated revision"
 
 Do not hand-edit `.synod/state.json`, `.synod/events.jsonl`, `.synod/checkpoint.json`, or `docs/synod/STATUS.md`. A broken event sequence, hash chain, state/log match, checkpoint snapshot, or Markdown projection fails closed. Historical checkpoints created before snapshot support remain valid for summary status, but path-level explanation requires recording a new checkpoint when the historical worktree no longer matches the live checkout.
 
+## Local recovery bundles
+
+Export the exact acknowledged dirty checkpoint to a deterministic directory bundle outside the source checkout, then verify it without changing either checkout or bundle:
+
+```bash
+synod bundle export ../project-recovery.bundle
+synod bundle export ../project-recovery.bundle --include-untracked
+synod bundle verify ../project-recovery.bundle
+synod bundle verify ../project-recovery.bundle --json
+```
+
+Export requires an acknowledged Git `HEAD`; the live branch, `HEAD`, Git index, and relevant worktree fingerprint must still match that checkpoint. If acknowledged untracked files exist, `--include-untracked` is mandatory; otherwise export fails instead of creating an incomplete artifact. The command holds the orchestration lock while it reads canonical state and source material, verifies a temporary sibling bundle, rechecks the source, and atomically renames into a destination that did not already exist. It does not change canonical records, the worktree, index, commits, refs, or remotes.
+
+A schema-1 bundle contains canonical `manifest.json` plus raw content-addressed objects under `objects/`. The manifest binds the bundle ID to source branch/`HEAD`, checkpoint and snapshot hashes, last event identity, path modes and types, object sizes and SHA-256 values, and whether untracked material was included. Repeated exports at the same creation timestamp serialize identically. Bundles can contain source code, secrets, binary data, and symlink targets, so keep them local and protect them like the checkout itself.
+
+Verification parses external JSON fail-closed, requires canonical serialization, rejects unknown fields and unsafe or colliding paths, and checks the exact object inventory, sizes, hashes, and symlink boundaries without writing. Dirty submodules are deliberately unsupported by bundle schema 1 and return `SYNOD_RECOVERY_SUBMODULE_UNSUPPORTED`. Restore is not part of this delivery slice; keep the source checkout until `synod bundle restore` has completed and independently matched the recorded fingerprint in a release that supports it.
+
 ## Token usage by model
 
 Report the latest Codex session tree for the current project, including every delegated subagent. Synod compares active and archived root sessions and selects the one with the newest `updatedAt` value:
@@ -185,7 +202,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
 
 Failures set `ok` to `false`, omit `data`, include `error: { code, message, details? }`, and return a non-zero exit status. Warnings use `{ code, message, details? }`. Codes are stable within schema version 1.
 
-Lifecycle errors include stable codes for invalid/unsupported manifests, invalid or conflicting local runtimes, failed runtime installation or execution, required upgrades, conflicts, unsafe paths, destination races, transaction rollback, and unsupported downgrades. Orchestration errors identify invalid state/logs, state-log mismatch, held locks, invalid tasks or transitions, stale revisions, missing evidence, and checkpoint drift. Existing command, App Server, session, and JSON codes remain stable within envelope schema version 1.
+Lifecycle errors include stable codes for invalid/unsupported manifests, invalid or conflicting local runtimes, failed runtime installation or execution, required upgrades, conflicts, unsafe paths, destination races, transaction rollback, and unsupported downgrades. Orchestration errors identify invalid state/logs, state-log mismatch, held locks, invalid tasks or transitions, stale revisions, missing evidence, and checkpoint drift. Recovery errors distinguish invalid bundle structure, corrupted material, existing destinations, required untracked opt-in, and unsupported dirty submodules. Existing command, App Server, session, and JSON codes remain stable within envelope schema version 1.
 
 Warnings identify preserved user state, available upgrades, missing user-owned files, incompatible profiles, unsupported Codex versions, and bounded App Server cleanup fallbacks.
 

@@ -14,7 +14,7 @@ import {
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { parseCheckpointArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs } from "./command-options.js";
+import { parseBundleArgs, parseCheckpointArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs } from "./command-options.js";
 import { compareVersions, parseVersion } from "./compatibility.js";
 import { ERROR_CODES, SynodError } from "./errors.js";
 import { inspectPath, pathType, resolveProjectPath, unsafeAncestor } from "./filesystem.js";
@@ -622,6 +622,10 @@ function directoryArgument(args: string[], cwd: string): string {
   if (command === "checkpoint") {
     const options = parseCheckpointArgs(args.slice(1));
     return path.resolve(cwd, "help" in options ? "." : options.directory);
+  }
+  if (command === "bundle") {
+    const options = parseBundleArgs(args.slice(1));
+    return path.resolve(cwd, "help" in options || options.action === "verify" ? "." : options.directory);
   }
   if (command === "task") {
     const options = parseTaskArgs(args.slice(1));

@@ -1,6 +1,6 @@
 import { errorEnvelope, successEnvelope } from "./contracts.js";
 import type { Warning } from "./contracts.js";
-import { parseCheckpointArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs } from "./command-options.js";
+import { parseBundleArgs, parseCheckpointArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs } from "./command-options.js";
 import type { HelpOptions, LifecycleOptions } from "./command-options.js";
 import { doctorProject } from "./doctor.js";
 import type { DoctorClient, DoctorDependencies } from "./doctor.js";
@@ -20,6 +20,7 @@ import {
 import type { OrchestrationDependencies } from "./orchestration.js";
 import type { UsageClient } from "./usage.js";
 import { isRecord } from "./validation.js";
+import { exportRecoveryBundle, verifyRecoveryBundle } from "./recovery.js";
 
 const HELP = `Synod ${packageVersion}
 
@@ -31,6 +32,8 @@ Usage:
   synod check [directory] [--json]
   synod status [directory] [--explain] [--json]
   synod checkpoint [directory] [--actor <id>] [--message <text>] [--json]
+  synod bundle export <destination> [--cwd <directory>] [--include-untracked] [--json]
+  synod bundle verify <bundle> [--json]
   synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--cwd <directory>] [--json]
   synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
   synod doctor [directory] [--json]
@@ -46,6 +49,7 @@ Commands:
   check       Verify managed-file hashes, ownership, and local project integrity.
   status      Read canonical orchestration state and detect checkpoint drift.
   checkpoint  Accept the current Git/worktree checkpoint in canonical state.
+  bundle      Export or verify a deterministic recovery bundle.
   task        Add tasks and apply validated, revision-aware state transitions.
   doctor      Probe Codex version, App Server, model, and reasoning capabilities.
   uninstall   Remove the local runtime and unchanged managed content; preserve durable state.
@@ -62,6 +66,8 @@ Options:
   --revision  Require the exact task revision for a transition.
   --evidence  Attach evidence to the exact task revision and current checkpoint.
   --explain   Include a read-only path-level delta from the acknowledged checkpoint.
+  --include-untracked
+              Include acknowledged untracked files in a recovery bundle.
   --json      Print a versioned machine-readable success, warning, or error envelope.
   -h, --help  Show help.
   -v, --version
@@ -237,6 +243,46 @@ export async function run(
       const data = { checkpoint: result.checkpoint, lastEvent: result.state.lastEvent };
       if (options.json) output.log(JSON.stringify(successEnvelope("checkpoint", data), null, 2));
       else output.log(`Recorded checkpoint ${result.state.lastEvent.sequence}: ${result.checkpoint.head || "no Git HEAD"}`);
+      return 0;
+    }
+
+    if (command === "bundle") {
+      const options = parseBundleArgs(args.slice(1));
+      if (isHelpOptions(options)) { output.log(HELP); return 0; }
+      if (options.action === "export") {
+        const result = await exportRecoveryBundle(options, dependencies);
+        const data = {
+          destination: result.destination,
+          bundleId: result.bundleId,
+          source: result.manifest.source,
+          checkpoint: result.manifest.checkpoint,
+          includeUntracked: result.manifest.includeUntracked,
+          entries: result.entries,
+          objects: result.objects,
+          bytes: result.bytes,
+          manifest: result.manifest
+        };
+        if (options.json) output.log(JSON.stringify(successEnvelope("bundle", { action: "export", ...data }), null, 2));
+        else {
+          const base = `${result.manifest.source.branch || "detached"}@${result.manifest.source.head || "no HEAD"}`;
+          output.log(`Exported recovery bundle ${result.bundleId} to ${result.destination} (${result.entries} paths, ${result.objects} objects; base ${base}; fingerprint ${result.manifest.checkpoint.fingerprint}; untracked ${result.manifest.includeUntracked ? "included" : "excluded"}).`);
+        }
+      } else {
+        const result = await verifyRecoveryBundle(options);
+        const data = {
+          bundle: result.bundle,
+          bundleId: result.bundleId,
+          source: result.manifest.source,
+          checkpoint: result.manifest.checkpoint,
+          includeUntracked: result.manifest.includeUntracked,
+          entries: result.entries,
+          objects: result.objects,
+          bytes: result.bytes,
+          manifest: result.manifest
+        };
+        if (options.json) output.log(JSON.stringify(successEnvelope("bundle", { action: "verify", ...data }), null, 2));
+        else output.log(`Verified recovery bundle ${result.bundleId} (${result.entries} paths, ${result.objects} objects, ${result.bytes} bytes).`);
+      }
       return 0;
     }
 
