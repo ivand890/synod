@@ -297,6 +297,9 @@ function defaultRunPnpm(directory: string): void {
   const command = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
   const result = spawnSync(command, [
     "install",
+    // Keep package paths inside the directory that is atomically renamed into place.
+    // Windows junctions from pnpm's isolated linker retain the staging path after a rename.
+    "--config.node-linker=hoisted",
     "--ignore-workspace",
     "--ignore-scripts",
     "--prod"
@@ -574,6 +577,7 @@ export async function installLocalRuntime(targetDirectory: string, {
       version: "0.0.0",
       private: true,
       description: "Project-local Synod runtime. Managed by Synod.",
+      packageManager,
       dependencies: { [packageName]: packageSpec }
     }, null, 2)}\n`, { flag: "wx" });
     await writeFile(path.join(stageDirectory, ".gitignore"), "node_modules/\n", { flag: "wx" });

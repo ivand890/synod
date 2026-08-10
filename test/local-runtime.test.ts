@@ -15,7 +15,7 @@ import {
   removeLocalRuntime
 } from "../src/local-runtime.js";
 import type { InstallLocalRuntimeOptions, LocalRuntimeInspection } from "../src/local-runtime.js";
-import { packageName, packageVersion } from "../src/package.js";
+import { packageManager, packageName, packageVersion } from "../src/package.js";
 import { isRecord } from "../src/validation.js";
 
 const temporaryDirectories = new Set<string>();
@@ -121,6 +121,7 @@ test("installs an exact project-local runtime and deterministic descriptor", asy
   });
   const runtimePackage = JSON.parse(await readFile(path.join(directory, LOCAL_RUNTIME_DIRECTORY, "package.json"), "utf8"));
   assert.equal(runtimePackage.dependencies[packageName], packageVersion);
+  assert.equal(runtimePackage.packageManager, packageManager);
   assert.equal(await readFile(path.join(directory, LOCAL_RUNTIME_DIRECTORY, ".gitignore"), "utf8"), "node_modules/\n");
   assert.match(await readFile(path.join(directory, LOCAL_RUNTIME_DIRECTORY, "pnpm-lock.yaml"), "utf8"), /lockfileVersion/);
 });
