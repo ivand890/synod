@@ -78,6 +78,12 @@ test("handoff derives focus, current evidence, blockers, gates, and legal transi
   await add(directory, "T-ACTIVE");
   await activate(directory, "T-ACTIVE");
 
+  await add(directory, "T-CORRECTION");
+  await activate(directory, "T-CORRECTION");
+  await review(directory, "T-CORRECTION");
+  await transitionTask({ directory, id: "T-CORRECTION", to: "ACCEPTED", revision: 1, evidence: ["acceptance:T-CORRECTION:r1"] });
+  await transitionTask({ directory, id: "T-CORRECTION", to: "ACTIVE", revision: 1, evidence: ["correction:T-CORRECTION:r1"] });
+
   await add(directory, "T-REVIEW");
   await activate(directory, "T-REVIEW");
   await review(directory, "T-REVIEW");
@@ -113,7 +119,9 @@ test("handoff derives focus, current evidence, blockers, gates, and legal transi
 
   assert.equal(handoff.checkpoint.drift.detected, false);
   assert.equal(handoff.recoveryBundle.status, "not-supplied");
-  assert.deepEqual(handoff.focusTaskIds, ["T-ACTIVE", "T-REVIEW", "T-ACCEPTED", "T-VERIFIED", "T-BLOCKED"]);
+  assert.deepEqual(handoff.focusTaskIds, ["T-ACTIVE", "T-CORRECTION", "T-REVIEW", "T-ACCEPTED", "T-VERIFIED", "T-BLOCKED"]);
+  assert.deepEqual(byId.get("T-CORRECTION")?.evidence.acceptance, []);
+  assert.equal(byId.get("T-CORRECTION")?.acceptance.unresolved, true);
   assert.deepEqual(byId.get("T-REVIEW")?.evidence.acceptance, []);
   assert.deepEqual(byId.get("T-REVIEW")?.evidence.delivery.map(item => item.reference), ["delivery:T-REVIEW:r2"]);
   assert.equal(byId.get("T-REVIEW")?.acceptance.unresolved, true);

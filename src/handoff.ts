@@ -74,6 +74,11 @@ function currentEvidence(task: OrchestrationTask, kind: TaskEvidence["kind"]): T
   return task.evidence.filter(item => item.kind === kind && item.revision === task.revision);
 }
 
+function gateEvidence(task: OrchestrationTask, evidenceIds: readonly string[]): TaskEvidence[] {
+  const byId = new Map(task.evidence.map(item => [item.id, item]));
+  return evidenceIds.map(id => byId.get(id)!);
+}
+
 function handoffTask(
   task: OrchestrationTask,
   tasks: Readonly<Record<string, OrchestrationTask>>
@@ -96,8 +101,8 @@ function handoffTask(
     verification: { ...task.verification, unresolved: task.verification.status !== "passed" },
     evidence: {
       delivery: currentEvidence(task, "delivery"),
-      acceptance: currentEvidence(task, "acceptance"),
-      verification: currentEvidence(task, "verification")
+      acceptance: gateEvidence(task, task.acceptance.evidenceIds),
+      verification: gateEvidence(task, task.verification.evidenceIds)
     },
     legalNextTransitions: legalTaskTransitions(task, tasks)
   };
