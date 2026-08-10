@@ -792,14 +792,19 @@ export async function createInitialOrchestrationFiles(
   ]);
 }
 
+export type CheckpointSnapshotAdoption =
+  | { status: "current" }
+  | { status: "unavailable" }
+  | { status: "adopted"; files: Map<string, string> };
+
 export async function createCheckpointSnapshotAdoptionFiles(
   targetDirectory: string,
   dependencies: OrchestrationDependencies = {}
-): Promise<Map<string, string> | undefined> {
+): Promise<CheckpointSnapshotAdoption> {
   const { state } = await validateOrchestrationReadOnly({ directory: targetDirectory });
-  if (state.checkpoint.worktree.snapshot) return undefined;
+  if (state.checkpoint.worktree.snapshot) return { status: "current" };
   const captured = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
-  if (checkpointDrift(state.checkpoint, captured.checkpoint).detected) return undefined;
+  if (checkpointDrift(state.checkpoint, captured.checkpoint).detected) return { status: "unavailable" };
   const nextCore: OrchestrationStateCore = {
     ...stateCore(state),
     updatedAt: captured.checkpoint.capturedAt,
@@ -811,12 +816,15 @@ export async function createCheckpointSnapshotAdoptionFiles(
     payload: { source: "legacy-checkpoint" }
   });
   const existingEvents = await readRecord(targetDirectory, ORCHESTRATION_EVENTS_PATH);
-  return new Map([
-    [ORCHESTRATION_STATE_PATH, serializeJson(nextState)],
-    [ORCHESTRATION_EVENTS_PATH, `${existingEvents}${existingEvents.endsWith("\n") ? "" : "\n"}${JSON.stringify(event)}\n`],
-    [ORCHESTRATION_STATUS_PATH, renderStatusMarkdown(nextState)],
-    [CHECKPOINT_SNAPSHOT_PATH, serializeCheckpointSnapshot(captured.snapshot)]
-  ]);
+  return {
+    status: "adopted",
+    files: new Map([
+      [ORCHESTRATION_STATE_PATH, serializeJson(nextState)],
+      [ORCHESTRATION_EVENTS_PATH, `${existingEvents}${existingEvents.endsWith("\n") ? "" : "\n"}${JSON.stringify(event)}\n`],
+      [ORCHESTRATION_STATUS_PATH, renderStatusMarkdown(nextState)],
+      [CHECKPOINT_SNAPSHOT_PATH, serializeCheckpointSnapshot(captured.snapshot)]
+    ])
+  };
 }
 
 function invalidState(message: string, details?: unknown): never {

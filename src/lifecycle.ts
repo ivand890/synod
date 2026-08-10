@@ -564,7 +564,11 @@ export async function upgradeProject(
   for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, orchestrationDependencies)) {
     templates.files.set(relativePath, content);
   }
-  for (const [relativePath, content] of checkpointAdoption || []) templates.files.set(relativePath, content);
+  if (checkpointAdoption?.status === "adopted") {
+    for (const [relativePath, content] of checkpointAdoption.files) templates.files.set(relativePath, content);
+  } else if (checkpointAdoption?.status === "unavailable") {
+    templates.files.delete(CHECKPOINT_SNAPSHOT_PATH);
+  }
   const nextEntries = new Map<string, ManifestEntry>();
   const operations: TransactionOperation[] = [];
   const states: LifecycleState[] = [];
@@ -605,7 +609,7 @@ export async function upgradeProject(
 
     if (inspected.type === "unsafe" || (inspected.type !== "missing" && inspected.type !== "file")) {
       state = { path: relativePath, conflict: true };
-    } else if (checkpointAdoption?.has(relativePath)) {
+    } else if (checkpointAdoption?.status === "adopted" && checkpointAdoption.files.has(relativePath)) {
       ownership = "record";
       if (inspected.type === "file" && normalizeText(inspected.content) === normalizeText(templateContent)) {
         state = { path: relativePath, action: "unchanged" };
@@ -630,6 +634,8 @@ export async function upgradeProject(
       ) {
         warnings.push(preservedGuidanceWarning(relativePath));
       }
+    } else if (!old && ownership === "record" && inspected.type === "file") {
+      state = { path: relativePath, action: "preserve" };
     } else if (inspected.type === "missing") {
       if (old && !force) state = { path: relativePath, conflict: true };
       else {
@@ -664,7 +670,7 @@ export async function upgradeProject(
       continue;
     }
     const installedHash = ownership === "record"
-      ? checkpointAdoption?.has(relativePath)
+      ? checkpointAdoption?.status === "adopted" && checkpointAdoption.files.has(relativePath)
         ? contentHash(templateContent)
         : old?.contentHash || inspectionHash(inspected) || contentHash(templateContent)
       : ownership === "user"
@@ -676,7 +682,7 @@ export async function upgradeProject(
   for (const old of installed.files) {
     if (old.path === "AGENTS.md" || templates.files.has(old.path) || nextEntries.has(old.path)) continue;
     const inspected = await inspectManagedPath(targetDirectory, old.path);
-    if (old.ownership === "user") {
+    if (old.ownership === "user" || old.ownership === "record") {
       states.push({ path: old.path, action: "preserve" });
       nextEntries.set(old.path, old);
     } else if (inspected.type === "missing") {
@@ -813,7 +819,7 @@ export async function checkProject({ directory = "." }: { directory?: string } =
     });
   }
 
-  const orchestrationRecordsPresent = ORCHESTRATION_RECORD_PATHS.every(relativePath =>
+  const orchestrationRecordsPresent = [ORCHESTRATION_STATE_PATH, ORCHESTRATION_EVENTS_PATH, ORCHESTRATION_STATUS_PATH].every(relativePath =>
     checks.some(check => check.path === relativePath && check.status === "recorded")
   );
   if (orchestrationRecordsPresent) {
