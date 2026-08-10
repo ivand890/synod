@@ -32,6 +32,8 @@ jobs:
           package-manager-cache: false
       - name: Enable pnpm
         run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
       - name: Verify release identity
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -90,7 +92,7 @@ jobs:
             if ! git fetch --force --tags origin; then release_state_ready=false; fi
             if ! npm_latest="$(npm view @ivand890/synod dist-tags.latest --prefer-online)"; then release_state_ready=false; fi
             if [ "$release_state_ready" = "true" ] && ! github_latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"; then release_state_ready=false; fi
-            if [ "$release_state_ready" = "true" ] && ! next_release_tag="$(node scripts/next-release-tag.js "$npm_latest")"; then release_state_ready=false; fi
+            if [ "$release_state_ready" = "true" ] && ! next_release_tag="$(pnpm exec tsx scripts/next-release-tag.ts "$npm_latest")"; then release_state_ready=false; fi
             if [ "$release_state_ready" = "true" ] && [ "$github_latest_tag" = "v$npm_latest" ] && [ "$RELEASE_TAG" = "$next_release_tag" ]; then
               exit 0
             fi

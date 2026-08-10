@@ -226,12 +226,15 @@ The supervisor does not perform routine implementation. It may make only a minim
 ## Development
 
 ```bash
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm build
 pnpm test
 pnpm test:package
 pnpm test:codex-compatibility # requires explicit SYNOD_EXPECTED_* environment values
 pnpm pack --pack-destination dist
 ```
 
-CI runs the installed-package smoke on Ubuntu, macOS, and Windows.
+Source uses strict TypeScript 7 with explicit `.js` ESM specifiers and compiles into `dist`; published consumers execute JavaScript and do not need TypeScript. CI exercises the installed tarball on Node 20, 22, and 24 on Ubuntu, plus Node 24 on macOS and Windows.
 
 Every change lands through a pull request with required CI. Protected `vX.Y.Z` tags publish both npm and GitHub releases, with exact-commit and `latest` parity enforced before the workflow succeeds; see [RELEASING.md](RELEASING.md).
