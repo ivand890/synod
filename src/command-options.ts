@@ -27,6 +27,12 @@ export interface CheckpointOptions {
   message?: string;
 }
 
+export interface HandoffCommandOptions {
+  directory: string;
+  json: boolean;
+  bundle?: string;
+}
+
 export interface BundleExportCommandOptions {
   action: "export";
   directory: string;
@@ -164,6 +170,35 @@ export function parseCheckpointArgs(args: string[]): CheckpointOptions | HelpOpt
     } else if (arg.startsWith("-")) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
     } else if (hasDirectory || options.directory !== ".") {
+      throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
+    } else {
+      options.directory = arg;
+      hasDirectory = true;
+    }
+  }
+  return options;
+}
+
+export function parseHandoffArgs(args: string[]): HandoffCommandOptions | HelpOptions {
+  const options: HandoffCommandOptions = { directory: ".", json: false };
+  let hasDirectory = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) continue;
+    if (arg === "-h" || arg === "--help") return { help: true };
+    if (arg === "--json") options.json = true;
+    else if (arg === "--bundle" || arg === "--cwd") {
+      const value = optionValue(args, index, arg);
+      if (arg === "--bundle") options.bundle = value;
+      else {
+        if (hasDirectory) throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, "Handoff received more than one project directory.");
+        options.directory = value;
+        hasDirectory = true;
+      }
+      index += 1;
+    } else if (arg.startsWith("-")) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
+    } else if (hasDirectory) {
       throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
     } else {
       options.directory = arg;

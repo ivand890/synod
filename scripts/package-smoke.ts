@@ -268,6 +268,23 @@ try {
   ) {
     throw new Error(`Installed CLI failed its bundle restore smoke: ${restoreOutput}`);
   }
+  const handoffOutput = runSynod(["handoff", targetDirectory, "--bundle", bundleDirectory, "--json"], {
+    cwd: consumerDirectory,
+    capture: true,
+  });
+  const handoffEnvelope = jsonRecord(handoffOutput, "handoff envelope");
+  const handoffData = nestedRecord(handoffEnvelope, "data", "handoff envelope");
+  const handoffCheckpoint = nestedRecord(handoffData, "checkpoint", "handoff envelope.data");
+  const handoffDrift = nestedRecord(handoffCheckpoint, "drift", "handoff envelope.data.checkpoint");
+  const handoffBundle = nestedRecord(handoffData, "recoveryBundle", "handoff envelope.data");
+  if (
+    handoffEnvelope.ok !== true
+    || handoffDrift.detected !== false
+    || handoffBundle.status !== "verified"
+    || handoffBundle.bundleId !== exportData.bundleId
+  ) {
+    throw new Error(`Installed CLI failed its canonical handoff smoke: ${handoffOutput}`);
+  }
   const statusOutput = runSynod(["status", targetDirectory, "--json"], {
     cwd: consumerDirectory,
     capture: true,

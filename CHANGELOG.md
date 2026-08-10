@@ -6,13 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-10
+
 ### Added
 
 - Added a hash-bound canonical checkpoint snapshot and read-only `status --explain` text/JSON output for committed, staged, unstaged, untracked, deleted, renamed, resolved, and binary path changes.
+- Added deterministic local recovery bundles with exact manifest/object verification, explicit untracked-file opt-in, and checkpoint-bound export.
+- Added transactional recovery into fresh exact-base checkouts, including staged and unstaged content, renames, deletions, binary files, modes, symlinks, and opted-in untracked files.
+- Added read-only `handoff` text/JSON output derived from canonical tasks, exact-revision evidence, blockers, approval gates, legal transitions, live checkpoint delta, and an optional verified recovery bundle.
 
 ### Security
 
 - Checkpoint snapshot tampering, missing historical detail, and unavailable Git bases now fail closed with stable error codes; checkpoint state, event, Markdown, and snapshot updates recover through one pending transaction.
+- Recovery rejects corrupt or incomplete objects, unsafe and colliding paths, wrong bases, dirty destinations, dirty submodules, intent-to-add entries, and concurrent Git index mutation before it can silently accept partial state.
+- Restore journals the prior index and every affected path, holds Git's standard index lock at publication, validates the reconstructed fingerprint, and rolls back ordinary or interrupted failures without overwriting externally changed content.
 
 ## [0.6.3] - 2026-08-10
 
@@ -132,7 +139,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/ivand890/synod/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/ivand890/synod/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/ivand890/synod/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/ivand890/synod/compare/v0.6.0...v0.6.1
