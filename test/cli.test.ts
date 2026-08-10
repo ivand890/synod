@@ -439,3 +439,13 @@ test("bundle export and verify expose schema-1 JSON success and corruption error
     await rm(parent, { recursive: true, force: true });
   }
 });
+
+test("bundle restore requires an explicit destination checkout", async () => {
+  const { messages, output } = capturedOutput();
+  const code = await run(["bundle", "restore", "recovery.bundle", "--json"], output);
+  const envelope = JSON.parse(takeMessage(messages));
+  assert.equal(code, 1);
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error.code, ERROR_CODES.UNEXPECTED_ARGUMENT);
+  assert.equal(envelope.error.details.option, "--cwd");
+});

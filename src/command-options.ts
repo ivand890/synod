@@ -184,6 +184,7 @@ export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOpti
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Bundle ${action} is missing its required path.`);
   }
   let directory = ".";
+  let hasDirectory = false;
   let json = false;
   let includeUntracked = false;
   for (let index = 2; index < args.length; index += 1) {
@@ -194,6 +195,7 @@ export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOpti
     else if (arg === "--include-untracked" && action === "export") includeUntracked = true;
     else if (arg === "--cwd" && (action === "export" || action === "restore")) {
       directory = optionValue(args, index, arg);
+      hasDirectory = true;
       index += 1;
     } else if (arg.startsWith("-")) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
@@ -202,7 +204,14 @@ export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOpti
     }
   }
   if (action === "export") return { action, directory, destination: positional, includeUntracked, json };
-  if (action === "restore") return { action, bundle: positional, directory, json };
+  if (action === "restore") {
+    if (!hasDirectory) {
+      throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, "Bundle restore requires --cwd <directory>.", {
+        details: { option: "--cwd" }
+      });
+    }
+    return { action, bundle: positional, directory, json };
+  }
   return { action, bundle: positional, json };
 }
 

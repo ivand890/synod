@@ -141,9 +141,22 @@ function isHash(value: unknown): value is string {
   return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
+function hasUnpairedSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true;
+      index += 1;
+    } else if (code >= 0xDC00 && code <= 0xDFFF) return true;
+  }
+  return false;
+}
+
 function isSafeRelativePath(value: unknown): value is string {
   if (typeof value !== "string"
     || value.length === 0
+    || hasUnpairedSurrogate(value)
     || value !== value.normalize("NFC")
     || value === "."
     || value.includes("\0")
@@ -252,6 +265,9 @@ async function runGit(directory: string, args: string[], options: GitRunOptions 
     });
     child.stderr.on("data", chunk => stderr.push(Buffer.from(chunk)));
     child.on("error", reject);
+    // Git can close the pipe before draining stdin. The close handler below
+    // reports the command failure without allowing an EPIPE to escape.
+    child.stdin.on("error", () => {});
     child.on("close", code => {
       if (code === 0 && size <= MAX_GIT_OUTPUT) resolve(Buffer.concat(stdout));
       else reject(new Error(Buffer.concat(stderr).toString("utf8").trim() || `Git exited with status ${code}.`));
@@ -393,17 +409,28 @@ function expectedCheckpointEntries(
   manifest: RecoveryManifest,
   objectIds: Map<string, string[]>
 ): CheckpointEntry[] {
-  return manifest.entries.map(entry => ({
-    status: entry.status,
-    path: entry.path,
-    ...(entry.sourcePath ? { sourcePath: entry.sourcePath } : {}),
-    type: entry.worktree.type,
-    ...(entry.worktree.object ? { contentHash: entry.worktree.object } : {}),
-    ...(entry.binary ? { binary: true } : {}),
-    ...(expectedIndex(entry, entry.index, objectIds.get(entry.path) || [])
-      ? { index: expectedIndex(entry, entry.index, objectIds.get(entry.path) || [])! }
-      : {})
-  })).sort((left, right) => compareCheckpointPaths(`${left.path}\0${left.sourcePath || ""}`, `${right.path}\0${right.sourcePath || ""}`));
+  return manifest.entries.map(entry => {
+    const index = expectedIndex(entry, entry.index, objectIds.get(entry.path) || []);
+    return {
+      status: entry.status,
+      path: entry.path,
+      ...(entry.sourcePath ? { sourcePath: entry.sourcePath } : {}),
+      type: entry.worktree.type,
+      ...(entry.worktree.object ? { contentHash: entry.worktree.object } : {}),
+      ...(entry.binary ? { binary: true } : {}),
+      ...(index ? { index } : {})
+    };
+  }).sort((left, right) => compareCheckpointPaths(`${left.path}\0${left.sourcePath || ""}`, `${right.path}\0${right.sourcePath || ""}`));
+}
+
+function hasWorktreeRename(status: string): boolean {
+  return status.includes("R");
+}
+
+function hasIndexRename(status: string): boolean {
+  // Only the first porcelain lane mutates the index. An unstaged ` R`
+  // rename removes the source from the worktree while retaining it in index.
+  return status[0] === "R";
 }
 
 function fingerprint(entries: CheckpointEntry[]): string {
@@ -462,7 +489,7 @@ async function buildPlans(
         content: full.content
       });
     }
-    if (entry.sourcePath && entry.status.includes("R")) addPlan(entry.sourcePath, { type: "missing", mode: null });
+    if (entry.sourcePath && hasWorktreeRename(entry.status)) addPlan(entry.sourcePath, { type: "missing", mode: null });
   }
   return {
     paths: [...plans.entries()].map(([relativePath, desired]) => ({ path: relativePath, desired }))
@@ -547,7 +574,7 @@ async function buildTemporaryIndex(
   const records: string[] = [];
   for (const entry of manifest.entries) {
     records.push(`0 ${zero}\t${entry.path}\0`);
-    if (entry.sourcePath && entry.status[0] === "R") records.push(`0 ${zero}\t${entry.sourcePath}\0`);
+    if (entry.sourcePath && hasIndexRename(entry.status)) records.push(`0 ${zero}\t${entry.sourcePath}\0`);
     const ids = objectIds.get(entry.path) || [];
     for (const [position, item] of entry.index.entries()) {
       records.push(item.stage === 0
@@ -600,44 +627,49 @@ async function createJournal(
   const backupDirectory = `synod-recovery-${id}`;
   const backupPath = path.join(path.dirname(locations.journalPath), backupDirectory);
   await mkdir(backupPath, { mode: 0o700 });
-  await mkdir(path.join(backupPath, "objects"), { mode: 0o700 });
-  const originalIndex = await regularFileBytes(locations.indexPath, "Git index");
-  const indexStats = await lstat(locations.indexPath);
-  if (!indexStats.isFile() || indexStats.isSymbolicLink()) {
-    throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "The Git index must be a real regular file.");
-  }
-  await writeDurable(path.join(backupPath, "index"), originalIndex);
-  const journalPaths: JournalPath[] = [];
-  const written = new Set<string>();
-  for (const plan of plans) {
-    const original = await inspectMaterial(directory, plan.path);
-    const originalDescriptor = materialDescriptor(original);
-    if (original.content && originalDescriptor.object && !written.has(originalDescriptor.object)) {
-      await writeDurable(path.join(backupPath, "objects", originalDescriptor.object.slice("sha256:".length)), original.content);
-      written.add(originalDescriptor.object);
-    }
-    journalPaths.push({ path: plan.path, original: originalDescriptor, desired: materialDescriptor(plan.desired) });
-  }
-  const journal: RestoreJournal = {
-    schemaVersion: RESTORE_JOURNAL_SCHEMA_VERSION,
-    id,
-    bundleId: manifest.bundleId,
-    baseHead: manifest.source.head!,
-    backupDirectory,
-    indexMode: indexStats.mode & 0o777,
-    originalIndexHash: hashBytes(originalIndex),
-    desiredIndexHash: hashBytes(desiredIndex),
-    paths: journalPaths,
-    createdDirectories: await anticipatedDirectories(directory, plans)
-  };
-  const temporary = path.join(path.dirname(locations.journalPath), `.${RESTORE_JOURNAL_NAME}.${id}`);
   try {
-    await writeDurable(temporary, serialize(journal));
-    await link(temporary, locations.journalPath);
-  } finally {
-    await unlink(temporary).catch(() => {});
+    await mkdir(path.join(backupPath, "objects"), { mode: 0o700 });
+    const originalIndex = await regularFileBytes(locations.indexPath, "Git index");
+    const indexStats = await lstat(locations.indexPath);
+    if (!indexStats.isFile() || indexStats.isSymbolicLink()) {
+      throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "The Git index must be a real regular file.");
+    }
+    await writeDurable(path.join(backupPath, "index"), originalIndex);
+    const journalPaths: JournalPath[] = [];
+    const written = new Set<string>();
+    for (const plan of plans) {
+      const original = await inspectMaterial(directory, plan.path);
+      const originalDescriptor = materialDescriptor(original);
+      if (original.content && originalDescriptor.object && !written.has(originalDescriptor.object)) {
+        await writeDurable(path.join(backupPath, "objects", originalDescriptor.object.slice("sha256:".length)), original.content);
+        written.add(originalDescriptor.object);
+      }
+      journalPaths.push({ path: plan.path, original: originalDescriptor, desired: materialDescriptor(plan.desired) });
+    }
+    const journal: RestoreJournal = {
+      schemaVersion: RESTORE_JOURNAL_SCHEMA_VERSION,
+      id,
+      bundleId: manifest.bundleId,
+      baseHead: manifest.source.head!,
+      backupDirectory,
+      indexMode: indexStats.mode & 0o777,
+      originalIndexHash: hashBytes(originalIndex),
+      desiredIndexHash: hashBytes(desiredIndex),
+      paths: journalPaths,
+      createdDirectories: await anticipatedDirectories(directory, plans)
+    };
+    const temporary = path.join(path.dirname(locations.journalPath), `.${RESTORE_JOURNAL_NAME}.${id}`);
+    try {
+      await writeDurable(temporary, serialize(journal));
+      await link(temporary, locations.journalPath);
+    } finally {
+      await unlink(temporary).catch(() => {});
+    }
+    return { journal, journalPath: locations.journalPath, backupPath, indexPath: locations.indexPath };
+  } catch (error) {
+    await rm(backupPath, { recursive: true, force: true }).catch(() => {});
+    throw error;
   }
-  return { journal, journalPath: locations.journalPath, backupPath, indexPath: locations.indexPath };
 }
 
 async function atomicFile(
@@ -787,6 +819,31 @@ async function rollbackJournal(directory: string, context: JournalContext): Prom
   await rm(context.backupPath, { recursive: true, force: true }).catch(() => {});
 }
 
+async function journalMatchesDesired(directory: string, context: JournalContext): Promise<boolean> {
+  try {
+    if (hashBytes(await regularFileBytes(context.indexPath, "Git index")) !== context.journal.desiredIndexHash) return false;
+    for (const entry of context.journal.paths) {
+      if (!descriptorMatches(await inspectMaterial(directory, entry.path), entry.desired)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function cleanupVerifiedJournal(context: JournalContext): Promise<void> {
+  try {
+    await unlink(context.journalPath);
+  } catch (error) {
+    throw new SynodError(
+      ERROR_CODES.RECOVERY_RESTORE_FAILED,
+      "Recovery matched the bundled checkpoint, but its journal could not be removed; rerun the same restore to finish cleanup.",
+      { cause: error, details: { journal: context.journalPath } }
+    );
+  }
+  await rm(context.backupPath, { recursive: true, force: true }).catch(() => {});
+}
+
 async function readJournal(directory: string, locations: { journalPath: string; indexPath: string }): Promise<JournalContext | undefined> {
   const type = await pathType(locations.journalPath);
   if (type === "missing") return undefined;
@@ -851,6 +908,20 @@ export async function restoreRecoveryBundle(
     const interrupted = await readJournal(targetDirectory, locations);
     let recoveredInterruptedRestore = false;
     if (interrupted) {
+      if (interrupted.journal.bundleId === manifest.bundleId && await journalMatchesDesired(targetDirectory, interrupted)) {
+        const completed = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
+        if (completed.checkpoint.head === manifest.source.head
+          && completed.checkpoint.worktree.fingerprint === manifest.checkpoint.fingerprint) {
+          await cleanupVerifiedJournal(interrupted);
+          return {
+            ...verification,
+            destination: targetDirectory,
+            baseHead: manifest.source.head!,
+            fingerprint: manifest.checkpoint.fingerprint,
+            recoveredInterruptedRestore: true
+          };
+        }
+      }
       await rollbackJournal(targetDirectory, interrupted);
       recoveredInterruptedRestore = true;
     }
@@ -900,7 +971,17 @@ export async function restoreRecoveryBundle(
           targetDirectory,
           plan.path,
           plan.desired,
-          () => dependencies.restoreHook?.("before-path-install", plan.path)
+          async () => {
+            await dependencies.restoreHook?.("before-path-install", plan.path);
+            const boundary = await inspectMaterial(targetDirectory, plan.path);
+            if (!descriptorMatches(boundary, journalPath.original)) {
+              throw new SynodError(
+                ERROR_CODES.RECOVERY_DESTINATION_DIRTY,
+                "A destination path changed at the recovery installation boundary.",
+                { details: { path: plan.path } }
+              );
+            }
+          }
         );
         await dependencies.restoreHook?.("after-path", plan.path);
       }
@@ -919,9 +1000,8 @@ export async function restoreRecoveryBundle(
         });
       }
       const committed = context;
-      await unlink(committed.journalPath);
       context = undefined;
-      await rm(committed.backupPath, { recursive: true, force: true }).catch(() => {});
+      await cleanupVerifiedJournal(committed);
       return {
         ...verification,
         destination: targetDirectory,
@@ -945,7 +1025,8 @@ export async function restoreRecoveryBundle(
         ERROR_CODES.RECOVERY_BASE_MISMATCH,
         ERROR_CODES.RECOVERY_DESTINATION_DIRTY,
         ERROR_CODES.RECOVERY_BUNDLE_INVALID,
-        ERROR_CODES.RECOVERY_BUNDLE_CORRUPT
+        ERROR_CODES.RECOVERY_BUNDLE_CORRUPT,
+        ERROR_CODES.RECOVERY_RESTORE_FAILED
       ].includes(error.code as never)) throw error;
       throw new SynodError(ERROR_CODES.RECOVERY_RESTORE_FAILED, `Synod rolled back a failed recovery restore: ${errorMessage(error)}`, {
         cause: error

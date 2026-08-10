@@ -1384,10 +1384,15 @@ export async function withOrchestrationLock<Result>(
   action: () => Promise<Result>
 ): Promise<Result> {
   const release = await acquireLock(targetDirectory);
+  let actionFailed = false;
   try {
     return await action();
+  } catch (error) {
+    actionFailed = true;
+    throw error;
   } finally {
-    await release();
+    if (actionFailed) await release().catch(() => {});
+    else await release();
   }
 }
 

@@ -175,9 +175,22 @@ function isHash(value: unknown): value is string {
   return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
+function hasUnpairedSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xDC00 && next <= 0xDFFF)) return true;
+      index += 1;
+    } else if (code >= 0xDC00 && code <= 0xDFFF) return true;
+  }
+  return false;
+}
+
 function isSafePath(value: unknown): value is string {
   if (typeof value !== "string") return false;
   if (value.length === 0
+    || hasUnpairedSurrogate(value)
     || value !== value.normalize("NFC")
     || value === "."
     || value.includes("\0")
@@ -195,19 +208,23 @@ function isSafePath(value: unknown): value is string {
 }
 
 function validatePathSet(entries: RecoveryEntry[]): void {
+  // Copy sources are references, not filesystem ownership. One source can be
+  // copied to several destinations and can also appear as its own entry.
+  const ownedPaths = entries.flatMap(entry => [
+    entry.path,
+    ...(entry.sourcePath && entry.status.includes("R") ? [entry.sourcePath] : [])
+  ]);
   const exact = new Set<string>();
   const folded = new Map<string, string>();
-  for (const entry of entries) {
-    for (const relativePath of [entry.path, entry.sourcePath].filter((item): item is string => Boolean(item))) {
-      if (exact.has(relativePath)) invalid("Recovery bundle paths and rename sources must be unique.", { path: relativePath });
-      exact.add(relativePath);
-      const key = relativePath.normalize("NFC").toLowerCase();
-      const prior = folded.get(key);
-      if (prior && prior !== relativePath) {
-        invalid("Recovery bundle paths collide under case-insensitive normalization.", { paths: [prior, relativePath] });
-      }
-      folded.set(key, relativePath);
+  for (const relativePath of ownedPaths) {
+    if (exact.has(relativePath)) invalid("Recovery bundle destinations and rename sources must be unique.", { path: relativePath });
+    exact.add(relativePath);
+    const key = relativePath.normalize("NFC").toLowerCase();
+    const prior = folded.get(key);
+    if (prior && prior !== relativePath) {
+      invalid("Recovery bundle paths collide under case-insensitive normalization.", { paths: [prior, relativePath] });
     }
+    folded.set(key, relativePath);
   }
   const sorted = [...exact].sort(compareCheckpointPaths);
   for (const relativePath of sorted) {
@@ -261,7 +278,7 @@ function validateEntry(value: unknown): RecoveryEntry {
     || !isSafePath(value.path)
     || (value.sourcePath !== undefined && (!isSafePath(value.sourcePath) || value.sourcePath === value.path))
     || typeof value.status !== "string"
-    || !/^[ MADRCUT?!]{2}$/.test(value.status)
+    || !(value.status === "??" || (/^[ MADRCUT]{2}$/.test(value.status) && value.status !== "  "))
     || typeof value.binary !== "boolean"
     || typeof value.filtered !== "boolean"
     || !Array.isArray(value.index)) {
@@ -285,7 +302,7 @@ function validateEntry(value: unknown): RecoveryEntry {
   if (value.sourcePath !== undefined && !value.status.includes("R") && !value.status.includes("C")) {
     invalid("Recovery rename metadata does not match the path status.", { path: value.path });
   }
-  if (value.status === "??" && (index.length > 0 || worktree.type === "missing" || value.sourcePath !== undefined)) {
+  if (value.status === "??" && (index.length > 0 || !["file", "symlink"].includes(worktree.type) || value.sourcePath !== undefined)) {
     invalid("Recovery untracked metadata is inconsistent.", { path: value.path });
   }
   if (value.filtered && (index.some(item => item.mode === "120000") || worktree.type === "symlink")) {

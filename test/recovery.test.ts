@@ -11,7 +11,7 @@ import { initProject } from "../src/lifecycle.js";
 import { captureGitCheckpointSnapshot, recordCheckpoint } from "../src/orchestration.js";
 import { exportRecoveryBundle, verifyRecoveryBundle } from "../src/recovery.js";
 import { restoreRecoveryBundle } from "../src/restore.js";
-import { stableCheckpointStringify } from "../src/checkpoint.js";
+import { compareCheckpointPaths, stableCheckpointStringify } from "../src/checkpoint.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories = new Set<string>();
@@ -148,6 +148,29 @@ test("exports and verifies deterministic mixed dirty-state bundles without chang
   assert.equal(await git(directory, "rev-parse", "HEAD"), before.head);
   assert.equal(await git(directory, "for-each-ref", "--format=%(refname)%00%(objectname)"), before.refs);
   assert.equal(await git(directory, "remote", "-v"), before.remotes);
+});
+
+test("verification allows several copy destinations to reference one owned source path", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "copies.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  await rewriteManifest(bundle, manifest => {
+    const renamed = manifest.entries.find((entry: any) => entry.status.includes("R") && entry.sourcePath);
+    assert.ok(renamed);
+    for (const destination of ["copy-a.txt", "copy-b.txt"]) {
+      manifest.entries.push({ ...structuredClone(renamed), path: destination, status: "C " });
+    }
+    manifest.entries.sort((left: any, right: any) => compareCheckpointPaths(
+      `${left.path}\0${left.sourcePath || ""}`,
+      `${right.path}\0${right.sourcePath || ""}`
+    ));
+  });
+
+  const verified = await verifyRecoveryBundle({ bundle });
+  assert.deepEqual(
+    verified.manifest.entries.filter(entry => entry.status === "C ").map(entry => entry.sourcePath),
+    ["renamed.txt", "renamed.txt"]
+  );
 });
 
 test("transactionally restores a mixed dirty checkpoint into an exact clean base", async () => {
@@ -409,6 +432,33 @@ test("a later restore safely rolls back an interrupted durable journal before re
   await assert.rejects(readFile(await gitPathForTest(destination, "synod-recovery-journal.json")), { code: "ENOENT" });
 });
 
+test("a retry finalizes a fully applied interrupted restore without rolling it back", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "fully-applied.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  const destination = await cloneBase(directory, parent, "fully-applied");
+  const restoreModule = new URL("../src/restore.ts", import.meta.url).href;
+  const script = `
+    import { restoreRecoveryBundle } from ${JSON.stringify(restoreModule)};
+    await restoreRecoveryBundle(
+      { bundle: ${JSON.stringify(bundle)}, directory: ${JSON.stringify(destination)} },
+      { restoreHook(phase) { if (phase === "before-verify") process.exit(79); } }
+    );
+  `;
+  await assert.rejects(
+    execFileAsync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { encoding: "utf8" }),
+    (error: any) => error?.code === 79
+  );
+
+  const restored = await restoreRecoveryBundle({ bundle, directory: destination });
+  assert.equal(restored.recoveredInterruptedRestore, true);
+  assert.equal(
+    stableCheckpointStringify((await captureGitCheckpointSnapshot(destination)).snapshot.entries),
+    stableCheckpointStringify((await captureGitCheckpointSnapshot(directory)).snapshot.entries)
+  );
+  await assert.rejects(readFile(await gitPathForTest(destination, "synod-recovery-journal.json")), { code: "ENOENT" });
+});
+
 test("interrupted rollback preserves concurrent path content and its durable journal", async () => {
   const { directory, parent } = await fixture();
   const bundle = path.join(parent, "concurrent-interrupted.bundle");
@@ -433,6 +483,27 @@ test("interrupted rollback preserves concurrent path content and its durable jou
     { code: ERROR_CODES.RECOVERY_ROLLBACK_FAILED }
   );
   assert.equal(await readFile(path.join(destination, "AGENTS.md"), "utf8"), "Concurrent user content.\n");
+  assert.equal(await pathTypeForTest(await gitPathForTest(destination, "synod-recovery-journal.json")), "file");
+});
+
+test("restore does not overwrite a path changed at its installation boundary", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "concurrent-install.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  const destination = await cloneBase(directory, parent, "concurrent-install");
+  const concurrent = "Concurrent boundary content.\n";
+
+  await assert.rejects(
+    restoreRecoveryBundle({ bundle, directory: destination }, {
+      async restoreHook(phase, relativePath) {
+        if (phase === "before-path-install" && relativePath === "AGENTS.md") {
+          await writeFile(path.join(destination, relativePath), concurrent);
+        }
+      }
+    }),
+    { code: ERROR_CODES.RECOVERY_ROLLBACK_FAILED }
+  );
+  assert.equal(await readFile(path.join(destination, "AGENTS.md"), "utf8"), concurrent);
   assert.equal(await pathTypeForTest(await gitPathForTest(destination, "synod-recovery-journal.json")), "file");
 });
 
@@ -618,6 +689,26 @@ test("verification rejects tampered objects, extra material, traversal, and syml
     const target = path.join(parent, "non-normalized.bundle");
     await cp(canonical, target, { recursive: true });
     await rewriteManifest(target, manifest => { manifest.entries[0].path = "cafe\u0301.txt"; });
+    await assert.rejects(verifyRecoveryBundle({ bundle: target }), { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID });
+  }
+
+  {
+    const target = path.join(parent, "surrogate-alias.bundle");
+    await cp(canonical, target, { recursive: true });
+    await rewriteManifest(target, manifest => { manifest.entries[0].path = "alias\uD800.txt"; });
+    await assert.rejects(verifyRecoveryBundle({ bundle: target }), { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID });
+  }
+
+  {
+    const target = path.join(parent, "ignored-untracked.bundle");
+    await cp(canonical, target, { recursive: true });
+    await rewriteManifest(target, manifest => {
+      const entry = manifest.entries.find((item: any) => item.path === "AGENTS.md");
+      assert.ok(entry);
+      entry.status = "??";
+      entry.index = [];
+      entry.worktree = { type: "ignored", mode: null, object: null };
+    });
     await assert.rejects(verifyRecoveryBundle({ bundle: target }), { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID });
   }
 
