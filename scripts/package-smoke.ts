@@ -121,17 +121,24 @@ try {
   const tarballPath = path.join(temporaryDirectory, filename);
   runtimePackageSpec = tarballPath;
 
+  const repositoryPackage = jsonRecord(readFileSync(path.join(repositoryRoot, "package.json"), "utf8"), "repository package");
+  const expectedVersion = repositoryPackage.version;
+  const packageManager = repositoryPackage.packageManager;
+  if (typeof expectedVersion !== "string" || typeof packageManager !== "string") {
+    throw new Error("Repository package version or package manager is invalid.");
+  }
+
   mkdirSync(targetDirectory, { recursive: true });
-  writeFileSync(path.join(consumerDirectory, "package.json"), '{"private":true}\n');
+  writeFileSync(
+    path.join(consumerDirectory, "package.json"),
+    `${JSON.stringify({ private: true, packageManager })}\n`,
+  );
   run(
     npmExecutable,
     ["install", "--ignore-scripts", "--no-audit", "--no-fund", tarballPath],
     { cwd: consumerDirectory },
   );
 
-  const repositoryPackage = jsonRecord(readFileSync(path.join(repositoryRoot, "package.json"), "utf8"), "repository package");
-  const expectedVersion = repositoryPackage.version;
-  if (typeof expectedVersion !== "string") throw new Error("Repository package version is invalid.");
   const installedVersion = run(synodExecutable, ["--version"], {
     cwd: consumerDirectory,
     capture: true,
