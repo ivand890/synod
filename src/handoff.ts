@@ -169,10 +169,8 @@ export async function generateHandoff(
   { directory = ".", bundle }: HandoffOptions = {},
   dependencies: OrchestrationDependencies = {}
 ): Promise<HandoffResult> {
-  const [status, verification] = await Promise.all([
-    orchestrationStatus({ directory, explain: true, readOnly: true }, dependencies),
-    bundle ? verifyRecoveryBundle({ bundle }) : Promise.resolve(undefined)
-  ]);
+  const status = await orchestrationStatus({ directory, explain: true, readOnly: true }, dependencies);
+  const verification = bundle ? await verifyRecoveryBundle({ bundle }) : undefined;
   if (!status.delta) throw new TypeError("Handoff checkpoint delta is unavailable.");
   const taskMap = Object.fromEntries(status.tasks.map(task => [task.id, task]));
   const tasks = status.tasks

@@ -182,3 +182,11 @@ test("handoff verifies and binds a supplied recovery bundle to the canonical che
     }
   );
 });
+
+test("failed bundle verification awaits handoff status cleanup", async () => {
+  const { directory, parent } = await project();
+  await assert.rejects(generateHandoff({ directory, bundle: path.join(parent, "missing.bundle") }));
+  await add(directory, "T-AFTER-FAILURE");
+  const handoff = await generateHandoff({ directory });
+  assert.deepEqual(handoff.tasks.map(task => task.id), ["T-AFTER-FAILURE"]);
+});
