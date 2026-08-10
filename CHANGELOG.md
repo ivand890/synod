@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Migrated the CLI, lifecycle, orchestration, tests, and release tooling to strict TypeScript 7 while preserving the Node 20/22/24 runtime contract and existing command behavior.
+- Packages now compile ESM into `dist` before packing, retain the JavaScript executable shim and legacy `src/*.js` deep-import surface, and ship no runtime TypeScript source.
+
 ## [0.6.2] - 2026-08-09
 
 ### Fixed

@@ -6,19 +6,31 @@
   "bin": {
     "synod": "bin/synod.js"
   },
+  "exports": {
+    "./src/*.js": {
+      "types": "./dist/*.d.ts",
+      "import": "./dist/*.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "bin/",
-    "src/",
+    "dist/",
     "templates/",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test",
-    "test:integration": "node --test test/cli.test.js",
-    "test:package": "node scripts/package-smoke.js",
-    "test:codex-compatibility": "node scripts/codex-compatibility-smoke.js"
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync(new URL('./dist/', import.meta.url), { recursive: true, force: true })\"",
+    "build": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync(new URL('./dist/', import.meta.url), { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
+    "typecheck": "pnpm build && tsc -p tsconfig.json",
+    "test": "pnpm typecheck && tsx scripts/test-suite.ts",
+    "test:integration": "pnpm typecheck && tsx --test test/cli.test.ts",
+    "test:package": "pnpm build && tsx scripts/package-smoke.ts",
+    "test:codex-compatibility": "pnpm build && tsx scripts/codex-compatibility-smoke.ts",
+    "prepack": "npm run build",
+    "prepare": "npm run build"
   },
   "engines": {
     "node": ">=20"
@@ -42,5 +54,10 @@
   "publishConfig": {
     "access": "public"
   },
-  "packageManager": "pnpm@10.15.1"
+  "packageManager": "pnpm@10.15.1",
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "tsx": "4.23.12",
+    "typescript": "7.0.2"
+  }
 }
