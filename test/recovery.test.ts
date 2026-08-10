@@ -95,10 +95,8 @@ test("exports and verifies deterministic mixed dirty-state bundles without chang
     refs: await git(directory, "for-each-ref", "--format=%(refname)%00%(objectname)"),
     remotes: await git(directory, "remote", "-v")
   };
-  const clock = () => new Date("2026-08-10T18:00:00.000Z");
-
   await assert.rejects(
-    exportRecoveryBundle({ directory, destination: firstDestination }, { clock }),
+    exportRecoveryBundle({ directory, destination: firstDestination }),
     { code: ERROR_CODES.RECOVERY_UNTRACKED_REQUIRED }
   );
   await assert.rejects(readFile(path.join(firstDestination, "manifest.json")), { code: "ENOENT" });
@@ -107,12 +105,12 @@ test("exports and verifies deterministic mixed dirty-state bundles without chang
     directory,
     destination: firstDestination,
     includeUntracked: true
-  }, { clock });
+  });
   const second = await exportRecoveryBundle({
     directory,
     destination: secondDestination,
     includeUntracked: true
-  }, { clock });
+  });
   const verified = await verifyRecoveryBundle({ bundle: firstDestination });
 
   assert.equal(first.bundleId, second.bundleId);

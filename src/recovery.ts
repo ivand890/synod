@@ -130,13 +130,6 @@ function payloadHash(value: RecoveryManifestPayload): string {
   return hashBytes(Buffer.from(stableStringify(value), "utf8"));
 }
 
-function nowIso(clock: RecoveryDependencies["clock"]): string {
-  const value = clock ? clock() : new Date();
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.valueOf())) throw new TypeError("Synod clock returned an invalid date.");
-  return date.toISOString();
-}
-
 function isFilteredPath(relativePath: string): boolean {
   return relativePath === "AGENTS.md" || relativePath === ".codex/config.toml";
 }
@@ -708,7 +701,7 @@ export async function exportRecoveryBundle(
     const payload: RecoveryManifestPayload = {
       schemaVersion: RECOVERY_BUNDLE_SCHEMA_VERSION,
       synodVersion: packageVersion,
-      createdAt: nowIso(dependencies.clock),
+      createdAt: source.snapshot.capturedAt,
       source: { branch: source.state.checkpoint.branch, head: source.state.checkpoint.head },
       checkpoint: {
         fingerprint: source.state.checkpoint.worktree.fingerprint,
