@@ -51,6 +51,7 @@ test("initializes a fresh project with durable state, agents, and skill", async 
   assert.equal(manifest.files.find((item: { path?: unknown }) => manifestEntry(item) === "docs/synod/GOAL.md")?.ownership, "user");
   assert.equal(manifest.files.find((item: { path?: unknown }) => manifestEntry(item) === ".synod/state.json")?.ownership, "record");
   assert.equal(manifest.files.find((item: { path?: unknown }) => manifestEntry(item) === ".synod/events.jsonl")?.ownership, "record");
+  assert.equal(manifest.files.find((item: { path?: unknown }) => manifestEntry(item) === ".synod/checkpoint.json")?.ownership, "record");
   assert.equal(manifest.files.find((item: { path?: unknown }) => manifestEntry(item) === "docs/synod/STATUS.md")?.ownership, "record");
   assert.match(manifest.files.find((item: { path?: unknown }) => manifestEntry(item) === ".codex/config.toml")?.contentHash ?? "", /^sha256:[0-9a-f]{64}$/);
   assert.equal(manifest.files.find((item: { path?: unknown }) => manifestEntry(item) === "AGENTS.md")?.separatorBefore, "");
@@ -58,6 +59,12 @@ test("initializes a fresh project with durable state, agents, and skill", async 
   const expectedFileMode = 0o666 & ~process.umask();
   assert.equal((await stat(path.join(directory, "AGENTS.md"))).mode & 0o777, expectedFileMode);
   assert.equal((await stat(path.join(directory, ".synod/manifest.json"))).mode & 0o777, expectedFileMode);
+
+  const state = JSON.parse(await readFile(path.join(directory, ".synod/state.json"), "utf8"));
+  const checkpointSnapshot = JSON.parse(await readFile(path.join(directory, ".synod/checkpoint.json"), "utf8"));
+  assert.equal(state.checkpoint.worktree.snapshot.path, ".synod/checkpoint.json");
+  assert.equal(state.checkpoint.worktree.snapshot.contentHash, checkpointSnapshot.contentHash);
+  assert.equal(checkpointSnapshot.worktreeFingerprint, state.checkpoint.worktree.fingerprint);
 
   const config = await readFile(path.join(directory, ".codex/config.toml"), "utf8");
   assert.match(config, /default_subagent_model = "gpt-5\.5"/);
@@ -79,7 +86,7 @@ test("is idempotent when generated files are unchanged", async () => {
   assert.equal(second.created.length, 0);
   assert.equal(second.updated.length, 0);
   assert.equal(second.operations.length, 0);
-  assert.equal(second.preserved.length, 8);
+  assert.equal(second.preserved.length, 9);
   assert.equal(second.unchanged.length + second.preserved.length, first.created.length);
 });
 

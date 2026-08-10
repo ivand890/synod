@@ -44,6 +44,7 @@ export type SynodManifest = LegacyManifest | ManagedManifest;
 const recordPaths = new Set([
   ".synod/state.json",
   ".synod/events.jsonl",
+  ".synod/checkpoint.json",
   "docs/synod/STATUS.md"
 ]);
 

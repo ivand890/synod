@@ -29,7 +29,7 @@ Usage:
   synod init [directory] [--profile <id>] [--dry-run] [--force] [--json]
   synod upgrade [directory] [--profile <id>] [--dry-run] [--force] [--json]
   synod check [directory] [--json]
-  synod status [directory] [--json]
+  synod status [directory] [--explain] [--json]
   synod checkpoint [directory] [--actor <id>] [--message <text>] [--json]
   synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--cwd <directory>] [--json]
   synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
@@ -61,6 +61,7 @@ Options:
   --by-model  Group consumption by model (the default and currently supported view).
   --revision  Require the exact task revision for a transition.
   --evidence  Attach evidence to the exact task revision and current checkpoint.
+  --explain   Include a read-only path-level delta from the acknowledged checkpoint.
   --json      Print a versioned machine-readable success, warning, or error envelope.
   -h, --help  Show help.
   -v, --version
@@ -211,7 +212,7 @@ export async function run(
     }
 
     if (command === "status") {
-      const options = parseLifecycleArgs(args.slice(1));
+      const options = parseLifecycleArgs(args.slice(1), { allowExplain: true });
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
       const result = await orchestrationStatus(options, dependencies);
       if (options.json) {

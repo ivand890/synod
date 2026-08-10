@@ -606,6 +606,9 @@ function lifecycleOptions(command: string, args: string[]) {
   if (command === "uninstall") {
     return parseLifecycleArgs(lifecycleArgs, { allowDryRun: true, allowForce: true });
   }
+  if (command === "status") {
+    return parseLifecycleArgs(lifecycleArgs, { allowExplain: true });
+  }
   return parseLifecycleArgs(lifecycleArgs);
 }
 

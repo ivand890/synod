@@ -407,6 +407,7 @@ test("schema 2 upgrade creates canonical orchestration records through migration
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   await rm(path.join(directory, ".synod/state.json"));
   await rm(path.join(directory, ".synod/events.jsonl"));
+  await rm(path.join(directory, ".synod/checkpoint.json"));
   await rm(path.join(directory, "docs/synod/STATUS.md"));
 
   const result = await upgradeProject({ directory });

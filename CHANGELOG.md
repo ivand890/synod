@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Added a hash-bound canonical checkpoint snapshot and read-only `status --explain` text/JSON output for committed, staged, unstaged, untracked, deleted, renamed, resolved, and binary path changes.
+
+### Security
+
+- Checkpoint snapshot tampering, missing historical detail, and unavailable Git bases now fail closed with stable error codes; checkpoint state, event, Markdown, and snapshot updates recover through one pending transaction.
+
 ## [0.6.3] - 2026-08-10
 
 ### Changed

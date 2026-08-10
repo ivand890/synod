@@ -48,10 +48,12 @@ import {
   orchestrationStatus,
   validateOrchestrationReadOnly
 } from "./orchestration.js";
+import { CHECKPOINT_SNAPSHOT_PATH } from "./checkpoint.js";
 
 const ORCHESTRATION_RECORD_PATHS = [
   ORCHESTRATION_STATE_PATH,
   ORCHESTRATION_EVENTS_PATH,
+  CHECKPOINT_SNAPSHOT_PATH,
   ORCHESTRATION_STATUS_PATH
 ];
 

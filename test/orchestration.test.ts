@@ -8,6 +8,7 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
+import { CHECKPOINT_SNAPSHOT_PATH } from "../src/checkpoint.js";
 import { contentHash } from "../src/filesystem.js";
 import { initProject } from "../src/lifecycle.js";
 import {
@@ -16,9 +17,11 @@ import {
   ORCHESTRATION_STATUS_PATH,
   TASK_STATES,
   addTask,
+  formatOrchestrationStatus,
   orchestrationStatus,
   readOrchestration,
   recordCheckpoint,
+  renderStatusMarkdown,
   transitionTask
 } from "../src/orchestration.js";
 import type { AddTaskOptions } from "../src/orchestration.js";
@@ -41,6 +44,17 @@ async function temporaryProject(): Promise<string> {
 
 async function git(directory: string, ...args: string[]): Promise<unknown> {
   return execFileAsync("git", ["-C", directory, ...args], { encoding: "utf8" });
+}
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, stableValue(value[key])]));
+}
+
+function orchestrationEventHash(event: Record<string, unknown>): string {
+  const unsigned = Object.fromEntries(Object.entries(event).filter(([key]) => key !== "eventHash"));
+  return `sha256:${createHash("sha256").update(JSON.stringify(stableValue(unsigned)), "utf8").digest("hex")}`;
 }
 
 async function addDefaultTask(directory: string, extra: Partial<AddTaskOptions> = {}) {
@@ -236,6 +250,172 @@ test("status detects content-sensitive checkpoint drift and checkpoint reconcile
 
   await recordCheckpoint({ directory, message: "Accept source update" });
   assert.equal((await orchestrationStatus({ directory })).healthy, true);
+});
+
+test("status explain distinguishes committed, staged, unstaged, untracked, deleted, renamed, and binary paths without writes", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-delta-test-"));
+  temporaryDirectories.add(directory);
+  await git(directory, "init");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "user.email", "synod@example.invalid");
+  await git(directory, "config", "commit.gpgsign", "false");
+  for (const [name, content] of ([
+    ["committed.txt", "base\n"],
+    ["staged.txt", "base\n"],
+    ["unstaged.txt", "base\n"],
+    ["deleted.txt", "base\n"],
+    ["rename.txt", "base\n"]
+  ] as const)) await writeFile(path.join(directory, name), content, "utf8");
+  await writeFile(path.join(directory, "binary.dat"), Buffer.from([0]));
+  await writeFile(path.join(directory, "committed-binary.dat"), Buffer.from([0]));
+  await git(directory, "add", ".");
+  await git(directory, "commit", "-m", "initial");
+  await initProject({ directory });
+
+  await writeFile(path.join(directory, "committed.txt"), "committed\n", "utf8");
+  await git(directory, "add", "committed.txt");
+  await git(directory, "commit", "-m", "advance head");
+  await writeFile(path.join(directory, "committed-binary.dat"), Buffer.from([0xff]));
+  await git(directory, "add", "committed-binary.dat");
+  await git(directory, "commit", "-m", "advance binary head");
+  await writeFile(path.join(directory, "staged.txt"), "staged\n", "utf8");
+  await git(directory, "add", "staged.txt");
+  await writeFile(path.join(directory, "unstaged.txt"), "unstaged\n", "utf8");
+  await unlink(path.join(directory, "deleted.txt"));
+  await git(directory, "mv", "rename.txt", "renamed.txt");
+  await writeFile(path.join(directory, "untracked.txt"), "new\n", "utf8");
+  await writeFile(path.join(directory, "binary.dat"), Buffer.from([0xff]));
+
+  const trackedRecords = [ORCHESTRATION_STATE_PATH, ORCHESTRATION_EVENTS_PATH, ORCHESTRATION_STATUS_PATH, CHECKPOINT_SNAPSHOT_PATH];
+  const before = await Promise.all(trackedRecords.map(relativePath => readFile(path.join(directory, relativePath))));
+  const indexPath = String((await git(directory, "rev-parse", "--git-path", "index") as { stdout: string }).stdout).trim();
+  const beforeIndex = await readFile(path.resolve(directory, indexPath));
+
+  const explained = await orchestrationStatus({ directory, explain: true });
+  const byPath = new Map(explained.delta?.paths.map(item => [item.path, item]));
+  assert.equal(byPath.get("committed.txt")?.committed, "modified");
+  assert.equal(byPath.get("committed-binary.dat")?.committed, "modified");
+  assert.equal(byPath.get("committed-binary.dat")?.binary, true);
+  assert.equal(byPath.get("staged.txt")?.staged, "modified");
+  assert.equal(byPath.get("unstaged.txt")?.unstaged, "modified");
+  assert.equal(byPath.get("deleted.txt")?.unstaged, "deleted");
+  assert.equal(byPath.get("renamed.txt")?.staged, "renamed");
+  assert.equal(byPath.get("renamed.txt")?.sourcePath, "rename.txt");
+  assert.equal(byPath.get("untracked.txt")?.untracked, true);
+  assert.equal(byPath.get("binary.dat")?.binary, true);
+  const text = formatOrchestrationStatus(explained);
+  assert.match(text, /committed modified/);
+  assert.match(text, /staged renamed/);
+  assert.match(text, /untracked/);
+  assert.match(text, /binary/);
+
+  const after = await Promise.all(trackedRecords.map(relativePath => readFile(path.join(directory, relativePath))));
+  for (const [index, content] of before.entries()) assert.deepEqual(after[index], content);
+  assert.deepEqual(await readFile(path.resolve(directory, indexPath)), beforeIndex);
+});
+
+test("status explain retains paths that became clean after a dirty checkpoint", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-resolved-delta-test-"));
+  temporaryDirectories.add(directory);
+  await git(directory, "init");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "user.email", "synod@example.invalid");
+  await git(directory, "config", "commit.gpgsign", "false");
+  const sourcePath = path.join(directory, "source.txt");
+  await writeFile(sourcePath, "base\n", "utf8");
+  await git(directory, "add", "source.txt");
+  await git(directory, "commit", "-m", "initial");
+  await initProject({ directory });
+  await writeFile(sourcePath, "accepted dirty\n", "utf8");
+  await recordCheckpoint({ directory, message: "accept dirty source" });
+  await writeFile(sourcePath, "base\n", "utf8");
+
+  const result = await orchestrationStatus({ directory, explain: true });
+  const source = result.delta?.paths.find(item => item.path === "source.txt");
+  assert.equal(source?.resolved, true);
+  assert.equal(source?.current, undefined);
+  assert.equal(source?.checkpoint?.status, " M");
+});
+
+test("checkpoint snapshot tampering fails closed", async () => {
+  const directory = await temporaryProject();
+  const snapshotPath = path.join(directory, CHECKPOINT_SNAPSHOT_PATH);
+  const snapshot = JSON.parse(await readFile(snapshotPath, "utf8"));
+  snapshot.entries.push({ status: "??", path: "forged.txt", type: "file", contentHash: `sha256:${"0".repeat(64)}` });
+  await writeFile(snapshotPath, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
+
+  await assert.rejects(
+    orchestrationStatus({ directory, explain: true }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.CHECKPOINT_SNAPSHOT_INVALID
+  );
+});
+
+test("status explain fails closed when a historical checkpoint has no snapshot", async () => {
+  const directory = await temporaryProject();
+  const statePath = path.join(directory, ORCHESTRATION_STATE_PATH);
+  const eventPath = path.join(directory, ORCHESTRATION_EVENTS_PATH);
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  const event = JSON.parse(await readFile(eventPath, "utf8"));
+  delete state.checkpoint.worktree.snapshot;
+  delete event.checkpoint.worktree.snapshot;
+  delete event.state.checkpoint.worktree.snapshot;
+  event.eventHash = orchestrationEventHash(event);
+  state.lastEvent.hash = event.eventHash;
+  await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await writeFile(eventPath, `${JSON.stringify(event)}\n`, "utf8");
+  await writeFile(path.join(directory, ORCHESTRATION_STATUS_PATH), renderStatusMarkdown(state), "utf8");
+
+  assert.equal((await orchestrationStatus({ directory })).healthy, true);
+  await assert.rejects(
+    orchestrationStatus({ directory, explain: true }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.CHECKPOINT_SNAPSHOT_UNAVAILABLE
+  );
+});
+
+test("status explain fails closed when its checkpoint Git base is unavailable", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-base-test-"));
+  temporaryDirectories.add(directory);
+  await git(directory, "init");
+  await git(directory, "config", "user.name", "Synod Test");
+  await git(directory, "config", "user.email", "synod@example.invalid");
+  await git(directory, "config", "commit.gpgsign", "false");
+  await writeFile(path.join(directory, "source.txt"), "base\n", "utf8");
+  await git(directory, "add", "source.txt");
+  await git(directory, "commit", "-m", "initial");
+  await initProject({ directory });
+  await writeFile(path.join(directory, "source.txt"), "next\n", "utf8");
+  await git(directory, "add", "source.txt");
+  await git(directory, "commit", "-m", "advance head");
+
+  await assert.rejects(
+    orchestrationStatus({ directory, explain: true }, {
+      async gitRunner(targetDirectory, args) {
+        if (args[0] === "cat-file" && args[1] === "-e") throw new Error("missing checkpoint base");
+        const result = await execFileAsync("git", ["-C", targetDirectory, ...args], { encoding: "utf8" });
+        return String(result.stdout);
+      }
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE
+  );
+});
+
+test("checkpoint snapshot participates in pending mutation recovery", async () => {
+  const directory = await temporaryProject();
+  await writeFile(path.join(directory, "proposal.txt"), "recover me\n", "utf8");
+  let injected = false;
+  const result = await recordCheckpoint({ directory, message: "atomic snapshot" }, {
+    transactionHook(operation) {
+      if (!injected && operation.path === CHECKPOINT_SNAPSHOT_PATH) {
+        injected = true;
+        throw new Error("injected checkpoint snapshot failure");
+      }
+    }
+  });
+
+  const snapshot = JSON.parse(await readFile(path.join(directory, CHECKPOINT_SNAPSHOT_PATH), "utf8"));
+  assert.equal(snapshot.contentHash, result.state.checkpoint.worktree.snapshot?.contentHash);
+  assert.equal((await orchestrationStatus({ directory })).healthy, true);
+  await assert.rejects(readFile(path.join(directory, ".synod/pending-mutation.json"), "utf8"), { code: "ENOENT" });
 });
 
 test("checkpoint fingerprints preserve user-owned AGENTS and Codex config content", async () => {

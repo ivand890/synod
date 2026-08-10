@@ -228,6 +228,16 @@ try {
   if (statusEnvelope.ok !== true || statusData.healthy !== true || statusData.eventCount !== 1) {
     throw new Error(`Installed CLI returned an invalid orchestration status: ${statusOutput}`);
   }
+  const explainedStatusOutput = runSynod(["status", targetDirectory, "--explain", "--json"], {
+    cwd: consumerDirectory,
+    capture: true,
+  });
+  const explainedStatusEnvelope = jsonRecord(explainedStatusOutput, "explained status envelope");
+  const explainedStatusData = nestedRecord(explainedStatusEnvelope, "data", "explained status envelope");
+  const delta = nestedRecord(explainedStatusData, "delta", "explained status envelope.data");
+  if (explainedStatusEnvelope.ok !== true || delta.changed !== false || !Array.isArray(delta.paths) || delta.paths.length !== 0) {
+    throw new Error(`Installed CLI returned an invalid checkpoint delta: ${explainedStatusOutput}`);
+  }
   const taskOutput = runSynod([
     "task", "add", "T-001",
     "--objective", "Package smoke task",
