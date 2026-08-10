@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -95,6 +95,7 @@ test("prints version and help", () => {
   assert.match(help.stdout, /synod status/);
   assert.match(help.stdout, /--explain/);
   assert.match(help.stdout, /synod task add/);
+  assert.match(help.stdout, /synod bundle export/);
 });
 
 test("init emits versioned JSON for success and conflicts", async () => {
@@ -363,5 +364,66 @@ test("status explain returns the path delta inside checkpoint-drift JSON", async
     assert.equal(envelope.error.details.delta.paths[0].unstaged, "modified");
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("bundle export and verify expose schema-1 JSON success and corruption errors", async () => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "synod-cli-bundle-test-"));
+  const directory = path.join(parent, "project");
+  const destination = path.join(parent, "recovery.bundle");
+  const textDestination = path.join(parent, "recovery-text.bundle");
+  const { messages, output } = capturedOutput();
+  const git = (...args: string[]) => {
+    const result = spawnSync("git", ["-C", directory, ...args], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+
+  try {
+    await mkdir(directory);
+    await writeFile(path.join(directory, "tracked.txt"), "base\n");
+    await run(["init", directory], output);
+    messages.length = 0;
+    git("init");
+    git("config", "user.name", "Synod Test");
+    git("config", "user.email", "synod@example.invalid");
+    git("config", "commit.gpgsign", "false");
+    git("add", ".");
+    git("commit", "-m", "base");
+    await writeFile(path.join(directory, "tracked.txt"), "checkpoint\n");
+    assert.equal(await run(["checkpoint", directory, "--json"], output), 0);
+    messages.length = 0;
+
+    const exportCode = await run(["bundle", "export", destination, "--cwd", directory, "--json"], output);
+    const exported = JSON.parse(takeMessage(messages));
+    assert.equal(exportCode, 0);
+    assert.equal(exported.ok, true);
+    assert.equal(exported.command, "bundle");
+    assert.equal(exported.data.action, "export");
+    assert.match(exported.data.bundleId, /^sha256:/);
+
+    const textCode = await run(["bundle", "export", textDestination, "--cwd", directory], output);
+    const text = takeMessage(messages);
+    assert.equal(textCode, 0);
+    assert.match(text, /base .+@[0-9a-f]{40}/);
+    assert.match(text, /fingerprint sha256:[0-9a-f]{64}/);
+    assert.match(text, /untracked excluded/);
+
+    const verifyCode = await run(["bundle", "verify", destination, "--json"], output);
+    const verified = JSON.parse(takeMessage(messages));
+    assert.equal(verifyCode, 0);
+    assert.equal(verified.ok, true);
+    assert.equal(verified.data.action, "verify");
+    assert.equal(verified.data.bundleId, exported.data.bundleId);
+
+    const object = (await readdir(path.join(destination, "objects")))[0];
+    assert.ok(object);
+    await writeFile(path.join(destination, "objects", object), "tampered");
+    const corruptCode = await run(["bundle", "verify", destination, "--json"], output);
+    const corrupt = JSON.parse(takeMessage(messages));
+    assert.equal(corruptCode, 1);
+    assert.equal(corrupt.ok, false);
+    assert.equal(corrupt.error.code, ERROR_CODES.RECOVERY_BUNDLE_CORRUPT);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
   }
 });

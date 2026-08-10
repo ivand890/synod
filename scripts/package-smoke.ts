@@ -219,13 +219,46 @@ try {
   ) {
     throw new Error(`Installed CLI failed its project check: ${checkOutput}`);
   }
+  writeFileSync(path.join(targetDirectory, "package-recovery.txt"), "base\n");
+  run("git", ["-C", targetDirectory, "init"]);
+  run("git", ["-C", targetDirectory, "config", "user.name", "Synod Package Smoke"]);
+  run("git", ["-C", targetDirectory, "config", "user.email", "synod@example.invalid"]);
+  run("git", ["-C", targetDirectory, "config", "commit.gpgsign", "false"]);
+  run("git", ["-C", targetDirectory, "add", "."]);
+  run("git", ["-C", targetDirectory, "commit", "-m", "package smoke base"]);
+  writeFileSync(path.join(targetDirectory, "package-recovery.txt"), "acknowledged dirty bytes\n");
+  const checkpointOutput = runSynod(["checkpoint", targetDirectory, "--json"], {
+    cwd: consumerDirectory,
+    capture: true,
+  });
+  const checkpointEnvelope = jsonRecord(checkpointOutput, "checkpoint envelope");
+  if (checkpointEnvelope.ok !== true) throw new Error(`Installed CLI failed its checkpoint smoke: ${checkpointOutput}`);
+  const bundleDirectory = path.join(consumerDirectory, "package-recovery.bundle");
+  const exportOutput = runSynod(["bundle", "export", bundleDirectory, "--cwd", targetDirectory, "--json"], {
+    cwd: consumerDirectory,
+    capture: true,
+  });
+  const exportEnvelope = jsonRecord(exportOutput, "bundle export envelope");
+  const exportData = nestedRecord(exportEnvelope, "data", "bundle export envelope");
+  if (exportEnvelope.ok !== true || exportData.action !== "export" || typeof exportData.bundleId !== "string") {
+    throw new Error(`Installed CLI failed its bundle export smoke: ${exportOutput}`);
+  }
+  const verifyOutput = runSynod(["bundle", "verify", bundleDirectory, "--json"], {
+    cwd: consumerDirectory,
+    capture: true,
+  });
+  const verifyEnvelope = jsonRecord(verifyOutput, "bundle verify envelope");
+  const verifyData = nestedRecord(verifyEnvelope, "data", "bundle verify envelope");
+  if (verifyEnvelope.ok !== true || verifyData.action !== "verify" || verifyData.bundleId !== exportData.bundleId) {
+    throw new Error(`Installed CLI failed its bundle verification smoke: ${verifyOutput}`);
+  }
   const statusOutput = runSynod(["status", targetDirectory, "--json"], {
     cwd: consumerDirectory,
     capture: true,
   });
   const statusEnvelope = jsonRecord(statusOutput, "status envelope");
   const statusData = nestedRecord(statusEnvelope, "data", "status envelope");
-  if (statusEnvelope.ok !== true || statusData.healthy !== true || statusData.eventCount !== 1) {
+  if (statusEnvelope.ok !== true || statusData.healthy !== true || statusData.eventCount !== 2) {
     throw new Error(`Installed CLI returned an invalid orchestration status: ${statusOutput}`);
   }
   const explainedStatusOutput = runSynod(["status", targetDirectory, "--explain", "--json"], {
@@ -251,7 +284,7 @@ try {
   const taskData = nestedRecord(taskEnvelope, "data", "task envelope");
   const task = nestedRecord(taskData, "task", "task envelope.data");
   const taskLastEvent = nestedRecord(taskData, "lastEvent", "task envelope.data");
-  if (taskEnvelope.ok !== true || task.id !== "T-001" || taskLastEvent.sequence !== 2) {
+  if (taskEnvelope.ok !== true || task.id !== "T-001" || taskLastEvent.sequence !== 3) {
     throw new Error(`Installed CLI failed its orchestration task smoke: ${taskOutput}`);
   }
   const upgradeOutput = runSynod(["upgrade", targetDirectory, "--dry-run", "--json"], {

@@ -27,6 +27,22 @@ export interface CheckpointOptions {
   message?: string;
 }
 
+export interface BundleExportCommandOptions {
+  action: "export";
+  directory: string;
+  destination: string;
+  includeUntracked: boolean;
+  json: boolean;
+}
+
+export interface BundleVerifyCommandOptions {
+  action: "verify";
+  bundle: string;
+  json: boolean;
+}
+
+export type BundleCommandOptions = BundleExportCommandOptions | BundleVerifyCommandOptions;
+
 interface TaskCommonOptions {
   id: string;
   directory: string;
@@ -148,6 +164,39 @@ export function parseCheckpointArgs(args: string[]): CheckpointOptions | HelpOpt
     }
   }
   return options;
+}
+
+export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOptions {
+  const action = args[0];
+  if (!action || action === "-h" || action === "--help") return { help: true };
+  if (action !== "export" && action !== "verify") {
+    throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown bundle action: ${action}`, { details: { action } });
+  }
+  const positional = args[1];
+  if (!positional || positional.startsWith("-")) {
+    throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Bundle ${action} is missing its required path.`);
+  }
+  let directory = ".";
+  let json = false;
+  let includeUntracked = false;
+  for (let index = 2; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) continue;
+    if (arg === "-h" || arg === "--help") return { help: true };
+    if (arg === "--json") json = true;
+    else if (arg === "--include-untracked" && action === "export") includeUntracked = true;
+    else if (arg === "--cwd" && action === "export") {
+      directory = optionValue(args, index, arg);
+      index += 1;
+    } else if (arg.startsWith("-")) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
+    } else {
+      throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
+    }
+  }
+  return action === "export"
+    ? { action, directory, destination: positional, includeUntracked, json }
+    : { action, bundle: positional, json };
 }
 
 export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {

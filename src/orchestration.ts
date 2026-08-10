@@ -230,6 +230,14 @@ export interface OrchestrationStatusResult {
   delta?: CheckpointDelta;
 }
 
+export interface ValidatedCheckpointSource {
+  targetDirectory: string;
+  state: OrchestrationState;
+  events: OrchestrationEvent[];
+  snapshot: CheckpointSnapshot;
+  current: { checkpoint: GitCheckpoint; snapshot: CheckpointSnapshot };
+}
+
 const TERMINAL_STATES: ReadonlySet<TaskState> = new Set(["DONE", "SUPERSEDED"]);
 const TRANSITIONS: Readonly<Record<TaskState, ReadonlySet<TaskState>>> = Object.freeze({
   PLANNED: new Set<TaskState>(["READY", "BLOCKED", "SUPERSEDED"]),
@@ -2129,7 +2137,7 @@ export async function orchestrationStatus(
 
 export async function validateOrchestrationReadOnly(
   { directory = "." }: { directory?: string } = {}
-): Promise<{ state: OrchestrationState; events: OrchestrationEvent[] }> {
+): Promise<{ state: OrchestrationState; events: OrchestrationEvent[]; snapshot?: CheckpointSnapshot }> {
   const targetDirectory = path.resolve(directory);
   const pending = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
   if (pending.type !== "missing") {
@@ -2139,7 +2147,7 @@ export async function validateOrchestrationReadOnly(
       { details: { path: ORCHESTRATION_PENDING_PATH, type: pending.type } }
     );
   }
-  const { state, events } = await readOrchestrationRaw(targetDirectory);
+  const { state, events, snapshot } = await readOrchestrationRaw(targetDirectory);
   const markdown = await readRecord(targetDirectory, ORCHESTRATION_STATUS_PATH);
   const expectedMarkdown = renderStatusMarkdown(state);
   if (contentHash(markdown) !== contentHash(expectedMarkdown)) {
@@ -2151,7 +2159,61 @@ export async function validateOrchestrationReadOnly(
       }
     });
   }
-  return { state, events };
+  return { state, events, ...(snapshot ? { snapshot } : {}) };
+}
+
+export async function withValidatedCheckpointSource<Result>(
+  { directory = "." }: { directory?: string } = {},
+  dependencies: OrchestrationDependencies,
+  action: (source: ValidatedCheckpointSource) => Promise<Result>
+): Promise<Result> {
+  const targetDirectory = path.resolve(directory);
+  const release = await acquireLock(targetDirectory);
+  try {
+    const pending = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
+    if (pending.type !== "missing") {
+      throw new SynodError(
+        ERROR_CODES.ORCHESTRATION_STATE_INVALID,
+        "Pending orchestration recovery is required; refusing to mutate records during read-only validation.",
+        { details: { path: ORCHESTRATION_PENDING_PATH, type: pending.type } }
+      );
+    }
+    const canonical = await readOrchestrationRaw(targetDirectory);
+    const markdown = await readRecord(targetDirectory, ORCHESTRATION_STATUS_PATH);
+    const expectedMarkdown = renderStatusMarkdown(canonical.state);
+    if (contentHash(markdown) !== contentHash(expectedMarkdown)) {
+      throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, "Generated Markdown status does not match canonical orchestration state.", {
+        details: {
+          path: ORCHESTRATION_STATUS_PATH,
+          expectedHash: contentHash(expectedMarkdown),
+          actualHash: contentHash(markdown)
+        }
+      });
+    }
+    if (!canonical.snapshot) {
+      throw new SynodError(
+        ERROR_CODES.CHECKPOINT_SNAPSHOT_UNAVAILABLE,
+        "This historical checkpoint has no normalized snapshot. Record a new checkpoint before exporting recovery material.",
+        { details: { checkpoint: canonical.state.checkpoint } }
+      );
+    }
+    const current = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
+    const drift = checkpointDrift(canonical.state.checkpoint, current.checkpoint);
+    if (drift.detected) {
+      throw new SynodError(ERROR_CODES.CHECKPOINT_DRIFT, "The live checkout no longer matches the acknowledged checkpoint.", {
+        details: { drift }
+      });
+    }
+    return await action({
+      targetDirectory,
+      state: canonical.state,
+      events: canonical.events,
+      snapshot: canonical.snapshot,
+      current
+    });
+  } finally {
+    await release();
+  }
 }
 
 export function formatOrchestrationStatus(result: OrchestrationStatusResult): string {
