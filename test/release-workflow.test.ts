@@ -16,6 +16,7 @@ test("Git dependency prepack does not require pnpm or Corepack", async () => {
   const buildScript = packageJson.scripts.build;
   assert.ok(typeof buildScript === "string");
   assert.doesNotMatch(buildScript, /\bpnpm\b/);
+  assert.equal(packageJson.scripts.test, "pnpm typecheck && tsx scripts/test-suite.ts");
 });
 
 test("publish workflow cannot succeed without npm and GitHub Release parity", async () => {
