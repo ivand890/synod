@@ -229,11 +229,12 @@ test("restore reproduces an unmerged multi-stage Git index", async () => {
   await git(directory, "config", "commit.gpgsign", "false");
   await git(directory, "add", ".");
   await git(directory, "commit", "-m", "base");
+  const primaryBranch = (await git(directory, "symbolic-ref", "--short", "HEAD")).trim();
   await git(directory, "switch", "-c", "side");
   await writeFile(path.join(directory, "conflict.txt"), "side\n");
   await git(directory, "add", "conflict.txt");
   await git(directory, "commit", "-m", "side");
-  await git(directory, "switch", "main");
+  await git(directory, "switch", primaryBranch);
   await writeFile(path.join(directory, "conflict.txt"), "main\n");
   await git(directory, "add", "conflict.txt");
   await git(directory, "commit", "-m", "main");
