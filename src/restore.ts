@@ -453,6 +453,7 @@ async function buildPlans(
   const plans = new Map<string, Material>();
   const indexObjectIds = new Map<string, string[]>();
   const indexMaterials = new Map<string, Buffer>();
+  const explicitPaths = new Set(manifest.entries.map(entry => entry.path));
   const addPlan = (relativePath: string, desired: Material): void => {
     const prior = plans.get(relativePath);
     if (prior && stableCheckpointStringify(materialDescriptor(prior)) !== stableCheckpointStringify(materialDescriptor(desired))) {
@@ -489,7 +490,9 @@ async function buildPlans(
         content: full.content
       });
     }
-    if (entry.sourcePath && hasWorktreeRename(entry.status)) addPlan(entry.sourcePath, { type: "missing", mode: null });
+    if (entry.sourcePath && hasWorktreeRename(entry.status) && !explicitPaths.has(entry.sourcePath)) {
+      addPlan(entry.sourcePath, { type: "missing", mode: null });
+    }
   }
   return {
     paths: [...plans.entries()].map(([relativePath, desired]) => ({ path: relativePath, desired }))
@@ -575,6 +578,8 @@ async function buildTemporaryIndex(
   for (const entry of manifest.entries) {
     records.push(`0 ${zero}\t${entry.path}\0`);
     if (entry.sourcePath && hasIndexRename(entry.status)) records.push(`0 ${zero}\t${entry.sourcePath}\0`);
+  }
+  for (const entry of manifest.entries) {
     const ids = objectIds.get(entry.path) || [];
     for (const [position, item] of entry.index.entries()) {
       records.push(item.stage === 0
@@ -697,6 +702,39 @@ async function atomicFile(
   }
 }
 
+async function installGitIndex(
+  indexPath: string,
+  content: Buffer,
+  mode: number,
+  expectedCurrentHash: string,
+  beforeInstall?: (() => void | Promise<void>) | undefined
+): Promise<void> {
+  const lockPath = `${indexPath}.lock`;
+  const handle = await open(lockPath, "wx", mode);
+  let ownsLock = true;
+  try {
+    await handle.writeFile(content);
+    await handle.sync();
+    await handle.close();
+    await chmod(lockPath, mode);
+    await beforeInstall?.();
+    const current = await regularFileBytes(indexPath, "Git index");
+    if (hashBytes(current) !== expectedCurrentHash) {
+      throw new SynodError(
+        ERROR_CODES.RECOVERY_DESTINATION_DIRTY,
+        "The destination index changed at the recovery installation boundary."
+      );
+    }
+    // index.lock is Git's standard cross-process exclusion protocol. Other
+    // Git writers fail instead of losing staged work before this atomic commit.
+    await rename(lockPath, indexPath);
+    ownsLock = false;
+  } finally {
+    await handle.close().catch(() => {});
+    if (ownsLock) await unlink(lockPath).catch(() => {});
+  }
+}
+
 async function ensureSafeParent(directory: string, absolutePath: string): Promise<void> {
   const relativeParent = path.relative(directory, path.dirname(absolutePath));
   let current = directory;
@@ -776,6 +814,15 @@ async function materialFromDescriptor(backupPath: string, value: MaterialDescrip
 }
 
 async function rollbackJournal(directory: string, context: JournalContext): Promise<void> {
+  const indexLockPath = `${context.indexPath}.lock`;
+  const indexLockType = await pathType(indexLockPath);
+  if (indexLockType !== "missing") {
+    if (indexLockType !== "file"
+      || hashBytes(await regularFileBytes(indexLockPath, "Git index lock")) !== context.journal.desiredIndexHash) {
+      throw new SynodError(ERROR_CODES.RECOVERY_ROLLBACK_FAILED, "The Git index lock changed outside Synod; interrupted recovery was preserved.");
+    }
+    await unlink(indexLockPath);
+  }
   const index = await regularFileBytes(context.indexPath, "Git index");
   const currentIndexHash = hashBytes(index);
   if (currentIndexHash !== context.journal.originalIndexHash && currentIndexHash !== context.journal.desiredIndexHash) {
@@ -952,10 +999,11 @@ export async function restoreRecoveryBundle(
         throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "The destination index changed before recovery mutation.");
       }
       await writeGitObjects(targetDirectory, plans.indexMaterials, objectFormat);
-      await atomicFile(
+      await installGitIndex(
         locations.indexPath,
         temporaryIndex.bytes,
         context.journal.indexMode,
+        context.journal.originalIndexHash,
         () => dependencies.restoreHook?.("before-index-install")
       );
       await dependencies.restoreHook?.("after-index");

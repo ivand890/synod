@@ -209,10 +209,12 @@ function isSafePath(value: unknown): value is string {
 
 function validatePathSet(entries: RecoveryEntry[]): void {
   // Copy sources are references, not filesystem ownership. One source can be
-  // copied to several destinations and can also appear as its own entry.
+  // copied to several destinations and can also appear as its own entry. A
+  // rename source is likewise implicit when an explicit entry recreates it.
+  const destinations = new Set(entries.map(entry => entry.path));
   const ownedPaths = entries.flatMap(entry => [
     entry.path,
-    ...(entry.sourcePath && entry.status.includes("R") ? [entry.sourcePath] : [])
+    ...(entry.sourcePath && entry.status.includes("R") && !destinations.has(entry.sourcePath) ? [entry.sourcePath] : [])
   ]);
   const exact = new Set<string>();
   const folded = new Map<string, string>();
@@ -301,6 +303,9 @@ function validateEntry(value: unknown): RecoveryEntry {
   }
   if (value.sourcePath !== undefined && !value.status.includes("R") && !value.status.includes("C")) {
     invalid("Recovery rename metadata does not match the path status.", { path: value.path });
+  }
+  if (value.status === " A") {
+    invalid("Recovery bundle schema 1 does not support Git intent-to-add entries.", { path: value.path });
   }
   if (value.status === "??" && (index.length > 0 || !["file", "symlink"].includes(worktree.type) || value.sourcePath !== undefined)) {
     invalid("Recovery untracked metadata is inconsistent.", { path: value.path });
