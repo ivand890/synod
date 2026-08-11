@@ -4,6 +4,7 @@ import process from "node:process";
 import readline from "node:readline";
 import { WARNING_CODES, warning } from "./contracts.js";
 import type { Warning } from "./contracts.js";
+import { compareVersions, parseVersion } from "./compatibility.js";
 import { ERROR_CODES, SynodError, asSynodError } from "./errors.js";
 import { packageVersion } from "./package.js";
 import type { ModelCapability } from "./profiles.js";
@@ -71,6 +72,10 @@ interface PendingRequest {
   method: string;
 }
 
+export type AppServerEvent =
+  | { type: "notification"; method: string; params: unknown }
+  | { type: "failure"; error: SynodError };
+
 interface InitializeResponse extends Record<string, unknown> {
   userAgent: string;
   codexHome?: string;
@@ -136,6 +141,7 @@ export class CodexAppServerClient {
   private lines?: readline.Interface;
   private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | undefined;
   private fatalError: SynodError | undefined;
+  private readonly eventListeners: Set<(event: AppServerEvent) => void>;
 
   constructor({
     codexBin = process.env.SYNOD_CODEX_BIN || "codex",
@@ -159,6 +165,7 @@ export class CodexAppServerClient {
     this.pending = new Map();
     this.stderr = "";
     this.warnings = [];
+    this.eventListeners = new Set();
     this.diagnostics = {
       codexExecutable: this.codexBin,
       codexHome: undefined,
@@ -228,7 +235,6 @@ export class CodexAppServerClient {
     });
     child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
       this.exitInfo = { code, signal };
-      if (this.pending.size === 0) return;
       const detail = this.stderr.trim();
       this.fail(new SynodError(
         ERROR_CODES.APP_SERVER_EXITED,
@@ -366,7 +372,13 @@ export class CodexAppServerClient {
       return;
     }
 
-    if (!isRecord(message) || typeof message.id !== "number") return;
+    if (!isRecord(message)) return;
+    if (typeof message.id !== "number") {
+      if (typeof message.method === "string") {
+        this.emitEvent({ type: "notification", method: message.method, params: message.params });
+      }
+      return;
+    }
     const pending = this.pending.get(message.id);
     if (!pending) return;
 
@@ -400,6 +412,27 @@ export class CodexAppServerClient {
   fail(error: unknown): void {
     this.fatalError = asSynodError(error);
     this.rejectAll(this.fatalError);
+    this.emitEvent({ type: "failure", error: this.fatalError });
+  }
+
+  emitEvent(event: AppServerEvent): void {
+    for (const listener of this.eventListeners) {
+      try { listener(event); } catch {}
+    }
+  }
+
+  subscribeEvents(listener: (event: AppServerEvent) => void): () => void {
+    this.eventListeners.add(listener);
+    if (this.fatalError) queueMicrotask(() => {
+      if (this.eventListeners.has(listener)) listener({ type: "failure", error: this.fatalError! });
+    });
+    return () => this.eventListeners.delete(listener);
+  }
+
+  supportsThreadStatusNotifications(): boolean {
+    const version = this.diagnostics.codexVersion;
+    const parsed = parseVersion(version);
+    return Boolean(parsed && compareVersions({ ...parsed, prerelease: undefined }, "0.147.0") >= 0);
   }
 
   waitForExit(child: AppServerChild, timeoutMs: number): Promise<boolean> {

@@ -281,6 +281,27 @@ test("lease commands select the pinned runtime from their explicit project", asy
   assert.deepEqual(delegated, { version: packageVersion, args });
 });
 
+test("wait selects the pinned runtime from its explicit project", async () => {
+  const callerDirectory = await temporaryProject();
+  const projectDirectory = await temporaryProject();
+  await installLocalRuntime(projectDirectory, { runPnpm: fakePnpmInstall });
+  let delegated;
+  const args = ["wait", "--thread", "thread:runtime", "--cwd", projectDirectory, "--json"];
+
+  const result = await prepareLocalRuntime(args, {
+    cwd: callerDirectory,
+    currentRuntime: async () => false,
+    executor(localRuntime, delegatedArgs) {
+      delegated = { version: localRuntime.descriptor.runtimeVersion, args: delegatedArgs };
+      return 0;
+    }
+  });
+
+  assert.equal(result.action, "delegate");
+  assert.equal(result.targetDirectory, projectDirectory);
+  assert.deepEqual(delegated, { version: packageVersion, args });
+});
+
 test("a positional checkpoint directory selects that project's pinned runtime", async () => {
   const callerDirectory = await temporaryProject();
   const projectDirectory = await temporaryProject();

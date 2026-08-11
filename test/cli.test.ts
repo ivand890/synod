@@ -103,6 +103,7 @@ test("prints version and help", () => {
   assert.equal(help.status, 0);
   assert.match(help.stdout, /synod init/);
   assert.match(help.stdout, /synod usage/);
+  assert.match(help.stdout, /synod wait/);
   assert.match(help.stdout, /synod upgrade/);
   assert.match(help.stdout, /synod doctor/);
   assert.match(help.stdout, /synod status/);
@@ -187,6 +188,19 @@ test("lease parsing rejects malformed numeric fences before orchestration", asyn
   assert.equal(status, 1);
   assert.equal(envelope.error.code, ERROR_CODES.LEASE_INVALID);
   assert.equal(envelope.error.details.option, "--generation");
+});
+
+test("wait parsing rejects missing threads and out-of-range fallback intervals", async () => {
+  for (const args of [
+    ["wait", "--json"],
+    ["wait", "--thread", "thread:one", "--poll-interval-ms", "99", "--json"]
+  ]) {
+    const { messages, output } = capturedOutput();
+    const status = await run(args, output);
+    const envelope = JSON.parse(takeMessage(messages));
+    assert.equal(status, 1);
+    assert.equal(envelope.error.code, ERROR_CODES.WAIT_INVALID);
+  }
 });
 
 test("check and doctor emit failure JSON when their health gates fail", async () => {
@@ -541,6 +555,35 @@ test("task override and split commands expose canonical policy decisions through
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("wait command exposes bounded mode and final thread status through JSON", async () => {
+  const { messages, output } = capturedOutput();
+  let closed = 0;
+  const status = await run([
+    "wait",
+    "--thread", "thread:one",
+    "--thread", "thread:one",
+    "--timeout-seconds", "1",
+    "--json"
+  ], output, {
+    waitAdapterFactory: () => ({
+      async start() {},
+      capabilities() { return { notification: false, cursor: false }; },
+      async read() { return { statuses: [{ threadId: "thread:one", status: { type: "idle" as const } }] }; },
+      async close() { closed += 1; },
+      getWarnings() { return []; },
+      getDiagnostics() { return { closed }; }
+    })
+  });
+  const envelope = JSON.parse(takeMessage(messages));
+  assert.equal(status, 0);
+  assert.equal(envelope.command, "wait");
+  assert.equal(envelope.data.mode, "poll");
+  assert.deepEqual(envelope.data.threadIds, ["thread:one"]);
+  assert.equal(envelope.data.fallbackPollCount, 0);
+  assert.equal(envelope.data.incomplete, false);
+  assert.equal(envelope.diagnostics.closed, 1);
 });
 
 test("status explain returns the path delta inside checkpoint-drift JSON", async () => {

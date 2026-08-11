@@ -20,6 +20,14 @@ export interface UsageOptions {
   threadId?: string;
 }
 
+export interface WaitCommandOptions {
+  cwd: string;
+  json: boolean;
+  threadIds: string[];
+  timeoutMs: number;
+  pollIntervalMs: number;
+}
+
 export interface CheckpointOptions {
   directory: string;
   json: boolean;
@@ -207,6 +215,53 @@ export function parseUsageArgs(
     } else {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
     }
+  }
+  return options;
+}
+
+export function parseWaitArgs(
+  args: string[],
+  { cwd = process.cwd() }: { cwd?: string } = {}
+): WaitCommandOptions | HelpOptions {
+  const options: WaitCommandOptions = {
+    cwd,
+    json: false,
+    threadIds: [],
+    timeoutMs: 5 * 60_000,
+    pollIntervalMs: 1_000
+  };
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) continue;
+    if (arg === "-h" || arg === "--help") return { help: true };
+    if (arg === "--json") options.json = true;
+    else if (["--thread", "--cwd", "--timeout-seconds", "--poll-interval-ms"].includes(arg)) {
+      const value = optionValue(args, index, arg);
+      if (arg === "--thread") options.threadIds.push(value);
+      else if (arg === "--cwd") options.cwd = value;
+      else if (arg === "--timeout-seconds") {
+        const seconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+        if (!Number.isSafeInteger(seconds) || seconds <= 0 || seconds > 3_600) {
+          throw new SynodError(ERROR_CODES.WAIT_INVALID, "Wait timeout must be an integer from 1 through 3600 seconds.");
+        }
+        options.timeoutMs = seconds * 1_000;
+      } else {
+        const interval = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+        if (!Number.isSafeInteger(interval) || interval < 100 || interval > 5_000) {
+          throw new SynodError(ERROR_CODES.WAIT_INVALID, "Wait poll interval must be an integer from 100 through 5000 milliseconds.");
+        }
+        options.pollIntervalMs = interval;
+      }
+      index += 1;
+    } else if (arg.startsWith("-")) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
+    } else {
+      throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
+    }
+  }
+  options.threadIds = [...new Set(options.threadIds.map(value => value.trim()).filter(Boolean))];
+  if (options.threadIds.length === 0) {
+    throw new SynodError(ERROR_CODES.WAIT_INVALID, "Wait requires at least one --thread <thread-id>.");
   }
   return options;
 }

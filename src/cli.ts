@@ -1,6 +1,6 @@
 import { errorEnvelope, successEnvelope } from "./contracts.js";
 import type { Warning } from "./contracts.js";
-import { parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs } from "./command-options.js";
+import { parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs } from "./command-options.js";
 import type { HelpOptions, LifecycleOptions } from "./command-options.js";
 import { doctorProject } from "./doctor.js";
 import type { DoctorClient, DoctorDependencies } from "./doctor.js";
@@ -31,6 +31,8 @@ import { isRecord } from "./validation.js";
 import { exportRecoveryBundle, verifyRecoveryBundle } from "./recovery.js";
 import { restoreRecoveryBundle } from "./restore.js";
 import { formatHandoff, generateHandoff } from "./handoff.js";
+import { formatWaitReport, waitForThreads } from "./wait.js";
+import type { ThreadStatusAdapter, WaitClient } from "./wait.js";
 
 const HELP = `Synod ${packageVersion}
 
@@ -60,6 +62,7 @@ Usage:
   synod uninstall [directory] [--dry-run] [--force] [--json]
   synod profiles [--json]
   synod usage [--session <thread-id>] [--cwd <directory>] [--by-model] [--json]
+  synod wait --thread <thread-id> [--thread <thread-id>] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
   synod --help
   synod --version
 
@@ -77,6 +80,7 @@ Commands:
   uninstall   Remove the local runtime and unchanged managed content; preserve durable state.
   profiles    List built-in model profiles and their requirements.
   usage       Report token consumption for a Codex session tree, grouped by model.
+  wait        Observe child thread status changes without renewing worker leases.
 
 Options:
   --profile   Select a built-in model profile for init or upgrade.
@@ -85,6 +89,7 @@ Options:
   --session   Select any thread in a session tree. Defaults to the latest session in --cwd.
   --cwd       Select the project directory used to find the latest session.
   --by-model  Group consumption by model (the default and currently supported view).
+  --thread    Add a Codex thread ID to a bounded status wait.
   --revision  Require the exact task revision for a transition.
   --evidence  Attach evidence to the exact task revision and current checkpoint.
   --owner-thread
@@ -114,6 +119,8 @@ export interface CliDependencies extends LifecycleDependencies, OrchestrationDep
   clientFactory?: (options?: { codexBin: string }) => UsageClient;
   doctorClientFactory?: NonNullable<DoctorDependencies["clientFactory"]>;
   doctorRuntimeResolver?: NonNullable<DoctorDependencies["runtimeResolver"]>;
+  waitClientFactory?: () => WaitClient;
+  waitAdapterFactory?: () => ThreadStatusAdapter;
 }
 
 type CheckResult = Awaited<ReturnType<typeof checkProject>>;
@@ -245,6 +252,23 @@ export async function run(
         printWarnings(report.warnings, output);
       }
       return 0;
+    }
+
+    if (command === "wait") {
+      const options = parseWaitArgs(args.slice(1));
+      if (isHelpOptions(options)) { output.log(HELP); return 0; }
+      const report = await waitForThreads(options, {
+        ...(dependencies.waitClientFactory ? { clientFactory: dependencies.waitClientFactory } : {}),
+        ...(dependencies.waitAdapterFactory ? { adapterFactory: dependencies.waitAdapterFactory } : {})
+      });
+      if (options.json) {
+        const { warnings, diagnostics, ...data } = report;
+        output.log(JSON.stringify(successEnvelope("wait", data, { warnings, diagnostics }), null, 2));
+      } else {
+        output.log(formatWaitReport(report));
+        printWarnings(report.warnings, output);
+      }
+      return report.incomplete ? 1 : 0;
     }
 
     if (command === "status") {
