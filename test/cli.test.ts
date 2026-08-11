@@ -34,6 +34,7 @@ function initializeGitHead(directory: string): void {
     ["init", "--quiet"],
     ["config", "user.name", "Synod Tests"],
     ["config", "user.email", "synod-tests@example.invalid"],
+    ["config", "commit.gpgsign", "false"],
     ["add", "."],
     ["commit", "--quiet", "-m", "fixture"]
   ]) {
@@ -114,6 +115,11 @@ test("prints version and help", () => {
   assert.match(help.stdout, /synod task split/);
   assert.match(help.stdout, /synod lease acquire/);
   assert.match(help.stdout, /synod lease recover/);
+  assert.match(help.stdout, /synod worktree create/);
+  assert.match(help.stdout, /synod worktree seal/);
+  assert.match(help.stdout, /synod worktree integrate/);
+  assert.match(help.stdout, /synod worktree cleanup/);
+  assert.match(help.stdout, /synod worktree status/);
   assert.match(help.stdout, /--write-tree/);
   assert.match(help.stdout, /--read-tree/);
   assert.match(help.stdout, /synod bundle export/);
@@ -188,6 +194,49 @@ test("lease parsing rejects malformed numeric fences before orchestration", asyn
   assert.equal(status, 1);
   assert.equal(envelope.error.code, ERROR_CODES.LEASE_INVALID);
   assert.equal(envelope.error.details.option, "--generation");
+});
+
+test("worktree parsing requires a complete exact lease fence", async () => {
+  for (const args of [
+    ["worktree", "create", "T-001", "--destination", "/tmp/task", "--json"],
+    [
+      "worktree", "create", "T-001",
+      "--destination", "/tmp/task",
+      "--lease-id", "00000000-0000-4000-8000-000000000000",
+      "--generation", "zero",
+      "--revision", "0",
+      "--expected-heartbeat-at", "2026-08-10T00:00:00.000Z",
+      "--owner-thread", "thread:test",
+      "--json"
+    ]
+  ]) {
+    const { messages, output } = capturedOutput();
+    const status = await run(args, output);
+    const envelope = JSON.parse(takeMessage(messages));
+    assert.equal(status, 1);
+    assert.equal(envelope.error.code, ERROR_CODES.WORKTREE_INVALID);
+  }
+  for (const args of [
+    ["worktree", "cleanup", "T-001", "--lease-id", "00000000-0000-4000-8000-000000000000", "--json"],
+    [
+      "worktree", "seal", "T-001", "--destination", "/tmp/task",
+      "--lease-id", "00000000-0000-4000-8000-000000000000",
+      "--generation", "1", "--revision", "0",
+      "--expected-heartbeat-at", "2026-08-10T00:00:00.000Z",
+      "--owner-thread", "thread:test", "--json"
+    ]
+  ]) {
+    const { messages, output } = capturedOutput();
+    const status = await run(args, output);
+    const envelope = JSON.parse(takeMessage(messages));
+    assert.equal(status, 1);
+    assert.equal(envelope.error.code, ERROR_CODES.UNKNOWN_OPTION);
+    if (args[1] === "cleanup") {
+      assert.match(envelope.error.message, /cleanup/);
+      assert.equal(envelope.error.details.action, "cleanup");
+      assert.equal(envelope.error.details.option, "--lease-id");
+    }
+  }
 });
 
 test("wait parsing rejects missing threads and out-of-range fallback intervals", async () => {

@@ -71,6 +71,15 @@ export interface BundleRestoreResult extends BundleVerification {
   recoveredInterruptedRestore: boolean;
 }
 
+export interface OverlayRestoreResult extends BundleRestoreResult {
+  alreadyApplied: boolean;
+  overallFingerprint: string;
+}
+
+export interface OverlayRestoreOptions extends BundleRestoreOptions {
+  expectedUnrelatedEntries: CheckpointEntry[];
+}
+
 interface GitRunOptions {
   env?: Record<string, string>;
   input?: Buffer;
@@ -568,26 +577,37 @@ async function buildTemporaryIndex(
   manifest: RecoveryManifest,
   objectIds: Map<string, string[]>,
   indexPath: string,
-  objectFormat: string
+  objectFormat: string,
+  seedIndex?: Buffer
 ): Promise<{ path: string; bytes: Buffer }> {
   const temporary = path.join(path.dirname(indexPath), `synod-recovery-index-${randomUUID()}`);
   const env = { GIT_INDEX_FILE: temporary };
-  await runGit(directory, ["read-tree", manifest.source.head!], { env });
-  const zero = "0".repeat(objectFormat === "sha256" ? 64 : 40);
-  const records: string[] = [];
-  for (const entry of manifest.entries) {
-    records.push(`0 ${zero}\t${entry.path}\0`);
-    if (entry.sourcePath && hasIndexRename(entry.status)) records.push(`0 ${zero}\t${entry.sourcePath}\0`);
-  }
-  for (const entry of manifest.entries) {
-    const ids = objectIds.get(entry.path) || [];
-    for (const [position, item] of entry.index.entries()) {
-      records.push(item.stage === 0
-        ? `${item.mode} ${ids[position]}\t${entry.path}\0`
-        : `${item.mode} ${ids[position]} ${item.stage}\t${entry.path}\0`);
-    }
-  }
   try {
+    if (seedIndex) {
+      const handle = await open(temporary, "wx", 0o600);
+      try {
+        await handle.writeFile(seedIndex);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    } else {
+      await runGit(directory, ["read-tree", manifest.source.head!], { env });
+    }
+    const zero = "0".repeat(objectFormat === "sha256" ? 64 : 40);
+    const records: string[] = [];
+    for (const entry of manifest.entries) {
+      records.push(`0 ${zero}\t${entry.path}\0`);
+      if (entry.sourcePath && hasIndexRename(entry.status)) records.push(`0 ${zero}\t${entry.sourcePath}\0`);
+    }
+    for (const entry of manifest.entries) {
+      const ids = objectIds.get(entry.path) || [];
+      for (const [position, item] of entry.index.entries()) {
+        records.push(item.stage === 0
+          ? `${item.mode} ${ids[position]}\t${entry.path}\0`
+          : `${item.mode} ${ids[position]} ${item.stage}\t${entry.path}\0`);
+      }
+    }
     await runGit(directory, ["update-index", "--info-only", "-z", "--index-info"], {
       env,
       input: Buffer.from(records.join(""), "utf8")
@@ -597,6 +617,29 @@ async function buildTemporaryIndex(
     await unlink(temporary).catch(() => {});
     throw error;
   }
+}
+
+function checkpointEntryPaths(entry: CheckpointEntry): string[] {
+  return [entry.path, ...(entry.sourcePath ? [entry.sourcePath] : [])];
+}
+
+function partitionCheckpointEntries(entries: CheckpointEntry[], affectedPaths: Set<string>): {
+  affected: CheckpointEntry[];
+  unrelated: CheckpointEntry[];
+} {
+  const affected: CheckpointEntry[] = [];
+  const unrelated: CheckpointEntry[] = [];
+  for (const entry of entries) {
+    const paths = checkpointEntryPaths(entry);
+    const touches = paths.filter(item => affectedPaths.has(item));
+    if (touches.length > 0 && touches.length !== paths.length) {
+      throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "Recovery cannot split a rename across proposal and unrelated paths.", {
+        details: { path: entry.path, sourcePath: entry.sourcePath }
+      });
+    }
+    (touches.length > 0 ? affected : unrelated).push(entry);
+  }
+  return { affected, unrelated };
 }
 
 async function ensureRealDirectory(directory: string, label: string): Promise<void> {
@@ -1083,4 +1126,162 @@ export async function restoreRecoveryBundle(
       await unlink(temporaryIndex.path).catch(() => {});
     }
   });
+}
+
+export async function restoreRecoveryBundleOverlayUnderLock(
+  { bundle, directory = ".", expectedUnrelatedEntries }: OverlayRestoreOptions,
+  dependencies: RestoreDependencies = {}
+): Promise<OverlayRestoreResult> {
+  const verification = await verifyRecoveryBundle({ bundle });
+  const manifest = verification.manifest;
+  if (!manifest.source.head || !manifest.proposal) {
+    throw new SynodError(ERROR_CODES.RECOVERY_BUNDLE_INVALID, "Proposal overlay recovery requires a sealed proposal with an exact Git base.");
+  }
+  const targetDirectory = await realpath(path.resolve(directory));
+  const locations = await journalLocations(targetDirectory);
+  let recoveredInterruptedRestore = false;
+  const interrupted = await readJournal(targetDirectory, locations);
+  if (interrupted) {
+    await rollbackJournal(targetDirectory, interrupted);
+    recoveredInterruptedRestore = true;
+  }
+
+  const initial = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
+  if (!initial.checkpoint.available || initial.checkpoint.head !== manifest.source.head) {
+    throw new SynodError(ERROR_CODES.RECOVERY_BASE_MISMATCH, "Proposal integration requires the exact bundle base HEAD.", {
+      details: { expected: manifest.source.head, actual: initial.checkpoint.head }
+    });
+  }
+  const objectFormat = (await runGit(targetDirectory, ["rev-parse", "--show-object-format"])).toString("utf8").trim();
+  const objects = await readBundleObjects(verification);
+  const plans = await buildPlans(targetDirectory, manifest, objects, objectFormat);
+  const expectedEntries = expectedCheckpointEntries(manifest, plans.indexObjectIds);
+  if (fingerprint(expectedEntries) !== manifest.checkpoint.fingerprint) {
+    throw new SynodError(ERROR_CODES.RECOVERY_BUNDLE_INVALID, "Proposal manifest cannot reproduce its declared checkpoint fingerprint.");
+  }
+  const affectedPaths = new Set(plans.paths.map(item => item.path));
+  for (const entry of manifest.entries) {
+    affectedPaths.add(entry.path);
+    if (entry.sourcePath) affectedPaths.add(entry.sourcePath);
+  }
+  const partitioned = partitionCheckpointEntries(initial.snapshot.entries, affectedPaths);
+  if (stableCheckpointStringify(partitioned.unrelated) !== stableCheckpointStringify(expectedUnrelatedEntries)) {
+    throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "Unrelated control-checkout drift changed before proposal integration.");
+  }
+  if (stableCheckpointStringify(partitioned.affected) === stableCheckpointStringify(expectedEntries)) {
+    return {
+      ...verification,
+      destination: targetDirectory,
+      baseHead: manifest.source.head,
+      fingerprint: manifest.checkpoint.fingerprint,
+      recoveredInterruptedRestore,
+      alreadyApplied: true,
+      overallFingerprint: initial.checkpoint.worktree.fingerprint
+    };
+  }
+  if (partitioned.affected.length > 0) {
+    throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "Proposal integration paths already contain different drift.", {
+      details: { paths: partitioned.affected.flatMap(checkpointEntryPaths) }
+    });
+  }
+  const expectedFinalEntries = [...partitioned.unrelated, ...expectedEntries].sort((left, right) => compareCheckpointPaths(
+    `${left.path}\0${left.sourcePath || ""}`,
+    `${right.path}\0${right.sourcePath || ""}`
+  ));
+  const liveIndex = await regularFileBytes(locations.indexPath, "Git index");
+  const temporaryIndex = await buildTemporaryIndex(
+    targetDirectory,
+    manifest,
+    plans.indexObjectIds,
+    locations.indexPath,
+    objectFormat,
+    liveIndex
+  );
+  let context: JournalContext | undefined;
+  try {
+    context = await createJournal(targetDirectory, manifest, plans.paths, temporaryIndex.bytes, locations);
+    if (hashBytes(liveIndex) !== context.journal.originalIndexHash) {
+      throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "The control index changed after the proposal index seed was read.");
+    }
+    const boundary = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
+    if (boundary.checkpoint.head !== initial.checkpoint.head
+      || boundary.checkpoint.branch !== initial.checkpoint.branch
+      || stableCheckpointStringify(boundary.snapshot.entries) !== stableCheckpointStringify(initial.snapshot.entries)) {
+      throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "The control checkout changed before proposal integration.");
+    }
+    const boundaryIndex = await regularFileBytes(locations.indexPath, "Git index");
+    if (hashBytes(boundaryIndex) !== context.journal.originalIndexHash) {
+      throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "The control index changed before proposal integration.");
+    }
+    await writeGitObjects(targetDirectory, plans.indexMaterials, objectFormat);
+    await installGitIndex(
+      locations.indexPath,
+      temporaryIndex.bytes,
+      context.journal.indexMode,
+      context.journal.originalIndexHash,
+      () => dependencies.restoreHook?.("before-index-install")
+    );
+    await dependencies.restoreHook?.("after-index");
+    for (const plan of plans.paths) {
+      const journalPath = context.journal.paths.find(item => item.path === plan.path)!;
+      const current = await inspectMaterial(targetDirectory, plan.path);
+      if (!descriptorMatches(current, journalPath.original)) {
+        throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "A proposal path changed before integration.", {
+          details: { path: plan.path }
+        });
+      }
+      await mutatePath(targetDirectory, plan.path, plan.desired, async () => {
+        await dependencies.restoreHook?.("before-path-install", plan.path);
+        const installationBoundary = await inspectMaterial(targetDirectory, plan.path);
+        if (!descriptorMatches(installationBoundary, journalPath.original)) {
+          throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "A proposal path changed at the integration boundary.", {
+            details: { path: plan.path }
+          });
+        }
+      });
+      await dependencies.restoreHook?.("after-path", plan.path);
+    }
+    await dependencies.restoreHook?.("before-verify");
+    const restored = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
+    if (restored.checkpoint.head !== manifest.source.head
+      || stableCheckpointStringify(restored.snapshot.entries) !== stableCheckpointStringify(expectedFinalEntries)) {
+      throw new SynodError(ERROR_CODES.RECOVERY_RESTORE_FAILED, "Proposal integration did not preserve unrelated drift exactly.", {
+        details: {
+          expectedHead: manifest.source.head,
+          actualHead: restored.checkpoint.head,
+          expectedProposalFingerprint: manifest.checkpoint.fingerprint
+        }
+      });
+    }
+    const committed = context;
+    context = undefined;
+    await cleanupVerifiedJournal(committed);
+    return {
+      ...verification,
+      destination: targetDirectory,
+      baseHead: manifest.source.head,
+      fingerprint: manifest.checkpoint.fingerprint,
+      recoveredInterruptedRestore,
+      alreadyApplied: false,
+      overallFingerprint: restored.checkpoint.worktree.fingerprint
+    };
+  } catch (error) {
+    if (context) {
+      try {
+        await rollbackJournal(targetDirectory, context);
+      } catch (rollbackError) {
+        if (rollbackError instanceof SynodError && rollbackError.code === ERROR_CODES.RECOVERY_ROLLBACK_FAILED) throw rollbackError;
+        throw new SynodError(ERROR_CODES.RECOVERY_ROLLBACK_FAILED, "Synod could not fully roll back failed proposal integration.", {
+          cause: rollbackError,
+          details: { originalError: errorMessage(error), rollbackError: errorMessage(rollbackError) }
+        });
+      }
+    }
+    if (error instanceof SynodError) throw error;
+    throw new SynodError(ERROR_CODES.RECOVERY_RESTORE_FAILED, `Synod rolled back failed proposal integration: ${errorMessage(error)}`, {
+      cause: error
+    });
+  } finally {
+    await unlink(temporaryIndex.path).catch(() => {});
+  }
 }
