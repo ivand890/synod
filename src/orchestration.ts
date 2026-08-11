@@ -2717,8 +2717,10 @@ export async function transitionTask({
     }
 
     const fromState = task.state;
-    const releasedLease = fromState === "ACTIVE" && targetState === "REVIEW" ? task.lease : undefined;
-    if (fromState === "ACTIVE" && targetState === "REVIEW" && !releasedLease) {
+    const deliveredLease = fromState === "ACTIVE" && targetState === "REVIEW" ? task.lease : undefined;
+    const releasedLease = deliveredLease
+      || (targetState === "BLOCKED" && fromState !== "ACTIVE" ? task.lease : undefined);
+    if (fromState === "ACTIVE" && targetState === "REVIEW" && !deliveredLease) {
       throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} cannot deliver without its active writer lease.`, {
         details: { taskId, revision }
       });

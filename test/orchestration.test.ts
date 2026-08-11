@@ -240,6 +240,41 @@ test("blocked tasks can resume only their recorded prior state", async () => {
   assert.equal(resumed.task.blockedFrom, undefined);
 });
 
+test("blocking non-active tasks releases reserved leases without affecting active resumability", async () => {
+  const directory = await temporaryProject();
+  await addDefaultTask(directory, { id: "T-RESERVED" });
+  await addDefaultTask(directory, { id: "T-NEXT" });
+  await transitionTask({ directory, id: "T-RESERVED", to: "READY", revision: 0 });
+  await transitionTask({ directory, id: "T-NEXT", to: "READY", revision: 0 });
+  const reserved = await acquireTaskLease({
+    directory,
+    id: "T-RESERVED",
+    ownerThread: "thread:reserved",
+    write: ["src/reserved.ts"]
+  });
+  const blocked = await transitionTask({
+    directory,
+    id: "T-RESERVED",
+    to: "BLOCKED",
+    revision: 0,
+    reason: "Dependency unavailable"
+  });
+
+  assert.equal(blocked.task.blockedFrom, "READY");
+  assert.equal(blocked.task.lease, undefined);
+  assert.deepEqual(blocked.event.payload.releasedLease, {
+    id: reserved.lease.id,
+    generation: reserved.lease.generation
+  });
+  const reassigned = await acquireTaskLease({
+    directory,
+    id: "T-NEXT",
+    ownerThread: "thread:next",
+    write: ["src/reserved.ts"]
+  });
+  assert.equal(reassigned.lease.generation, 1);
+});
+
 test("writer leases persist fenced generations, heartbeat deadlines, and immutable baselines", async () => {
   const directory = await temporaryProject();
   await addDefaultTask(directory);
