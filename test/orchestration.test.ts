@@ -37,7 +37,8 @@ import {
   renderStatusMarkdown,
   revokeTaskLease,
   splitTask,
-  transitionTask
+  transitionTask,
+  validateOrchestrationProposalArtifacts
 } from "../src/orchestration.js";
 import type { AddTaskOptions } from "../src/orchestration.js";
 import { isRecord } from "../src/validation.js";
@@ -578,6 +579,74 @@ test("terminal proposals remain attributable to leases with older baselines", as
 
   assert.deepEqual(delivered.task.proposal?.ownedPaths, ["src/a.ts"]);
   assert.deepEqual(delivered.task.proposal?.excludedForeignPaths, ["src/b.ts"]);
+});
+
+test("historical proposal artifacts remain valid after their bounded lease baseline is pruned", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-HISTORY", objective: "Preserve historical proposal" });
+  await transitionTask({ directory, id: "T-HISTORY", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-HISTORY", ownerThread: "test:history", write: ["history.ts"] });
+  await transitionTask({ directory, id: "T-HISTORY", to: "ACTIVE", revision: 0 });
+  await writeFile(path.join(directory, "history.ts"), "historical\n");
+  const delivered = await transitionTask({
+    directory,
+    id: "T-HISTORY",
+    to: "REVIEW",
+    revision: 1,
+    evidence: ["delivery:history"]
+  });
+  await transitionTask({ directory, id: "T-HISTORY", to: "ACCEPTED", revision: 1, evidence: ["acceptance:history"] });
+  await transitionTask({ directory, id: "T-HISTORY", to: "VERIFIED", revision: 1, evidence: ["verification:history"] });
+  await transitionTask({ directory, id: "T-HISTORY", to: "DONE", revision: 1 });
+  assert.ok(delivered.task.proposal);
+
+  await addDefaultTask(directory, { id: "T-TRIGGER", objective: "Trigger bounded baseline retention" });
+  await transitionTask({ directory, id: "T-TRIGGER", to: "READY", revision: 0 });
+  const ledgerPath = path.join(directory, LEASE_BASELINES_PATH);
+  const ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+  const historical = ledger.baselines.find((item: { leaseId?: unknown }) => item.leaseId === delivered.task.proposal!.leaseId);
+  assert.ok(historical);
+  for (let index = 0; index < MAX_RETAINED_LEASE_BASELINES + 1; index += 1) {
+    ledger.baselines.push({
+      ...structuredClone(historical),
+      leaseId: randomUUID(),
+      generation: index + 100,
+      taskId: `T-SYNTHETIC-${index}`
+    });
+  }
+  const ledgerContent = `${JSON.stringify(ledger, null, 2)}\n`;
+  await writeFile(ledgerPath, ledgerContent);
+  const statePath = path.join(directory, ORCHESTRATION_STATE_PATH);
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  state.leaseBaselines.contentHash = contentHash(ledgerContent);
+  const eventPath = path.join(directory, ORCHESTRATION_EVENTS_PATH);
+  const events = (await readFile(eventPath, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  const lastEvent = events.at(-1);
+  assert.ok(lastEvent);
+  lastEvent.state.leaseBaselines.contentHash = state.leaseBaselines.contentHash;
+  lastEvent.eventHash = orchestrationEventHash(lastEvent);
+  state.lastEvent.hash = lastEvent.eventHash;
+  await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
+  await writeFile(eventPath, `${events.map(event => JSON.stringify(event)).join("\n")}\n`);
+  await writeFile(path.join(directory, ORCHESTRATION_STATUS_PATH), renderStatusMarkdown(state));
+
+  const trigger = await acquireTaskLease({ directory, id: "T-TRIGGER", ownerThread: "test:trigger", write: ["trigger.ts"] });
+  await releaseTaskLease({
+    directory,
+    id: "T-TRIGGER",
+    leaseId: trigger.lease.id,
+    generation: trigger.lease.generation,
+    revision: trigger.lease.taskRevision,
+    expectedHeartbeatAt: trigger.lease.heartbeatAt,
+    ownerThread: trigger.lease.ownerThread
+  });
+  const retained = JSON.parse(await readFile(ledgerPath, "utf8"));
+  assert.equal(retained.baselines.some((item: { leaseId?: unknown }) => item.leaseId === delivered.task.proposal!.leaseId), false);
+  assert.deepEqual(await validateOrchestrationProposalArtifacts({ directory }), {
+    sealedProposals: 1,
+    verifiedBundles: 1
+  });
 });
 
 test("rename delivery requires ownership of both source and destination", async () => {

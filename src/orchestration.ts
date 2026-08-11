@@ -1813,15 +1813,21 @@ export async function validateOrchestrationProposalArtifacts({
     } else await recoverPendingMutation(targetDirectory);
     const canonical = await readOrchestrationRaw(targetDirectory);
     const recovery = await import("./recovery.js");
-    const verifiedPaths = new Map<string, string>();
+    const verifiedPaths = new Map<string, Awaited<ReturnType<typeof recovery.verifyRecoveryBundle>>>();
     let sealedProposals = 0;
     for (const task of taskList(canonical.state)) {
-      const references: TaskProposalReference[] = [
-        ...(task.proposal ? [task.proposal] : []),
-        ...(task.recovery?.proposal ? [task.recovery.proposal] : []),
-        ...(task.recoveryHistory || []).flatMap(item => item.proposal ? [item.proposal] : [])
+      const references: Array<{ proposal: TaskProposalReference; requiresBaseline: boolean }> = [
+        ...(task.proposal ? [{ proposal: task.proposal, requiresBaseline: proposalReservesPaths(task) }] : []),
+        ...(task.recovery?.proposal ? [{
+          proposal: task.recovery.proposal,
+          requiresBaseline: task.recovery.status === "PENDING"
+        }] : []),
+        ...(task.recoveryHistory || []).flatMap(item => item.proposal
+          ? [{ proposal: item.proposal, requiresBaseline: false }]
+          : [])
       ];
-      for (const proposal of references) {
+      for (const reference of references) {
+        const { proposal } = reference;
         sealedProposals += 1;
         const baseline = canonical.leaseBaselines.baselines.find(item =>
           item.taskId === task.id
@@ -1829,45 +1835,55 @@ export async function validateOrchestrationProposalArtifacts({
           && item.generation === proposal.generation
           && item.taskRevision === proposal.baseRevision
         );
-        if (!baseline) {
+        if (!baseline && reference.requiresBaseline) {
           throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, `Task ${task.id} proposal baseline is missing.`, {
             details: { taskId: task.id, leaseId: proposal.leaseId, generation: proposal.generation }
           });
         }
-        const priorBundleId = verifiedPaths.get(proposal.path);
-        if (priorBundleId && priorBundleId !== proposal.bundleId) {
+        let verified = verifiedPaths.get(proposal.path);
+        if (verified && verified.bundleId !== proposal.bundleId) {
           throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, "One proposal path has conflicting canonical bundle identities.", {
-            details: { path: proposal.path, firstBundleId: priorBundleId, secondBundleId: proposal.bundleId }
+            details: { path: proposal.path, firstBundleId: verified.bundleId, secondBundleId: proposal.bundleId }
           });
         }
-        if (priorBundleId) continue;
-        const verified = await recovery.verifyRecoveryBundle({
-          bundle: resolveProjectPath(targetDirectory, proposal.path)
-        });
-        const expectedIdentity: import("./recovery.js").RecoveryProposalIdentity = {
+        if (!verified) {
+          verified = await recovery.verifyRecoveryBundle({
+            bundle: resolveProjectPath(targetDirectory, proposal.path)
+          });
+          verifiedPaths.set(proposal.path, verified);
+        }
+        const expectedIdentity = {
           taskId: task.id,
           leaseId: proposal.leaseId,
           generation: proposal.generation,
           baseRevision: proposal.baseRevision,
           revision: proposal.revision,
           scopes: proposal.scopes,
-          ownedPaths: proposal.ownedPaths,
-          baseline: {
-            snapshotHash: baseline.snapshot.contentHash,
-            worktreeFingerprint: baseline.snapshot.worktreeFingerprint
-          }
+          ownedPaths: proposal.ownedPaths
+        };
+        const manifestIdentity = verified.manifest.proposal && {
+          taskId: verified.manifest.proposal.taskId,
+          leaseId: verified.manifest.proposal.leaseId,
+          generation: verified.manifest.proposal.generation,
+          baseRevision: verified.manifest.proposal.baseRevision,
+          revision: verified.manifest.proposal.revision,
+          scopes: verified.manifest.proposal.scopes,
+          ownedPaths: verified.manifest.proposal.ownedPaths
         };
         if (verified.bundleId !== proposal.bundleId
-          || verified.manifest.source.branch !== baseline.snapshot.branch
-          || verified.manifest.source.head !== baseline.snapshot.head
           || verified.manifest.checkpoint.fingerprint !== proposal.fingerprint
           || verified.manifest.checkpoint.snapshotHash !== proposal.snapshotHash
-          || stableStringify(verified.manifest.proposal) !== stableStringify(expectedIdentity)) {
+          || stableStringify(manifestIdentity) !== stableStringify(expectedIdentity)
+          || (baseline && (
+            verified.manifest.source.branch !== baseline.snapshot.branch
+            || verified.manifest.source.head !== baseline.snapshot.head
+            || verified.manifest.proposal?.baseline.snapshotHash !== baseline.snapshot.contentHash
+            || verified.manifest.proposal?.baseline.worktreeFingerprint !== baseline.snapshot.worktreeFingerprint
+          ))) {
           throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, `Task ${task.id} sealed proposal artifact is invalid.`, {
             details: { taskId: task.id, path: proposal.path, bundleId: proposal.bundleId }
           });
         }
-        verifiedPaths.set(proposal.path, proposal.bundleId);
       }
     }
     return { sealedProposals, verifiedBundles: verifiedPaths.size };
