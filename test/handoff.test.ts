@@ -135,6 +135,8 @@ test("handoff derives focus, current evidence, blockers, gates, and legal transi
   assert.deepEqual(byId.get("T-REVIEW")?.evidence.acceptance, []);
   assert.deepEqual(byId.get("T-REVIEW")?.evidence.delivery.map(item => item.reference), ["delivery:T-REVIEW:r2"]);
   assert.equal(byId.get("T-REVIEW")?.acceptance.unresolved, true);
+  assert.match(byId.get("T-REVIEW")?.proposal?.bundleId || "", /^sha256:[0-9a-f]{64}$/);
+  assert.deepEqual(byId.get("T-REVIEW")?.proposal?.excludedForeignPaths, []);
   assert.deepEqual(byId.get("T-VERIFIED")?.evidence.verification.map(item => item.reference), ["verification:T-VERIFIED:r1"]);
   assert.deepEqual(byId.get("T-BLOCKED")?.legalNextTransitions, ["ACTIVE", "SUPERSEDED"]);
   assert.equal(byId.get("T-BLOCKED")?.blocker, "Awaiting authorization");
@@ -145,6 +147,7 @@ test("handoff derives focus, current evidence, blockers, gates, and legal transi
   assert.match(formatHandoff(handoff), /Acceptance criteria: T-VERIFIED is accepted/);
   assert.match(formatHandoff(handoff), /Verification commands: verify T-VERIFIED/);
   assert.match(formatHandoff(handoff), /Correction evidence: E-\d{6}=correction:T-CORRECTION:r1/);
+  assert.match(formatHandoff(handoff), /Sealed proposal: sha256:[0-9a-f]{64}/);
   assert.match(formatHandoff(handoff), /Recovery bundle: not supplied/);
 
   const after = await Promise.all(canonicalPaths.map(relativePath => readFile(path.join(directory, relativePath))));

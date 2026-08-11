@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { WARNING_CODES } from "../src/contracts.js";
 import { stableCheckpointStringify } from "../src/checkpoint.js";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
@@ -23,6 +25,15 @@ import {
 import { isRecord } from "../src/validation.js";
 
 const temporaryDirectories = new Set<string>();
+const execFileAsync = promisify(execFile);
+
+async function initializeGitHead(directory: string): Promise<void> {
+  await execFileAsync("git", ["-C", directory, "init", "--quiet"]);
+  await execFileAsync("git", ["-C", directory, "config", "user.name", "Synod Tests"]);
+  await execFileAsync("git", ["-C", directory, "config", "user.email", "synod-tests@example.invalid"]);
+  await execFileAsync("git", ["-C", directory, "add", "."]);
+  await execFileAsync("git", ["-C", directory, "commit", "--quiet", "-m", "fixture"]);
+}
 
 async function temporaryProject(): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-lifecycle-test-"));
@@ -296,6 +307,23 @@ test("upgrade preserves stale user guidance and emits an explicit repair path", 
   }
 });
 
+test("upgrade regenerates a stale status projection and records its new hash", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory, profile: "portable" });
+  const statusPath = path.join(directory, "docs/synod/STATUS.md");
+  await writeFile(statusPath, "# Stale pre-upgrade status\n", "utf8");
+
+  const upgraded = await upgradeProject({ directory, profile: "portable" });
+
+  assert.ok(upgraded.updated.includes("docs/synod/STATUS.md"));
+  const canonical = await readOrchestration(directory);
+  const status = await readFile(statusPath, "utf8");
+  assert.equal(status, renderStatusMarkdown(canonical.state));
+  const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
+  const statusEntry = manifest.files.find((entry: { path?: unknown }) => entry.path === "docs/synod/STATUS.md");
+  assert.equal(statusEntry.contentHash, contentHash(status));
+});
+
 test("uninstall removes owned infrastructure and preserves user state and AGENTS content", async () => {
   const directory = await temporaryProject();
   const agentsPath = path.join(directory, "AGENTS.md");
@@ -342,6 +370,44 @@ test("uninstall preserves whitespace and trailing spaces outside the managed AGE
   await uninstallProject({ directory });
 
   assert.equal(await readFile(agentsPath, "utf8"), userAgents);
+});
+
+test("uninstall preserves immutable sealed proposal material", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory, profile: "portable" });
+  await initializeGitHead(directory);
+  await addTask({
+    directory,
+    id: "T-PROPOSAL",
+    objective: "Preserve proposal bytes",
+    executor: "synod_implementer",
+    acceptance: ["Proposal remains local"],
+    verification: ["pnpm test"]
+  });
+  await transitionTask({ directory, id: "T-PROPOSAL", to: "READY", revision: 0 });
+  await acquireTaskLease({
+    directory,
+    id: "T-PROPOSAL",
+    ownerThread: "test:proposal",
+    write: ["src/proposal.ts"]
+  });
+  await transitionTask({ directory, id: "T-PROPOSAL", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/proposal.ts"), "proposal\n");
+  const delivered = await transitionTask({
+    directory,
+    id: "T-PROPOSAL",
+    to: "REVIEW",
+    revision: 1,
+    evidence: ["delivery"]
+  });
+  assert.ok(delivered.task.proposal);
+  const manifestPath = path.join(directory, delivered.task.proposal.path, "manifest.json");
+  const manifestBefore = await readFile(manifestPath, "utf8");
+
+  await uninstallProject({ directory });
+
+  assert.equal(await readFile(manifestPath, "utf8"), manifestBefore);
 });
 
 test("uninstall refuses modified Synod-owned files without removing anything", async () => {
@@ -449,6 +515,7 @@ test("init adopts and migrates no-manifest schema-1 records without a lease ledg
     delete task.correctionPolicy;
     delete task.leaseGeneration;
     delete task.lease;
+    delete task.proposal;
     delete task.preLease;
   }
   const legacyEvent = {
@@ -493,6 +560,7 @@ test("upgrade preserves the schema-1 event prefix and fences migrated in-flight 
   const statusPath = path.join(directory, "docs/synod/STATUS.md");
   const ledgerPath = path.join(directory, ".synod/lease-baselines.json");
   await initProject({ directory, profile: "portable" });
+  await initializeGitHead(directory);
   await addTask({
     directory,
     id: "T-MIGRATE",
@@ -526,6 +594,7 @@ test("upgrade preserves the schema-1 event prefix and fences migrated in-flight 
       delete task.correctionPolicy;
       delete task.leaseGeneration;
       delete task.lease;
+      delete task.proposal;
       delete task.preLease;
     }
     return core;
@@ -694,7 +763,7 @@ test("upgrade atomically adopts a matching legacy checkpoint snapshot", async ()
   state.lastEvent.hash = event.eventHash;
   await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
   await writeFile(eventsPath, `${JSON.stringify(event)}\n`, "utf8");
-  await writeFile(statusPath, renderStatusMarkdown(state), "utf8");
+  await writeFile(statusPath, "# Stale pre-adoption status\n", "utf8");
   await unlink(checkpointPath);
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   manifest.files = manifest.files.filter((entry: { path?: unknown }) => entry.path !== ".synod/checkpoint.json");
@@ -712,6 +781,7 @@ test("upgrade atomically adopts a matching legacy checkpoint snapshot", async ()
   assert.equal(adoptedState.checkpoint.worktree.snapshot.contentHash, snapshot.contentHash);
   assert.equal(snapshot.worktreeFingerprint, adoptedState.checkpoint.worktree.fingerprint);
   assert.ok(result.updated.includes(".synod/state.json"));
+  assert.equal(await readFile(statusPath, "utf8"), renderStatusMarkdown(adoptedState));
 });
 
 test("upgrade preserves a drifted legacy checkpoint without creating a mismatched snapshot", async () => {

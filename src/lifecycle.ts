@@ -49,6 +49,7 @@ import {
   createCheckpointSnapshotAdoptionFiles,
   createInitialOrchestrationFiles,
   createOrchestrationSchemaMigrationFiles,
+  createOrchestrationStatusProjectionFile,
   orchestrationStatus,
   validateOrchestrationReadOnly
 } from "./orchestration.js";
@@ -594,11 +595,18 @@ export async function upgradeProject(
   } else if (checkpointAdoption?.status === "unavailable") {
     templates.files.delete(CHECKPOINT_SNAPSHOT_PATH);
   }
-  const generatedRecordFiles = schemaMigration?.status === "migrated"
+  const generatedRecordSource = schemaMigration?.status === "migrated"
     ? schemaMigration.files
     : checkpointAdoption?.status === "adopted"
       ? checkpointAdoption.files
       : undefined;
+  const generatedRecordFiles = new Map(generatedRecordSource || []);
+  if (hasOrchestrationRecords) {
+    const statusContent = generatedRecordFiles.get(ORCHESTRATION_STATUS_PATH)
+      || await createOrchestrationStatusProjectionFile(targetDirectory);
+    templates.files.set(ORCHESTRATION_STATUS_PATH, statusContent);
+    generatedRecordFiles.set(ORCHESTRATION_STATUS_PATH, statusContent);
+  }
   const nextEntries = new Map<string, ManifestEntry>();
   const operations: TransactionOperation[] = [];
   const states: LifecycleState[] = [];

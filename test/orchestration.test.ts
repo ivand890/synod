@@ -16,6 +16,8 @@ import {
   retainLeaseBaselinesLedger
 } from "../src/leases.js";
 import { initProject } from "../src/lifecycle.js";
+import { verifyRecoveryBundle } from "../src/recovery.js";
+import { restoreRecoveryBundle } from "../src/restore.js";
 import {
   ORCHESTRATION_EVENTS_PATH,
   ORCHESTRATION_STATE_PATH,
@@ -54,6 +56,14 @@ async function temporaryProject(): Promise<string> {
 
 async function git(directory: string, ...args: string[]): Promise<unknown> {
   return execFileAsync("git", ["-C", directory, ...args], { encoding: "utf8" });
+}
+
+async function initializeGitHead(directory: string): Promise<void> {
+  await git(directory, "init", "--quiet");
+  await git(directory, "config", "user.name", "Synod Tests");
+  await git(directory, "config", "user.email", "synod-tests@example.invalid");
+  await git(directory, "add", ".");
+  await git(directory, "commit", "--quiet", "-m", "fixture");
 }
 
 function stableValue(value: unknown): unknown {
@@ -115,6 +125,7 @@ test("initializes canonical state, a hash-chained log, and a Markdown projection
 
 test("enforces the complete revision, acceptance, verification, and completion path", async () => {
   const directory = await temporaryProject();
+  await initializeGitHead(directory);
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
   await acquireDefaultLease(directory);
@@ -149,6 +160,7 @@ test("enforces the complete revision, acceptance, verification, and completion p
 
 test("rejected transitions do not mutate canonical state or append the log", async () => {
   const directory = await temporaryProject();
+  await initializeGitHead(directory);
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
   await acquireDefaultLease(directory);
@@ -171,10 +183,13 @@ test("rejected transitions do not mutate canonical state or append the log", asy
 
 test("a correction round invalidates prior acceptance and advances the next delivery revision", async () => {
   const directory = await temporaryProject();
+  await initializeGitHead(directory);
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
   await acquireDefaultLease(directory);
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/t-001.ts"), "first revision\n");
   await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery:r1"] });
   await transitionTask({ directory, id: "T-001", to: "ACCEPTED", revision: 1, evidence: ["acceptance:r1"] });
   await acquireDefaultLease(directory);
@@ -192,6 +207,247 @@ test("a correction round invalidates prior acceptance and advances the next deli
     ["correction", 1],
     ["delivery", 2]
   ]);
+});
+
+test("delivery seals only owned paths and acceptance tolerates disjoint authorized work", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-A", objective: "Deliver A" });
+  await addDefaultTask(directory, { id: "T-B", objective: "Deliver B" });
+  for (const id of ["T-A", "T-B"]) {
+    await transitionTask({ directory, id, to: "READY", revision: 0 });
+    await acquireTaskLease({
+      directory,
+      id,
+      ownerThread: `test:${id}`,
+      writeTree: [`src/${id === "T-A" ? "a" : "b"}`]
+    });
+    await transitionTask({ directory, id, to: "ACTIVE", revision: 0 });
+  }
+  await mkdir(path.join(directory, "src/a"), { recursive: true });
+  await mkdir(path.join(directory, "src/b"), { recursive: true });
+  await writeFile(path.join(directory, "src/a/value.ts"), "export const a = 1;\n");
+  await writeFile(path.join(directory, "src/b/value.ts"), "export const b = 1;\n");
+
+  const delivered = await transitionTask({
+    directory,
+    id: "T-A",
+    to: "REVIEW",
+    revision: 1,
+    evidence: ["delivery:T-A:r1"]
+  });
+  assert.equal(delivered.task.lease, undefined);
+  assert.ok(delivered.task.proposal);
+  const proposal = delivered.task.proposal;
+  const verification = await verifyRecoveryBundle({ bundle: path.join(directory, proposal.path) });
+  assert.equal(verification.bundleId, proposal.bundleId);
+  assert.deepEqual(verification.manifest.entries.map(entry => entry.path), ["src/a/value.ts"]);
+  assert.deepEqual(verification.manifest.proposal, {
+    taskId: "T-A",
+    leaseId: proposal.leaseId,
+    generation: proposal.generation,
+    baseRevision: 0,
+    revision: 1,
+    scopes: proposal.scopes,
+    ownedPaths: ["src/a/value.ts"],
+    baseline: {
+      snapshotHash: (await readOrchestration(directory)).leaseBaselines.baselines.find(item =>
+        item.leaseId === proposal.leaseId && item.generation === proposal.generation
+      )?.snapshot.contentHash,
+      worktreeFingerprint: (await readOrchestration(directory)).leaseBaselines.baselines.find(item =>
+        item.leaseId === proposal.leaseId && item.generation === proposal.generation
+      )?.snapshot.worktreeFingerprint
+    }
+  });
+
+  const clone = await mkdtemp(path.join(os.tmpdir(), "synod-proposal-restore-test-"));
+  temporaryDirectories.add(clone);
+  await rm(clone, { recursive: true });
+  await git(path.dirname(clone), "clone", "--quiet", "--no-hardlinks", directory, clone);
+  await restoreRecoveryBundle({ bundle: path.join(directory, proposal.path), directory: clone });
+  assert.equal(await readFile(path.join(clone, "src/a/value.ts"), "utf8"), "export const a = 1;\n");
+  await assert.rejects(readFile(path.join(clone, "src/b/value.ts")), { code: "ENOENT" });
+
+  const accepted = await transitionTask({
+    directory,
+    id: "T-A",
+    to: "ACCEPTED",
+    revision: 1,
+    evidence: ["acceptance:T-A:r1"]
+  });
+  assert.equal(accepted.task.acceptance.status, "accepted");
+});
+
+test("delivery rejects unowned and read-scope drift without releasing the lease", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireTaskLease({
+    directory,
+    id: "T-001",
+    ownerThread: "test:T-001",
+    read: ["src/input.ts"],
+    write: ["src/t-001.ts"]
+  });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/t-001.ts"), "owned\n");
+  await writeFile(path.join(directory, "src/input.ts"), "changed input\n");
+  await writeFile(path.join(directory, "src/outside.ts"), "unowned\n");
+
+  await assert.rejects(
+    transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery"] }),
+    error => error instanceof SynodError
+      && error.code === ERROR_CODES.LEASE_SCOPE_DRIFT
+      && isRecord(error.details)
+      && Array.isArray(error.details.readDrift)
+      && Array.isArray(error.details.unowned)
+  );
+  const task = (await readOrchestration(directory)).state.tasks["T-001"];
+  assert.equal(task?.state, "ACTIVE");
+  assert.ok(task?.lease);
+  assert.equal(task?.proposal, undefined);
+});
+
+test("acceptance rejects owned material changed after proposal sealing", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/t-001.ts"), "proposal v1\n");
+  await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery"] });
+  await writeFile(path.join(directory, "src/t-001.ts"), "proposal v2\n");
+
+  await assert.rejects(
+    transitionTask({ directory, id: "T-001", to: "ACCEPTED", revision: 1, evidence: ["acceptance"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.PROPOSAL_INVALID
+  );
+  assert.equal((await readOrchestration(directory)).state.tasks["T-001"]?.state, "REVIEW");
+});
+
+test("a failed delivery commit preserves and reuses its verified immutable proposal", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/t-001.ts"), "orphan-safe\n");
+  const active = (await readOrchestration(directory)).state.tasks["T-001"]!;
+  const proposalPath = path.join(directory, `.synod/proposals/${active.lease!.id}/${active.lease!.generation}`);
+
+  await assert.rejects(
+    transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery"] }, {
+      beforeMutationHook(operation) {
+        if (operation.path === ".synod/pending-mutation.json") throw new Error("interrupt canonical delivery");
+      }
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.TRANSACTION_FAILED
+  );
+  const orphan = await verifyRecoveryBundle({ bundle: proposalPath });
+  const unchanged = (await readOrchestration(directory)).state.tasks["T-001"];
+  assert.equal(unchanged?.state, "ACTIVE");
+  assert.ok(unchanged?.lease);
+  assert.equal(unchanged?.proposal, undefined);
+
+  const retried = await transitionTask({
+    directory,
+    id: "T-001",
+    to: "REVIEW",
+    revision: 1,
+    evidence: ["delivery"]
+  });
+  assert.equal(retried.task.proposal?.bundleId, orphan.bundleId);
+});
+
+test("terminal proposals do not reserve paths from later task deliveries", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-FIRST", objective: "First shared edit" });
+  await transitionTask({ directory, id: "T-FIRST", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-FIRST", ownerThread: "test:first", write: ["src/shared.ts"] });
+  await transitionTask({ directory, id: "T-FIRST", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/shared.ts"), "first\n");
+  await transitionTask({ directory, id: "T-FIRST", to: "REVIEW", revision: 1, evidence: ["delivery:first"] });
+  await transitionTask({ directory, id: "T-FIRST", to: "ACCEPTED", revision: 1, evidence: ["acceptance:first"] });
+  await transitionTask({ directory, id: "T-FIRST", to: "VERIFIED", revision: 1, evidence: ["verification:first"] });
+  await transitionTask({ directory, id: "T-FIRST", to: "DONE", revision: 1 });
+
+  await addDefaultTask(directory, { id: "T-LATER", objective: "Later shared edit" });
+  await transitionTask({ directory, id: "T-LATER", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-LATER", ownerThread: "test:later", write: ["src/shared.ts"] });
+  await transitionTask({ directory, id: "T-LATER", to: "ACTIVE", revision: 0 });
+  await writeFile(path.join(directory, "src/shared.ts"), "later\n");
+  const delivered = await transitionTask({
+    directory,
+    id: "T-LATER",
+    to: "REVIEW",
+    revision: 1,
+    evidence: ["delivery:later"]
+  });
+
+  assert.deepEqual(delivered.task.proposal?.ownedPaths, ["src/shared.ts"]);
+  assert.deepEqual(delivered.task.proposal?.excludedForeignPaths, []);
+});
+
+test("terminal proposals remain attributable to leases with older baselines", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-A", objective: "Concurrent task A" });
+  await addDefaultTask(directory, { id: "T-B", objective: "Concurrent task B" });
+  await transitionTask({ directory, id: "T-A", to: "READY", revision: 0 });
+  await transitionTask({ directory, id: "T-B", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-A", ownerThread: "test:a", write: ["src/a.ts"] });
+  await transitionTask({ directory, id: "T-A", to: "ACTIVE", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-B", ownerThread: "test:b", write: ["src/b.ts"] });
+  await transitionTask({ directory, id: "T-B", to: "ACTIVE", revision: 0 });
+
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/b.ts"), "b\n");
+  await transitionTask({ directory, id: "T-B", to: "REVIEW", revision: 1, evidence: ["delivery:b"] });
+  await transitionTask({ directory, id: "T-B", to: "ACCEPTED", revision: 1, evidence: ["acceptance:b"] });
+  await transitionTask({ directory, id: "T-B", to: "VERIFIED", revision: 1, evidence: ["verification:b"] });
+  await transitionTask({ directory, id: "T-B", to: "DONE", revision: 1 });
+
+  await writeFile(path.join(directory, "src/a.ts"), "a\n");
+  const delivered = await transitionTask({
+    directory,
+    id: "T-A",
+    to: "REVIEW",
+    revision: 1,
+    evidence: ["delivery:a"]
+  });
+
+  assert.deepEqual(delivered.task.proposal?.ownedPaths, ["src/a.ts"]);
+  assert.deepEqual(delivered.task.proposal?.excludedForeignPaths, ["src/b.ts"]);
+});
+
+test("rename delivery requires ownership of both source and destination", async () => {
+  const directory = await temporaryProject();
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/from.ts"), "rename me\n");
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireTaskLease({
+    directory,
+    id: "T-001",
+    ownerThread: "test:T-001",
+    write: ["src/to.ts"]
+  });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await git(directory, "mv", "src/from.ts", "src/to.ts");
+
+  await assert.rejects(
+    transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_SCOPE_DRIFT
+  );
 });
 
 test("dependencies gate READY transitions", async () => {
@@ -219,6 +475,7 @@ test("dependencies gate READY transitions", async () => {
 
 test("blocked tasks can resume only their recorded prior state", async () => {
   const directory = await temporaryProject();
+  await initializeGitHead(directory);
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
   await acquireDefaultLease(directory);
@@ -246,6 +503,7 @@ test("blocked tasks can resume only their recorded prior state", async () => {
 
 test("blocking non-active tasks releases reserved leases without affecting active resumability", async () => {
   const directory = await temporaryProject();
+  await initializeGitHead(directory);
   await addDefaultTask(directory, { id: "T-RESERVED" });
   await addDefaultTask(directory, { id: "T-NEXT" });
   await transitionTask({ directory, id: "T-RESERVED", to: "READY", revision: 0 });
@@ -281,6 +539,7 @@ test("blocking non-active tasks releases reserved leases without affecting activ
 
 test("writer leases persist fenced generations, heartbeat deadlines, and immutable baselines", async () => {
   const directory = await temporaryProject();
+  await initializeGitHead(directory);
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
   const acquired = await acquireTaskLease({
@@ -367,6 +626,7 @@ test("writer leases persist fenced generations, heartbeat deadlines, and immutab
 
 test("lease baseline tampering fails closed before canonical state is exposed", async () => {
   const directory = await temporaryProject();
+  await initializeGitHead(directory);
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
   await acquireDefaultLease(directory);
@@ -408,6 +668,7 @@ test("lease baseline retention preserves active identities and bounds inactive h
 
 test("pending mutation recovery completes an interrupted lease-baseline replacement", async () => {
   const directory = await temporaryProject();
+  await initializeGitHead(directory);
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
   const checkpointBefore = (await readOrchestration(directory)).state.checkpoint;
@@ -436,6 +697,7 @@ test("pending mutation recovery completes an interrupted lease-baseline replacem
 
 test("overlapping writer acquisition races leave exactly one canonical owner", async () => {
   const directory = await temporaryProject();
+  await initializeGitHead(directory);
   await addDefaultTask(directory, { id: "T-A" });
   await addDefaultTask(directory, { id: "T-B" });
   await transitionTask({ directory, id: "T-A", to: "READY", revision: 0 });
@@ -457,8 +719,64 @@ test("overlapping writer acquisition races leave exactly one canonical owner", a
   );
 });
 
+test("writer acquisition rejects pre-existing unowned drift in its scope", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-A" });
+  await addDefaultTask(directory, { id: "T-B" });
+  await transitionTask({ directory, id: "T-A", to: "READY", revision: 0 });
+  await transitionTask({ directory, id: "T-B", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-A", ownerThread: "thread:a", write: ["src/a.ts"] });
+  await transitionTask({ directory, id: "T-A", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/b.ts"), "unowned before lease\n");
+
+  await assert.rejects(
+    acquireTaskLease({ directory, id: "T-B", ownerThread: "thread:b", write: ["src/b.ts"] }),
+    error => error instanceof SynodError
+      && error.code === ERROR_CODES.LEASE_SCOPE_DRIFT
+      && isRecord(error.details)
+      && Array.isArray(error.details.paths)
+      && isRecord(error.details.paths[0])
+      && error.details.paths[0].path === "src/b.ts"
+  );
+  assert.equal((await readOrchestration(directory)).state.tasks["T-B"]?.lease, undefined);
+});
+
+test("writer acquisition rejects paths reserved by a proposal awaiting review", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-FIRST" });
+  await addDefaultTask(directory, { id: "T-LATER" });
+  await transitionTask({ directory, id: "T-FIRST", to: "READY", revision: 0 });
+  await transitionTask({ directory, id: "T-LATER", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-FIRST", ownerThread: "thread:first", write: ["src/shared.ts"] });
+  await transitionTask({ directory, id: "T-FIRST", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/shared.ts"), "first\n");
+  await transitionTask({ directory, id: "T-FIRST", to: "REVIEW", revision: 1, evidence: ["delivery:first"] });
+
+  await assert.rejects(
+    acquireTaskLease({ directory, id: "T-LATER", ownerThread: "thread:later", write: ["src/shared.ts"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_CONFLICT
+  );
+  assert.equal((await readOrchestration(directory)).state.tasks["T-LATER"]?.lease, undefined);
+});
+
+test("writer acquisition requires an exact Git base before recording ownership", async () => {
+  const directory = await temporaryProject();
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await assert.rejects(
+    acquireDefaultLease(directory),
+    error => error instanceof SynodError && error.code === ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE
+  );
+  assert.equal((await readOrchestration(directory)).state.tasks["T-001"]?.lease, undefined);
+});
+
 test("writer acquisition rejects scopes reached through symlink aliases", async () => {
   const directory = await temporaryProject();
+  await initializeGitHead(directory);
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
   await mkdir(path.join(directory, "src"));
@@ -481,6 +799,7 @@ test("writer acquisition rejects scopes reached through symlink aliases", async 
 
 test("expiry and revocation block active work while fencing stale owners", async () => {
   const directory = await temporaryProject();
+  await initializeGitHead(directory);
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
   const first = await acquireTaskLease({
@@ -533,6 +852,29 @@ test("expiry and revocation block active work while fencing stale owners", async
       ownerThread: "thread:two"
     }),
     error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_NOT_FOUND
+  );
+});
+
+test("writer acquisition rejects an exact file scope whose target is a symlink", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await mkdir(path.join(directory, "src"));
+  await writeFile(path.join(directory, "outside.ts"), "outside\n");
+  await symlink("../outside.ts", path.join(directory, "src/linked.ts"));
+
+  await assert.rejects(
+    acquireTaskLease({
+      directory,
+      id: "T-001",
+      ownerThread: "thread:symlink",
+      write: ["src/linked.ts"]
+    }),
+    error => error instanceof SynodError
+      && error.code === ERROR_CODES.LEASE_INVALID
+      && isRecord(error.details)
+      && error.details.type === "symlink"
   );
 });
 
