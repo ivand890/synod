@@ -2467,8 +2467,11 @@
             }
             render();
           };
+          // Advance once immediately so the click has visible feedback even
+          // when the browser throttles background timers. Subsequent steps
+          // continue on the playback interval.
+          tick();
           state.timer = window.setInterval(tick, 2600 / state.speed);
-          render();
         }
 
         $("#previous-step").addEventListener("click", () => {
