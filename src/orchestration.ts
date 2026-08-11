@@ -1192,9 +1192,13 @@ function isLegacyOrchestrationStateShape(value: unknown): value is LegacyOrchest
     && typeof value.lastEvent.hash === "string";
 }
 
+function leaseMigrationState(state: TaskState | undefined): boolean {
+  return state !== undefined && ["ACTIVE", "REVIEW", "ACCEPTED", "VERIFIED"].includes(state);
+}
+
 function legacyTaskRequiresLeaseMigration(task: LegacyOrchestrationTask): boolean {
-  return ["ACTIVE", "REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)
-    || (task.state === "BLOCKED" && task.blockedFrom === "ACTIVE");
+  return leaseMigrationState(task.state)
+    || (task.state === "BLOCKED" && leaseMigrationState(task.blockedFrom));
 }
 
 function correctionPolicyForRound(correctionRound: number): CorrectionPolicy {
@@ -1289,10 +1293,10 @@ export function validateOrchestrationState(value: unknown): OrchestrationState {
     if (task.state === "ACTIVE" && !task.lease && !task.preLease) {
       invalidState(`Active task ${id} is missing its durable writer lease.`, { taskId: id });
     }
-    if (task.preLease && !["ACTIVE", "REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state) && !(task.state === "BLOCKED" && task.blockedFrom === "ACTIVE")) {
+    if (task.preLease && !leaseMigrationState(task.state) && !(task.state === "BLOCKED" && leaseMigrationState(task.blockedFrom))) {
       invalidState(`Task ${id} has an invalid pre-lease migration marker.`, { taskId: id, state: task.state });
     }
-    if (task.lease && !["READY", "ACTIVE", "REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state) && !(task.state === "BLOCKED" && task.blockedFrom === "ACTIVE")) {
+    if (task.lease && !["READY", "ACTIVE", "REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state) && !(task.state === "BLOCKED" && leaseMigrationState(task.blockedFrom))) {
       invalidState(`Task ${id} holds a writer lease in an ineligible state.`, { taskId: id, state: task.state });
     }
     for (const dependency of task.dependsOn) {
@@ -2389,7 +2393,10 @@ export async function acquireTaskLease({
     const eligible = task.state === "READY"
       || (task.state === "ACTIVE" && task.preLease)
       || ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)
-      || (task.state === "BLOCKED" && task.blockedFrom === "ACTIVE");
+      || (task.state === "BLOCKED" && (
+        task.blockedFrom === "ACTIVE"
+        || (task.preLease && leaseMigrationState(task.blockedFrom))
+      ));
     if (!eligible) {
       throw new SynodError(ERROR_CODES.LEASE_INVALID, `Task ${taskId} cannot acquire a writer lease from ${task.state}.`, {
         details: { taskId, state: task.state }

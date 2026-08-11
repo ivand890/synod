@@ -452,6 +452,18 @@ test("upgrade preserves the schema-1 event prefix and fences migrated in-flight 
   await transitionTask({ directory, id: "T-MIGRATE", to: "READY", revision: 0 });
   await acquireTaskLease({ directory, id: "T-MIGRATE", ownerThread: "legacy-thread", write: ["src/migrate.ts"] });
   await transitionTask({ directory, id: "T-MIGRATE", to: "ACTIVE", revision: 0 });
+  await addTask({
+    directory,
+    id: "T-MIGRATE-REVIEW",
+    objective: "Preserve blocked review work",
+    executor: "synod_implementer",
+    acceptance: ["The migrated review can be blocked and resumed"],
+    verification: ["pnpm test"]
+  });
+  await transitionTask({ directory, id: "T-MIGRATE-REVIEW", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-MIGRATE-REVIEW", ownerThread: "legacy-review-thread", write: ["src/review.ts"] });
+  await transitionTask({ directory, id: "T-MIGRATE-REVIEW", to: "ACTIVE", revision: 0 });
+  await transitionTask({ directory, id: "T-MIGRATE-REVIEW", to: "REVIEW", revision: 1, evidence: ["legacy review delivery"] });
 
   const stripCore = (source: Record<string, unknown>) => {
     const core = structuredClone(source) as Record<string, any>;
@@ -538,6 +550,7 @@ test("upgrade preserves the schema-1 event prefix and fences migrated in-flight 
   assert.equal(canonical.state.schemaVersion, 2);
   assert.equal(canonical.events.at(-1)?.type, "orchestration.migrated");
   assert.equal(canonical.state.tasks["T-MIGRATE"]?.preLease, true);
+  assert.equal(canonical.state.tasks["T-MIGRATE-REVIEW"]?.preLease, true);
   await assert.rejects(
     transitionTask({ directory, id: "T-MIGRATE", to: "REVIEW", revision: 1, evidence: ["legacy delivery"] }),
     error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_REQUIRED
@@ -550,6 +563,31 @@ test("upgrade preserves the schema-1 event prefix and fences migrated in-flight 
   });
   assert.equal(acquired.task.preLease, undefined);
   assert.equal(acquired.lease.generation, 1);
+
+  const blockedReview = await transitionTask({
+    directory,
+    id: "T-MIGRATE-REVIEW",
+    to: "BLOCKED",
+    revision: 1,
+    reason: "Waiting for review input"
+  });
+  assert.equal(blockedReview.task.blockedFrom, "REVIEW");
+  assert.equal(blockedReview.task.preLease, true);
+  const acquiredReview = await acquireTaskLease({
+    directory,
+    id: "T-MIGRATE-REVIEW",
+    ownerThread: "migrated-review-thread",
+    write: ["src/review.ts"]
+  });
+  assert.equal(acquiredReview.task.preLease, undefined);
+  assert.equal(acquiredReview.lease.generation, 1);
+  const resumedReview = await transitionTask({
+    directory,
+    id: "T-MIGRATE-REVIEW",
+    to: "REVIEW",
+    revision: 1
+  });
+  assert.equal(resumedReview.task.state, "REVIEW");
 
   const postAcquireEvents = (await readFile(eventsPath, "utf8")).trim().split("\n").map(line => JSON.parse(line));
   const duplicateBoundary = postAcquireEvents.at(-1);
