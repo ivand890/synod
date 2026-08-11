@@ -18,7 +18,7 @@ import path from "node:path";
 import { compareCheckpointPaths } from "./checkpoint.js";
 import type { CheckpointEntry, CheckpointSnapshot } from "./checkpoint.js";
 import { ERROR_CODES, SynodError } from "./errors.js";
-import { isLeaseScope, type LeaseScope } from "./leases.js";
+import { isLeaseScope, normalizeLeaseScopePath, type LeaseScope } from "./leases.js";
 import { captureGitCheckpointSnapshot, checkpointDrift, withValidatedCheckpointSource } from "./orchestration.js";
 import type { GitCheckpoint, OrchestrationDependencies, OrchestrationLastEvent } from "./orchestration.js";
 import { packageVersion } from "./package.js";
@@ -205,6 +205,14 @@ function isSortedUniqueStringArray(value: unknown): value is string[] {
     && value.every(item => typeof item === "string" && item.length > 0)
     && new Set(value).size === value.length
     && value.every((item, index) => index === 0 || value[index - 1]! < item);
+}
+
+function isSafeProposalPath(value: string): boolean {
+  try {
+    return normalizeLeaseScopePath(value) === value;
+  } catch {
+    return false;
+  }
 }
 
 function hasUnpairedSurrogate(value: string): boolean {
@@ -410,7 +418,7 @@ export function validateRecoveryManifest(value: unknown): RecoveryManifest {
       || !candidate.scopes.every(isLeaseScope)
       || !candidate.scopes.some(scope => scope.access === "write")
       || !isSortedUniqueStringArray(candidate.ownedPaths)
-      || !candidate.ownedPaths.every(isSafePath)
+      || !candidate.ownedPaths.every(isSafeProposalPath)
       || !isRecord(candidate.baseline)
       || !exactKeys(candidate.baseline, ["snapshotHash", "worktreeFingerprint"])
       || !isHash(candidate.baseline.snapshotHash)

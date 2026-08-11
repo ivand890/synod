@@ -914,3 +914,26 @@ test("verification rejects tampered objects, extra material, traversal, and syml
     }
   }
 });
+
+test("proposal identities reject administrative owned paths", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "reserved-proposal.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true });
+  await rewriteManifest(bundle, manifest => {
+    manifest.proposal = {
+      taskId: "T-RESERVED",
+      leaseId: "11111111-1111-4111-8111-111111111111",
+      generation: 1,
+      baseRevision: 0,
+      revision: 1,
+      scopes: [{ path: "src/task.ts", access: "write", kind: "file" }],
+      ownedPaths: [".git/index"],
+      baseline: {
+        snapshotHash: manifest.checkpoint.snapshotHash,
+        worktreeFingerprint: manifest.checkpoint.fingerprint
+      }
+    };
+  });
+
+  await assert.rejects(verifyRecoveryBundle({ bundle }), { code: ERROR_CODES.RECOVERY_BUNDLE_INVALID });
+});

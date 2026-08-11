@@ -110,6 +110,8 @@ test("prints version and help", () => {
   assert.match(help.stdout, /--explain/);
   assert.match(help.stdout, /synod task add/);
   assert.match(help.stdout, /synod lease acquire/);
+  assert.match(help.stdout, /--write-tree/);
+  assert.match(help.stdout, /--read-tree/);
   assert.match(help.stdout, /synod bundle export/);
 });
 

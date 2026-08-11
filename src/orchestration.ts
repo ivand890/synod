@@ -1040,7 +1040,7 @@ export async function createCheckpointSnapshotAdoptionFiles(
   targetDirectory: string,
   dependencies: OrchestrationDependencies = {}
 ): Promise<CheckpointSnapshotAdoption> {
-  const { state } = await validateOrchestrationReadOnly({ directory: targetDirectory });
+  const { state } = await validateCanonicalOrchestrationReadOnly(targetDirectory);
   if (state.checkpoint.worktree.snapshot) return { status: "current" };
   const captured = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
   if (checkpointDrift(state.checkpoint, captured.checkpoint).detected) return { status: "unavailable" };
@@ -1064,6 +1064,11 @@ export async function createCheckpointSnapshotAdoptionFiles(
       [CHECKPOINT_SNAPSHOT_PATH, serializeCheckpointSnapshot(captured.snapshot)]
     ])
   };
+}
+
+export async function createOrchestrationStatusProjectionFile(targetDirectory: string): Promise<string> {
+  const { state } = await validateCanonicalOrchestrationReadOnly(targetDirectory);
+  return renderStatusMarkdown(state);
 }
 
 function invalidState(message: string, details?: unknown): never {
@@ -1542,7 +1547,7 @@ async function readLeaseBaselines(
         taskRevision: task.revision,
         reference: task.lease.baseline
       }] : []),
-      ...(task.proposal ? [{
+      ...(proposalReservesPaths(task) && task.proposal ? [{
         id: task.proposal.leaseId,
         generation: task.proposal.generation,
         taskRevision: task.proposal.baseRevision,
@@ -2332,7 +2337,9 @@ function retainedLeaseBaselines(
     leaseBaselines,
     taskList(state).flatMap(task => [
       ...(task.lease ? [task.lease] : []),
-      ...(task.proposal ? [{ id: task.proposal.leaseId, generation: task.proposal.generation }] : [])
+      ...(proposalReservesPaths(task) && task.proposal
+        ? [{ id: task.proposal.leaseId, generation: task.proposal.generation }]
+        : [])
     ])
   );
   return retained.baselines.length === leaseBaselines.baselines.length ? undefined : retained;
@@ -3197,7 +3204,7 @@ export async function transitionTask({
     }
     if (targetState === "SUPERSEDED") task.supersededReason = String(reason).trim();
 
-    const leaseBaselines = releasedLease || targetState === "SUPERSEDED"
+    const leaseBaselines = releasedLease || targetState === "DONE" || targetState === "SUPERSEDED"
       ? retainedLeaseBaselines(state, context.leaseBaselines)
       : undefined;
     return {
@@ -3387,17 +3394,9 @@ export async function validateOrchestrationReadOnly(
   { directory = "." }: { directory?: string } = {}
 ): Promise<{ state: OrchestrationState; events: OrchestrationEvent[]; snapshot?: CheckpointSnapshot }> {
   const targetDirectory = path.resolve(directory);
-  const pending = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
-  if (pending.type !== "missing") {
-    throw new SynodError(
-      ERROR_CODES.ORCHESTRATION_STATE_INVALID,
-      "Pending orchestration recovery is required; refusing to mutate records during read-only validation.",
-      { details: { path: ORCHESTRATION_PENDING_PATH, type: pending.type } }
-    );
-  }
-  const { state, events, snapshot } = await readOrchestrationRaw(targetDirectory);
+  const canonical = await validateCanonicalOrchestrationReadOnly(targetDirectory);
   const markdown = await readRecord(targetDirectory, ORCHESTRATION_STATUS_PATH);
-  const expectedMarkdown = renderStatusMarkdown(state);
+  const expectedMarkdown = renderStatusMarkdown(canonical.state);
   if (contentHash(markdown) !== contentHash(expectedMarkdown)) {
     throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, "Generated Markdown status does not match canonical orchestration state.", {
       details: {
@@ -3407,6 +3406,21 @@ export async function validateOrchestrationReadOnly(
       }
     });
   }
+  return canonical;
+}
+
+async function validateCanonicalOrchestrationReadOnly(
+  targetDirectory: string
+): Promise<{ state: OrchestrationState; events: OrchestrationEvent[]; snapshot?: CheckpointSnapshot }> {
+  const pending = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
+  if (pending.type !== "missing") {
+    throw new SynodError(
+      ERROR_CODES.ORCHESTRATION_STATE_INVALID,
+      "Pending orchestration recovery is required; refusing to mutate records during read-only validation.",
+      { details: { path: ORCHESTRATION_PENDING_PATH, type: pending.type } }
+    );
+  }
+  const { state, events, snapshot } = await readOrchestrationRaw(targetDirectory);
   return { state, events, ...(snapshot ? { snapshot } : {}) };
 }
 

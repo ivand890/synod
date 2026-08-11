@@ -45,7 +45,7 @@ Usage:
   synod bundle restore <bundle> --cwd <directory> [--json]
   synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--cwd <directory>] [--json]
   synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
-  synod lease acquire <task-id> --owner-thread <thread-id> (--write <path> | --write-tree <path>) [--read <path>] [--read-tree <path>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
+  synod lease acquire <task-id> --owner-thread <thread-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
   synod lease heartbeat <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
   synod lease release <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
   synod lease expire <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --reason <text> [--cwd <directory>] [--json]
@@ -85,6 +85,9 @@ Options:
               Bind a writer lease to one opaque Codex thread ID.
   --write     Add a repository-relative writer scope to a lease.
   --read      Add a repository-relative read scope to a lease.
+  --write-tree
+              Add a repository-relative writer scope covering a directory tree.
+  --read-tree Add a repository-relative read scope covering a directory tree.
   --explain   Include a read-only path-level delta from the acknowledged checkpoint.
   --include-untracked
               Include acknowledged untracked files in a recovery bundle.

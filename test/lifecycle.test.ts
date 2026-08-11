@@ -307,6 +307,23 @@ test("upgrade preserves stale user guidance and emits an explicit repair path", 
   }
 });
 
+test("upgrade regenerates a stale status projection and records its new hash", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory, profile: "portable" });
+  const statusPath = path.join(directory, "docs/synod/STATUS.md");
+  await writeFile(statusPath, "# Stale pre-upgrade status\n", "utf8");
+
+  const upgraded = await upgradeProject({ directory, profile: "portable" });
+
+  assert.ok(upgraded.updated.includes("docs/synod/STATUS.md"));
+  const canonical = await readOrchestration(directory);
+  const status = await readFile(statusPath, "utf8");
+  assert.equal(status, renderStatusMarkdown(canonical.state));
+  const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
+  const statusEntry = manifest.files.find((entry: { path?: unknown }) => entry.path === "docs/synod/STATUS.md");
+  assert.equal(statusEntry.contentHash, contentHash(status));
+});
+
 test("uninstall removes owned infrastructure and preserves user state and AGENTS content", async () => {
   const directory = await temporaryProject();
   const agentsPath = path.join(directory, "AGENTS.md");
@@ -746,7 +763,7 @@ test("upgrade atomically adopts a matching legacy checkpoint snapshot", async ()
   state.lastEvent.hash = event.eventHash;
   await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
   await writeFile(eventsPath, `${JSON.stringify(event)}\n`, "utf8");
-  await writeFile(statusPath, renderStatusMarkdown(state), "utf8");
+  await writeFile(statusPath, "# Stale pre-adoption status\n", "utf8");
   await unlink(checkpointPath);
   const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   manifest.files = manifest.files.filter((entry: { path?: unknown }) => entry.path !== ".synod/checkpoint.json");
@@ -764,6 +781,7 @@ test("upgrade atomically adopts a matching legacy checkpoint snapshot", async ()
   assert.equal(adoptedState.checkpoint.worktree.snapshot.contentHash, snapshot.contentHash);
   assert.equal(snapshot.worktreeFingerprint, adoptedState.checkpoint.worktree.fingerprint);
   assert.ok(result.updated.includes(".synod/state.json"));
+  assert.equal(await readFile(statusPath, "utf8"), renderStatusMarkdown(adoptedState));
 });
 
 test("upgrade preserves a drifted legacy checkpoint without creating a mismatched snapshot", async () => {
