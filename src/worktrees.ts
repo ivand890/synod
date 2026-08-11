@@ -137,6 +137,7 @@ export interface TaskWorktreeDependencies {
     | "after-proposal-publish"
     | "after-integration-intent"
     | "after-integration-restore"
+    | "before-integration-complete"
     | "after-cleanup-intent"
     | "after-cleanup-remove"
   ) => void | Promise<void>;
@@ -534,6 +535,34 @@ function appendEvent(
   registry.events.push({ ...core, eventHash: hashEvent(core) });
 }
 
+function rechainEvents(events: TaskWorktreeEvent[]): TaskWorktreeEvent[] {
+  let previousHash: string | null = null;
+  return events.map((event, index) => {
+    const { eventHash: _eventHash, ...priorCore } = event;
+    const core: Omit<TaskWorktreeEvent, "eventHash"> = {
+      ...priorCore,
+      sequence: index + 1,
+      previousHash
+    };
+    const rechained = { ...core, eventHash: hashEvent(core) };
+    previousHash = rechained.eventHash;
+    return rechained;
+  });
+}
+
+function makeRoomForWorktreeRecord(registry: TaskWorktreeRegistry) {
+  while (registry.records.length >= MAX_WORKTREE_RECORDS) {
+    const completed = registry.records.findIndex(record => record.cleanup.status === "COMPLETE");
+    if (completed === -1) {
+      conflict("Task worktree registry is full of active records; clean a worktree before creating another.", {
+        limit: MAX_WORKTREE_RECORDS
+      });
+    }
+    const [removed] = registry.records.splice(completed, 1);
+    registry.events = rechainEvents(registry.events.filter(event => event.worktreeId !== removed!.id));
+  }
+}
+
 function assertLease(
   taskId: string,
   lease: TaskLease | undefined,
@@ -587,7 +616,9 @@ async function inspectRegisteredWorktree(
   const destinationType = await pathType(record.worktreePath);
   if (!listed && destinationType === "missing") {
     const currentRegistrations = entries.map(item => item.path).sort();
-    const intentRegistrations = [...record.registrationsAtIntent].sort();
+    const intentRegistrations = [...(record.cleanup.status === "INTENT" && record.cleanup.registrationsAtIntent
+      ? record.cleanup.registrationsAtIntent
+      : record.registrationsAtIntent)].sort();
     if (currentRegistrations.length === intentRegistrations.length
       && currentRegistrations.every((item, index) => item === intentRegistrations[index])) {
       return { record, reconciliation: "absent_resumable", reasons: ["path and Git registration are absent"] };
@@ -620,7 +651,9 @@ async function inspectRegisteredWorktree(
       if (branch !== null) reasons.push("live worktree is attached to a branch");
       if (record.worktreeIdentity && !sameIdentity(record.worktreeIdentity, currentIdentity)) reasons.push("filesystem identity changed");
       if (record.creation.status === "INTENT"
-        && (await gitRunner(record.worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length > 0) {
+        && (await gitRunner(record.worktreePath, [
+          "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none"
+        ])).length > 0) {
         reasons.push("interrupted creation worktree is not clean");
       }
     } catch (error) {
@@ -669,6 +702,11 @@ async function completeRecord(
       clean: snapshot.checkpoint.worktree.clean
     });
   }
+  record.worktreeIdentity = await identity(record.worktreePath);
+  record.gitDirectory = await realpath((await gitRunner(record.worktreePath, [
+    "rev-parse", "--path-format=absolute", "--absolute-git-dir"
+  ])).toString("utf8").trim());
+  record.gitDirectoryIdentity = await identity(record.gitDirectory);
   const completedAt = now();
   if (Date.parse(lease.expiresAt) <= completedAt.getTime()) {
     conflict(`Task ${record.taskId} writer lease expired before worktree creation completed.`, {
@@ -676,11 +714,6 @@ async function completeRecord(
     });
   }
   const timestamp = completedAt.toISOString();
-  record.worktreeIdentity = await identity(record.worktreePath);
-  record.gitDirectory = await realpath((await gitRunner(record.worktreePath, [
-    "rev-parse", "--path-format=absolute", "--absolute-git-dir"
-  ])).toString("utf8").trim());
-  record.gitDirectoryIdentity = await identity(record.gitDirectory);
   record.creation = { ...record.creation, status: "COMPLETE", completedAt: timestamp };
   record.lastCapturedFingerprint = snapshot.checkpoint.worktree.fingerprint;
   record.updatedAt = timestamp;
@@ -708,6 +741,13 @@ async function addDetachedWorktree(
   const listed = parseWorktreeList(await gitRunner(control.controlRoot, ["worktree", "list", "--porcelain", "-z"]));
   if (listed.some(item => item.path === record.worktreePath)) {
     reconciliationRequired("Task worktree destination has a foreign Git registration.", { destination: record.worktreePath });
+  }
+  const containing = listed.find(item => within(item.path, record.worktreePath));
+  if (containing) {
+    reconciliationRequired("Task worktree destination became nested in a registered Git worktree.", {
+      destination: record.worktreePath,
+      registeredWorktree: containing.path
+    });
   }
   await gitRunner(control.controlRoot, ["worktree", "add", "--detach", record.worktreePath, record.baseHead]);
   await assertControlUnchanged(control, gitRunner);
@@ -769,6 +809,13 @@ export async function createTaskWorktree(
     if (await pathType(worktreePath) !== "missing") conflict("Task worktree destination already exists.", { destination: worktreePath });
     const listed = parseWorktreeList(await gitRunner(control.controlRoot, ["worktree", "list", "--porcelain", "-z"]));
     if (listed.some(item => item.path === worktreePath)) conflict("Task worktree destination has a foreign Git registration.", { destination: worktreePath });
+    const containing = listed.find(item => within(item.path, worktreePath));
+    if (containing) {
+      conflict("Task worktree destination must not be nested in a registered Git worktree.", {
+        destination: worktreePath,
+        registeredWorktree: containing.path
+      });
+    }
 
     const timestamp = now().toISOString();
     const record: TaskWorktreeRecord = {
@@ -792,6 +839,7 @@ export async function createTaskWorktree(
       cleanup: { status: "ACTIVE" },
       updatedAt: timestamp
     };
+    makeRoomForWorktreeRecord(loaded.registry);
     loaded.registry.records.push(record);
     appendEvent(loaded.registry, record, "worktree.create.intent", timestamp, {
       path: worktreePath,
@@ -1129,11 +1177,25 @@ export async function integrateTaskWorktreeProposal(
       directory: control.controlRoot,
       expectedUnrelatedEntries: unrelatedProposalEntries(boundaryControl, verified.manifest.proposal.ownedPaths)
     }, { ...(dependencies.restoreHook ? { restoreHook: dependencies.restoreHook } : {}) });
+    await assertControlUnchanged(control, gitRunner);
+    await dependencies.worktreeHook?.("before-integration-complete");
+    const completionBoundary = await captureGitCheckpointSnapshot(control.controlRoot);
+    if (completionBoundary.checkpoint.head !== record.baseHead
+      || completionBoundary.checkpoint.branch !== control.sourceBranch
+      || completionBoundary.checkpoint.worktree.fingerprint !== boundaryRestore.overallFingerprint) {
+      reconciliationRequired("Control checkout changed at the proposal integration completion boundary.", {
+        expectedHead: record.baseHead,
+        actualHead: completionBoundary.checkpoint.head,
+        expectedBranch: control.sourceBranch,
+        actualBranch: completionBoundary.checkpoint.branch,
+        expectedFingerprint: boundaryRestore.overallFingerprint,
+        actualFingerprint: completionBoundary.checkpoint.worktree.fingerprint
+      });
+    }
     const integratedAt = now();
     if (Date.parse(lease.expiresAt) <= integratedAt.getTime()) {
       conflict(`Task ${taskId} writer lease expired before proposal integration completed.`, { expiresAt: lease.expiresAt });
     }
-    await assertControlUnchanged(control, gitRunner);
     const refreshed = await readRegistry(control.controlRoot);
     const refreshedRecord = refreshed.registry.records.find(item => item.id === record.id);
     if (!refreshedRecord || refreshedRecord.integration.status !== "INTENT") invalid("Task worktree integration intent disappeared.");
@@ -1179,7 +1241,9 @@ export async function cleanupTaskWorktree(
         reconciliationRequired("Task worktree identity changed before cleanup.", physical);
       }
       if (physical.reconciliation === "complete"
-        && (await gitRunner(record.worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length > 0) {
+        && (await gitRunner(record.worktreePath, [
+          "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none"
+        ])).length > 0) {
         conflict("Task worktree cleanup refuses dirty or untracked material.", { recordId: record.id });
       }
       const registrations = parseWorktreeList(await gitRunner(control.controlRoot, ["worktree", "list", "--porcelain", "-z"]));
@@ -1201,7 +1265,9 @@ export async function cleanupTaskWorktree(
     if (listed) {
       const physical = await inspectRegisteredWorktree(control, refreshedRecord, gitRunner, { requireControlBase: false });
       if (physical.reconciliation !== "complete") reconciliationRequired("Task worktree cleanup requires manual reconciliation.", physical);
-      if ((await gitRunner(refreshedRecord.worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length > 0) {
+      if ((await gitRunner(refreshedRecord.worktreePath, [
+        "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none"
+      ])).length > 0) {
         conflict("Task worktree cleanup refuses dirty or untracked material.", { recordId: refreshedRecord.id });
       }
       const others = currentEntries.filter(item => item.path !== refreshedRecord.worktreePath).map(item => item.path);

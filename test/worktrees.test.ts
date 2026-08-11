@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -6,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
+import { stableCheckpointStringify } from "../src/checkpoint.js";
 import { initProject } from "../src/lifecycle.js";
 import { acquireTaskLease, addTask, releaseTaskLease, transitionTask } from "../src/orchestration.js";
 import {
@@ -37,6 +39,7 @@ async function fixture() {
   await git(control, "config", "user.email", "synod-tests@example.invalid");
   await git(control, "config", "commit.gpgsign", "false");
   await writeFile(path.join(control, "source.txt"), "base\n");
+  await writeFile(path.join(control, ".gitignore"), "ignored.txt\n");
   await git(control, "add", ".");
   await git(control, "commit", "--quiet", "-m", "fixture");
   await addTask({
@@ -128,6 +131,18 @@ test("rejects existing, in-control, and symlink destinations before registration
     );
     await assert.rejects(readFile(path.join(fixtureData.control, TASK_WORKTREES_PATH), "utf8"), { code: "ENOENT" });
   }
+});
+
+test("rejects destinations nested in another registered worktree", async () => {
+  const data = await fixture();
+  const outer = path.join(data.root, "outer-worktree");
+  await git(data.control, "worktree", "add", "--detach", outer, "HEAD");
+  await assert.rejects(
+    createTaskWorktree({ ...data.options, destination: path.join(outer, "nested-worktree") }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_CONFLICT
+  );
+  assert.equal(await git(outer, "status", "--porcelain"), "");
+  await assert.rejects(readFile(path.join(data.control, TASK_WORKTREES_PATH), "utf8"), { code: "ENOENT" });
 });
 
 test("fails closed when the exact lease fence or control HEAD moves", async () => {
@@ -311,6 +326,27 @@ test("reconciles killed integration after restore without applying the proposal 
   assert.equal(await readFile(path.join(control, "src/t-001.ts"), "utf8"), "proposal\n");
 });
 
+test("integration rechecks checkout contents at the completion boundary", async () => {
+  const { control, destination, options } = await fixture();
+  await createTaskWorktree(options);
+  await activate(control);
+  await mkdir(path.join(destination, "src"));
+  await writeFile(path.join(destination, "src/t-001.ts"), "proposal\n");
+  await sealTaskWorktreeProposal(options);
+  await assert.rejects(
+    integrateTaskWorktreeProposal(options, {
+      async worktreeHook(stage) {
+        if (stage === "before-integration-complete") {
+          await writeFile(path.join(control, "src/t-001.ts"), "raced after restore\n");
+        }
+      }
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_RECONCILIATION_REQUIRED
+  );
+  const status = await taskWorktreeStatus({ directory: control, taskId: "T-001" });
+  assert.equal(status.record.integration.status, "INTENT");
+});
+
 test("cleanup is explicit, non-force, interruption-safe, and unblocks a new generation", async () => {
   for (const interruptedStage of ["after-cleanup-intent", "after-cleanup-remove"] as const) {
     const data = await fixture();
@@ -361,14 +397,93 @@ test("cleanup is explicit, non-force, interruption-safe, and unblocks a new gene
 });
 
 test("cleanup refuses dirty or untracked worktree material", async () => {
-  const { control, destination, options } = await fixture();
+  for (const filename of ["untracked.txt", "ignored.txt"]) {
+    const { control, destination, options } = await fixture();
+    await createTaskWorktree(options);
+    await writeFile(path.join(destination, filename), "preserve me\n");
+    await assert.rejects(
+      cleanupTaskWorktree({ directory: control, taskId: "T-001" }),
+      error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_CONFLICT
+    );
+    assert.equal(await readFile(path.join(destination, filename), "utf8"), "preserve me\n");
+  }
+});
+
+test("cleanup reconciliation preserves unrelated registered worktrees", async () => {
+  const { root, control, options } = await fixture();
   await createTaskWorktree(options);
-  await writeFile(path.join(destination, "untracked.txt"), "preserve me\n");
+  const unrelated = path.join(root, "unrelated-worktree");
+  await git(control, "worktree", "add", "--detach", unrelated, "HEAD");
   await assert.rejects(
-    cleanupTaskWorktree({ directory: control, taskId: "T-001" }),
-    error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_CONFLICT
+    cleanupTaskWorktree({ directory: control, taskId: "T-001" }, {
+      worktreeHook(stage) {
+        if (stage === "after-cleanup-remove") throw new Error("simulated cleanup stop");
+      }
+    }),
+    /simulated cleanup stop/
   );
-  assert.equal(await readFile(path.join(destination, "untracked.txt"), "utf8"), "preserve me\n");
+  const interrupted = await taskWorktreeStatus({ directory: control, taskId: "T-001" });
+  assert.equal(interrupted.reconciliation, "absent_resumable");
+  assert.equal((await cleanupTaskWorktree({ directory: control, taskId: "T-001" })).cleanup.status, "COMPLETE");
+  assert.equal(await git(unrelated, "rev-parse", "HEAD"), await git(control, "rev-parse", "HEAD"));
+});
+
+test("completed history rotates before the registry record limit blocks new work", async () => {
+  const data = await fixture();
+  await createTaskWorktree(data.options);
+  await cleanupTaskWorktree({ directory: data.control, taskId: "T-001" });
+  const registryPath = path.join(data.control, TASK_WORKTREES_PATH);
+  const template = JSON.parse(await readFile(registryPath, "utf8"));
+  const records: unknown[] = [];
+  const events: any[] = [];
+  let previousHash: string | null = null;
+  for (let index = 0; index < 128; index += 1) {
+    const recordId = randomUUID();
+    for (const templateEvent of template.events) {
+      const event = structuredClone(templateEvent);
+      event.sequence = events.length + 1;
+      event.id = randomUUID();
+      event.worktreeId = recordId;
+      event.previousHash = previousHash;
+      event.payload.record.id = recordId;
+      const { eventHash: _eventHash, ...core } = event;
+      event.eventHash = `sha256:${createHash("sha256").update(stableCheckpointStringify(core), "utf8").digest("hex")}`;
+      previousHash = event.eventHash;
+      events.push(event);
+    }
+    records.push(structuredClone(events.at(-1)!.payload.record));
+  }
+  await writeFile(registryPath, `${JSON.stringify({ schemaVersion: 1, records, events }, null, 2)}\n`);
+  await releaseTaskLease({
+    directory: data.control,
+    id: "T-001",
+    leaseId: data.lease.id,
+    generation: data.lease.generation,
+    revision: data.lease.taskRevision,
+    expectedHeartbeatAt: data.lease.heartbeatAt,
+    ownerThread: data.lease.ownerThread
+  });
+  const next = await acquireTaskLease({
+    directory: data.control,
+    id: "T-001",
+    ownerThread: "thread:T-001-next",
+    writeTree: ["src"]
+  });
+  await createTaskWorktree({
+    directory: data.control,
+    taskId: "T-001",
+    destination: path.join(data.root, "task-T-001-next"),
+    leaseId: next.lease.id,
+    generation: next.lease.generation,
+    revision: next.lease.taskRevision,
+    expectedHeartbeatAt: next.lease.heartbeatAt,
+    ownerThread: next.lease.ownerThread
+  });
+  const rotated = validateTaskWorktreeRegistry(JSON.parse(await readFile(registryPath, "utf8")));
+  assert.equal(rotated.records.length, 128);
+  assert.equal(rotated.records.filter(record => record.cleanup.status !== "COMPLETE").length, 1);
+  assert.equal(rotated.events[0]?.sequence, 1);
+  assert.equal(rotated.events[0]?.previousHash, null);
 });
 
 test("requires manual reconciliation after a registered worktree changes", async () => {
