@@ -264,6 +264,7 @@ interface MutationContext {
   timestamp: string;
   checkpoint: GitCheckpoint;
   snapshot: CheckpointSnapshot;
+  acknowledgedSnapshot?: CheckpointSnapshot;
   leaseBaselines: LeaseBaselinesLedger;
   nextSequence: number;
 }
@@ -2112,7 +2113,11 @@ async function commitMutation<Result extends Record<string, unknown>>(
   const release = await acquireLock(targetDirectory);
   try {
     await recoverPendingMutation(targetDirectory);
-    const { state: current, leaseBaselines: currentLeaseBaselines } = await readOrchestrationRaw(targetDirectory);
+    const {
+      state: current,
+      leaseBaselines: currentLeaseBaselines,
+      snapshot: acknowledgedSnapshot
+    } = await readOrchestrationRaw(targetDirectory);
     const timestamp = nowIso(dependencies.clock);
     const captured = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
     const checkpoint = captured.checkpoint;
@@ -2121,6 +2126,7 @@ async function commitMutation<Result extends Record<string, unknown>>(
       timestamp,
       checkpoint,
       snapshot: captured.snapshot,
+      ...(acknowledgedSnapshot ? { acknowledgedSnapshot } : {}),
       leaseBaselines: currentLeaseBaselines,
       nextSequence: current.lastEvent.sequence + 1
     }) || {};
@@ -2352,7 +2358,7 @@ async function validateLeaseScopeFilesystemPaths(targetDirectory: string, scopes
     const type = await pathType(absolutePath);
     const invalidTarget = scope.kind === "tree"
       ? type !== "missing" && type !== "directory"
-      : type === "directory" || type === "other";
+      : type === "directory" || type === "other" || type === "symlink";
     if (unsafe || invalidTarget) {
       throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease scope has an unsafe ancestor or incompatible target: ${scope.path}`, {
         details: { path: scope.path, kind: scope.kind, ...(unsafe ? { unsafeAncestor: unsafe } : { type }) }
@@ -2472,6 +2478,11 @@ function proposalSnapshot(
     worktreeFingerprint: sha256(stableCheckpointStringify(entries)),
     entries
   }));
+}
+
+function snapshotFingerprintForPaths(snapshot: CheckpointSnapshot, paths: readonly string[]): string {
+  const selected = new Set(paths);
+  return sha256(stableCheckpointStringify(snapshot.entries.filter(entry => selected.has(entry.path))));
 }
 
 function rejectUnacceptableLeaseDrift(task: OrchestrationTask, classified: ClassifiedLeaseDelta): void {
@@ -2804,13 +2815,49 @@ export async function acquireTaskLease({
       });
     }
     for (const other of taskList(state)) {
-      if (!other.lease) continue;
-      const collisions = scopes.filter(scope => other.lease?.scopes.some(existing => leaseScopesOverlap(scope, existing)));
+      const leaseCollisions = other.lease
+        ? scopes.filter(scope => other.lease?.scopes.some(existing => leaseScopesOverlap(scope, existing)))
+        : [];
+      const proposalCollisions = other.id !== taskId && proposalReservesPaths(other) && other.proposal
+        ? scopes.filter(scope => scope.access === "write" && other.proposal?.ownedPaths.some(candidate =>
+          leaseScopeCoversPath(scope, candidate)
+        ))
+        : [];
+      const collisions = [...leaseCollisions, ...proposalCollisions];
       if (collisions.length > 0) {
         throw new SynodError(ERROR_CODES.LEASE_CONFLICT, `Task ${taskId} write scope overlaps task ${other.id}.`, {
           details: { taskId, conflictingTaskId: other.id, paths: collisions.map(scope => scope.path) }
         });
       }
+    }
+    if (!context.acknowledgedSnapshot) {
+      throw new SynodError(ERROR_CODES.CHECKPOINT_SNAPSHOT_INVALID, "A writer lease requires an acknowledged checkpoint snapshot.", {
+        details: { taskId }
+      });
+    }
+    const attributableTerminalPaths = new Set(taskList(state).flatMap(other => {
+      if (!other.proposal || (!TERMINAL_STATES.has(other.state) && other.id !== taskId)) return [];
+      return snapshotFingerprintForPaths(context.snapshot, other.proposal.ownedPaths) === other.proposal.fingerprint
+        ? other.proposal.ownedPaths.map(candidate => candidate.normalize("NFC").toLowerCase())
+        : [];
+    }));
+    const preexistingDrift = explainCheckpointDelta(context.acknowledgedSnapshot, context.snapshot).paths.filter(item => {
+      if (!item.staged && !item.unstaged && !item.untracked) return false;
+      const affected = deltaPaths(item);
+      const touchesWriterScope = affected.some(candidate => scopes.some(scope =>
+        scope.access === "write" && leaseScopeCoversPath(scope, candidate)
+      ));
+      return touchesWriterScope && !affected.every(candidate =>
+        attributableTerminalPaths.has(candidate.normalize("NFC").toLowerCase())
+      );
+    });
+    if (preexistingDrift.length > 0) {
+      throw new SynodError(ERROR_CODES.LEASE_SCOPE_DRIFT, `Task ${taskId} writer scope contains pre-existing unowned drift.`, {
+        details: {
+          taskId,
+          paths: preexistingDrift.map(item => ({ path: item.path, ...(item.sourcePath ? { sourcePath: item.sourcePath } : {}) }))
+        }
+      });
     }
     task.leaseGeneration += 1;
     const lease: TaskLease = {

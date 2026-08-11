@@ -188,6 +188,8 @@ test("a correction round invalidates prior acceptance and advances the next deli
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
   await acquireDefaultLease(directory);
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/t-001.ts"), "first revision\n");
   await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery:r1"] });
   await transitionTask({ directory, id: "T-001", to: "ACCEPTED", revision: 1, evidence: ["acceptance:r1"] });
   await acquireDefaultLease(directory);
@@ -717,6 +719,50 @@ test("overlapping writer acquisition races leave exactly one canonical owner", a
   );
 });
 
+test("writer acquisition rejects pre-existing unowned drift in its scope", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-A" });
+  await addDefaultTask(directory, { id: "T-B" });
+  await transitionTask({ directory, id: "T-A", to: "READY", revision: 0 });
+  await transitionTask({ directory, id: "T-B", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-A", ownerThread: "thread:a", write: ["src/a.ts"] });
+  await transitionTask({ directory, id: "T-A", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/b.ts"), "unowned before lease\n");
+
+  await assert.rejects(
+    acquireTaskLease({ directory, id: "T-B", ownerThread: "thread:b", write: ["src/b.ts"] }),
+    error => error instanceof SynodError
+      && error.code === ERROR_CODES.LEASE_SCOPE_DRIFT
+      && isRecord(error.details)
+      && Array.isArray(error.details.paths)
+      && isRecord(error.details.paths[0])
+      && error.details.paths[0].path === "src/b.ts"
+  );
+  assert.equal((await readOrchestration(directory)).state.tasks["T-B"]?.lease, undefined);
+});
+
+test("writer acquisition rejects paths reserved by a proposal awaiting review", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-FIRST" });
+  await addDefaultTask(directory, { id: "T-LATER" });
+  await transitionTask({ directory, id: "T-FIRST", to: "READY", revision: 0 });
+  await transitionTask({ directory, id: "T-LATER", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-FIRST", ownerThread: "thread:first", write: ["src/shared.ts"] });
+  await transitionTask({ directory, id: "T-FIRST", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/shared.ts"), "first\n");
+  await transitionTask({ directory, id: "T-FIRST", to: "REVIEW", revision: 1, evidence: ["delivery:first"] });
+
+  await assert.rejects(
+    acquireTaskLease({ directory, id: "T-LATER", ownerThread: "thread:later", write: ["src/shared.ts"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_CONFLICT
+  );
+  assert.equal((await readOrchestration(directory)).state.tasks["T-LATER"]?.lease, undefined);
+});
+
 test("writer acquisition requires an exact Git base before recording ownership", async () => {
   const directory = await temporaryProject();
   await addDefaultTask(directory);
@@ -806,6 +852,29 @@ test("expiry and revocation block active work while fencing stale owners", async
       ownerThread: "thread:two"
     }),
     error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_NOT_FOUND
+  );
+});
+
+test("writer acquisition rejects an exact file scope whose target is a symlink", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await mkdir(path.join(directory, "src"));
+  await writeFile(path.join(directory, "outside.ts"), "outside\n");
+  await symlink("../outside.ts", path.join(directory, "src/linked.ts"));
+
+  await assert.rejects(
+    acquireTaskLease({
+      directory,
+      id: "T-001",
+      ownerThread: "thread:symlink",
+      write: ["src/linked.ts"]
+    }),
+    error => error instanceof SynodError
+      && error.code === ERROR_CODES.LEASE_INVALID
+      && isRecord(error.details)
+      && error.details.type === "symlink"
   );
 });
 
