@@ -59,6 +59,10 @@ class FakeChild extends EventEmitter implements AppServerChild {
     queueMicrotask(() => this.stdout.write(`${JSON.stringify({ id, result })}\n`));
   }
 
+  notify(method: string, params: unknown): void {
+    queueMicrotask(() => this.stdout.write(`${JSON.stringify({ method, params })}\n`));
+  }
+
   exit(code: number | null = 0, signal: NodeJS.Signals | null = null): void {
     this.exitCode = code;
     this.signalCode = signal;
@@ -105,9 +109,14 @@ function respondingChild(options?: { exitOnTerm?: boolean; exitOnKill?: boolean 
 
 test("spawns, initializes, probes, and resolves App Server responses", async () => {
   const child = respondingChild();
-  const calls: Array<{ command: string; args: string[]; options: { stdio: ["pipe", "pipe", "pipe"] } }> = [];
+  const calls: Array<{
+    command: string;
+    args: string[];
+    options: { stdio: ["pipe", "pipe", "pipe"]; cwd?: string };
+  }> = [];
   const client = new CodexAppServerClient({
     codexBin: "custom-codex",
+    cwd: "/tmp/project",
     spawnProcess(command, args, options) {
       calls.push({ command, args, options });
       return child;
@@ -124,7 +133,7 @@ test("spawns, initializes, probes, and resolves App Server responses", async () 
   assert.deepEqual(calls, [{
     command: "custom-codex",
     args: ["app-server"],
-    options: { stdio: ["pipe", "pipe", "pipe"] }
+    options: { stdio: ["pipe", "pipe", "pipe"], cwd: "/tmp/project" }
   }]);
   assert.deepEqual(response, { value: 42 });
   assert.deepEqual(models.map(model => model.id), ["gpt-test", "gpt-second"]);
@@ -169,6 +178,8 @@ test("distinguishes Codex Desktop from Codex CLI user agents", async () => {
     },
     { surface: "desktop", version: "0.147.0-alpha.6.5" }
   );
+  assert.equal(cliClient.supportsThreadStatusNotifications(), false);
+  assert.equal(desktopClient.supportsThreadStatusNotifications(), true);
 
   await cliClient.close();
   await desktopClient.close();
@@ -248,6 +259,35 @@ test("rejects pending requests when App Server exits", async () => {
       && error.details.code === 17
   );
   await client.close();
+});
+
+test("delivers server notifications and connection failures to bounded subscribers", async () => {
+  const child = respondingChild();
+  const client = new CodexAppServerClient({ spawnProcess: () => child });
+  await client.start();
+  const events: Array<{ type: string; method?: string; code?: string }> = [];
+  const unsubscribe = client.subscribeEvents(event => {
+    events.push(event.type === "notification"
+      ? { type: event.type, method: event.method }
+      : { type: event.type, code: event.error.code });
+  });
+  const unsubscribeThrowing = client.subscribeEvents(() => {
+    throw new Error("listener failed");
+  });
+
+  child.notify("thread/status/changed", { threadId: "thread:test", status: { type: "idle" } });
+  await new Promise(resolve => setImmediate(resolve));
+  unsubscribeThrowing();
+  child.exit(17, null);
+  await new Promise(resolve => setImmediate(resolve));
+  unsubscribe();
+  await client.close();
+
+  assert.deepEqual(events, [
+    { type: "notification", method: "thread/status/changed" },
+    { type: "failure", code: ERROR_CODES.APP_SERVER_EXITED }
+  ]);
+  assert.ok(client.getWarnings().some(item => item.code === WARNING_CODES.APP_SERVER_EVENT_LISTENER_FAILED));
 });
 
 test("cleanup falls back from bounded SIGTERM to SIGKILL", async () => {

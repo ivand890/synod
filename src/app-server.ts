@@ -4,6 +4,7 @@ import process from "node:process";
 import readline from "node:readline";
 import { WARNING_CODES, warning } from "./contracts.js";
 import type { Warning } from "./contracts.js";
+import { compareVersions, parseVersion } from "./compatibility.js";
 import { ERROR_CODES, SynodError, asSynodError } from "./errors.js";
 import { packageVersion } from "./package.js";
 import type { ModelCapability } from "./profiles.js";
@@ -32,7 +33,7 @@ export interface AppServerChild {
 export type SpawnAppServer = (
   command: string,
   args: string[],
-  options: { stdio: ["pipe", "pipe", "pipe"] }
+  options: { stdio: ["pipe", "pipe", "pipe"]; cwd?: string }
 ) => AppServerChild;
 
 export interface AppServerCleanup {
@@ -70,6 +71,10 @@ interface PendingRequest {
   timeout: NodeJS.Timeout;
   method: string;
 }
+
+export type AppServerEvent =
+  | { type: "notification"; method: string; params: unknown }
+  | { type: "failure"; error: SynodError };
 
 interface InitializeResponse extends Record<string, unknown> {
   userAgent: string;
@@ -126,6 +131,7 @@ export class CodexAppServerClient {
   private readonly requestTimeoutMs: number;
   private readonly shutdownTimeoutMs: number;
   private readonly forceKillTimeoutMs: number;
+  private readonly cwd: string | undefined;
   private readonly spawnProcess: SpawnAppServer;
   private nextId: number;
   private readonly pending: Map<number, PendingRequest>;
@@ -136,15 +142,19 @@ export class CodexAppServerClient {
   private lines?: readline.Interface;
   private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | undefined;
   private fatalError: SynodError | undefined;
+  private readonly eventListeners: Set<(event: AppServerEvent) => void>;
+  private eventListenerFailureWarned: boolean;
 
   constructor({
     codexBin = process.env.SYNOD_CODEX_BIN || "codex",
+    cwd,
     requestTimeoutMs = DEFAULT_TIMEOUT_MS,
     shutdownTimeoutMs = DEFAULT_SHUTDOWN_TIMEOUT_MS,
     forceKillTimeoutMs = DEFAULT_FORCE_KILL_TIMEOUT_MS,
     spawnProcess = (command, args, options) => spawn(command, args, options)
   }: {
     codexBin?: string;
+    cwd?: string;
     requestTimeoutMs?: number;
     shutdownTimeoutMs?: number;
     forceKillTimeoutMs?: number;
@@ -154,11 +164,14 @@ export class CodexAppServerClient {
     this.requestTimeoutMs = requestTimeoutMs;
     this.shutdownTimeoutMs = shutdownTimeoutMs;
     this.forceKillTimeoutMs = forceKillTimeoutMs;
+    this.cwd = cwd;
     this.spawnProcess = spawnProcess;
     this.nextId = 1;
     this.pending = new Map();
     this.stderr = "";
     this.warnings = [];
+    this.eventListeners = new Set();
+    this.eventListenerFailureWarned = false;
     this.diagnostics = {
       codexExecutable: this.codexBin,
       codexHome: undefined,
@@ -183,7 +196,8 @@ export class CodexAppServerClient {
 
     try {
       this.child = this.spawnProcess(this.codexBin, ["app-server"], {
-        stdio: ["pipe", "pipe", "pipe"]
+        stdio: ["pipe", "pipe", "pipe"],
+        ...(this.cwd ? { cwd: this.cwd } : {})
       });
     } catch (error) {
       throw new SynodError(
@@ -205,6 +219,7 @@ export class CodexAppServerClient {
 
     this.exitInfo = undefined;
     this.fatalError = undefined;
+    this.eventListenerFailureWarned = false;
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: Buffer | string) => {
       this.stderr = `${this.stderr}${chunk}`.slice(-4_096);
@@ -228,7 +243,6 @@ export class CodexAppServerClient {
     });
     child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
       this.exitInfo = { code, signal };
-      if (this.pending.size === 0) return;
       const detail = this.stderr.trim();
       this.fail(new SynodError(
         ERROR_CODES.APP_SERVER_EXITED,
@@ -366,7 +380,13 @@ export class CodexAppServerClient {
       return;
     }
 
-    if (!isRecord(message) || typeof message.id !== "number") return;
+    if (!isRecord(message)) return;
+    if (typeof message.id !== "number") {
+      if (typeof message.method === "string") {
+        this.emitEvent({ type: "notification", method: message.method, params: message.params });
+      }
+      return;
+    }
     const pending = this.pending.get(message.id);
     if (!pending) return;
 
@@ -400,6 +420,38 @@ export class CodexAppServerClient {
   fail(error: unknown): void {
     this.fatalError = asSynodError(error);
     this.rejectAll(this.fatalError);
+    this.emitEvent({ type: "failure", error: this.fatalError });
+  }
+
+  emitEvent(event: AppServerEvent): void {
+    for (const listener of this.eventListeners) this.emitToListener(listener, event);
+  }
+
+  private emitToListener(listener: (event: AppServerEvent) => void, event: AppServerEvent): void {
+    try {
+      listener(event);
+    } catch (error) {
+      if (this.eventListenerFailureWarned) return;
+      this.eventListenerFailureWarned = true;
+      this.warnings.push(warning(
+        WARNING_CODES.APP_SERVER_EVENT_LISTENER_FAILED,
+        `An App Server event listener threw: ${errorMessage(error)}`
+      ));
+    }
+  }
+
+  subscribeEvents(listener: (event: AppServerEvent) => void): () => void {
+    this.eventListeners.add(listener);
+    if (this.fatalError) queueMicrotask(() => {
+      if (this.eventListeners.has(listener)) this.emitToListener(listener, { type: "failure", error: this.fatalError! });
+    });
+    return () => this.eventListeners.delete(listener);
+  }
+
+  supportsThreadStatusNotifications(): boolean {
+    const version = this.diagnostics.codexVersion;
+    const parsed = parseVersion(version);
+    return Boolean(parsed && compareVersions({ ...parsed, prerelease: undefined }, "0.147.0") >= 0);
   }
 
   waitForExit(child: AppServerChild, timeoutMs: number): Promise<boolean> {
