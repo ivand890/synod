@@ -38,8 +38,33 @@ import type {
   CheckpointSnapshot,
   CheckpointSnapshotReference
 } from "./checkpoint.js";
+import {
+  DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+  DEFAULT_LEASE_TTL_SECONDS,
+  LEASE_BASELINES_PATH,
+  MAX_LEASE_TTL_SECONDS,
+  MIN_LEASE_TTL_SECONDS,
+  createLeaseBaselinesLedger,
+  isCorrectionPolicy,
+  isLeaseBaselineReference,
+  isTaskLease,
+  leaseBaselinesReference,
+  leaseScopesOverlap,
+  normalizeLeaseScopes,
+  parseLeaseDuration,
+  retainLeaseBaselinesLedger,
+  serializeLeaseBaselinesLedger,
+  validateLeaseBaselinesLedger,
+  type CorrectionPolicy,
+  type EndedTaskLease,
+  type LeaseBaseline,
+  type LeaseBaselinesLedger,
+  type LeaseBaselineReference,
+  type TaskLease
+} from "./leases.js";
 
-export const ORCHESTRATION_SCHEMA_VERSION = 1;
+export const LEGACY_ORCHESTRATION_SCHEMA_VERSION = 1;
+export const ORCHESTRATION_SCHEMA_VERSION = 2;
 export const ORCHESTRATION_STATE_PATH = ".synod/state.json";
 export const ORCHESTRATION_EVENTS_PATH = ".synod/events.jsonl";
 export const ORCHESTRATION_STATUS_PATH = "docs/synod/STATUS.md";
@@ -109,6 +134,9 @@ export interface OrchestrationTask {
   revision: number;
   executor: string;
   correctionRound: number;
+  correctionPolicy: CorrectionPolicy;
+  leaseGeneration: number;
+  lease?: TaskLease;
   acceptance: {
     criteria: string[];
     status: "pending" | "accepted";
@@ -127,6 +155,7 @@ export interface OrchestrationTask {
   blocker?: string;
   blockedFrom?: TaskState;
   supersededReason?: string;
+  preLease?: true;
 }
 
 export interface OrchestrationLastEvent {
@@ -141,6 +170,7 @@ export interface OrchestrationStateCore {
   createdAt: string;
   updatedAt: string;
   checkpoint: GitCheckpoint;
+  leaseBaselines: LeaseBaselineReference;
   taskOrder: string[];
   tasks: Record<string, OrchestrationTask>;
   evidenceCounter: number;
@@ -168,6 +198,44 @@ export interface OrchestrationEvent {
   eventHash: string;
 }
 
+type LegacyOrchestrationTask = Omit<
+  OrchestrationTask,
+  "correctionPolicy" | "leaseGeneration" | "lease" | "preLease"
+>;
+
+interface LegacyOrchestrationStateCore {
+  schemaVersion: typeof LEGACY_ORCHESTRATION_SCHEMA_VERSION;
+  templateVersion: string;
+  createdAt: string;
+  updatedAt: string;
+  checkpoint: GitCheckpoint;
+  taskOrder: string[];
+  tasks: Record<string, LegacyOrchestrationTask>;
+  evidenceCounter: number;
+}
+
+interface LegacyOrchestrationState extends LegacyOrchestrationStateCore {
+  lastEvent: OrchestrationLastEvent;
+}
+
+interface LegacyOrchestrationEvent {
+  schemaVersion: typeof LEGACY_ORCHESTRATION_SCHEMA_VERSION;
+  sequence: number;
+  id: string;
+  timestamp: string;
+  type: string;
+  actor: string;
+  taskId?: string;
+  fromState?: TaskState;
+  toState?: TaskState;
+  revision?: number;
+  checkpoint: GitCheckpoint;
+  payload: Record<string, unknown>;
+  previousHash: string | null;
+  state: LegacyOrchestrationStateCore;
+  eventHash: string;
+}
+
 type Clock = () => Date | string | number;
 type GitRunner = (directory: string, args: string[]) => Promise<string>;
 
@@ -190,11 +258,14 @@ interface EventMetadata {
 interface MutationContext {
   timestamp: string;
   checkpoint: GitCheckpoint;
+  snapshot: CheckpointSnapshot;
+  leaseBaselines: LeaseBaselinesLedger;
   nextSequence: number;
 }
 
 interface MutationResult<Result extends Record<string, unknown>> {
   updateCheckpoint?: boolean;
+  leaseBaselines?: LeaseBaselinesLedger;
   metadata?: Partial<EventMetadata>;
   result: Result;
 }
@@ -226,6 +297,13 @@ export interface OrchestrationStatusResult {
   drift: CheckpointDrift;
   taskCounts: Record<TaskState, number>;
   tasks: OrchestrationTask[];
+  leaseExpiryCandidates: Array<{
+    taskId: string;
+    leaseId: string;
+    generation: number;
+    heartbeatAt: string;
+    expiresAt: string;
+  }>;
   markdownView: string;
   delta?: CheckpointDelta;
 }
@@ -732,13 +810,18 @@ function buildEvent(
   return { event, state };
 }
 
-function initialState(checkpoint: GitCheckpoint, timestamp: string): OrchestrationStateCore {
+function initialState(
+  checkpoint: GitCheckpoint,
+  timestamp: string,
+  leaseBaselines: LeaseBaselineReference
+): OrchestrationStateCore {
   return {
     schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
     templateVersion: packageVersion,
     createdAt: timestamp,
     updatedAt: timestamp,
     checkpoint,
+    leaseBaselines,
     taskOrder: [],
     tasks: {},
     evidenceCounter: 0
@@ -805,6 +888,7 @@ export function renderStatusMarkdown(
         `- Depends on: ${task.dependsOn.length > 0 ? task.dependsOn.map(markdownCell).join(", ") : "—"}`,
         `- Revision: ${task.revision}`,
         `- Correction round: ${task.correctionRound}`,
+        `- Writer lease: ${task.lease ? `${task.lease.id} generation ${task.lease.generation}; owner ${markdownCell(task.lease.ownerThread)}; expires ${task.lease.expiresAt}` : task.preLease ? "migration required before further progress" : "—"}`,
         "- Acceptance criteria:"
       );
       for (const criterion of task.acceptance.criteria) lines.push(`  - ${markdownCell(criterion)}`);
@@ -838,7 +922,8 @@ export async function createInitialOrchestrationFiles(
 ): Promise<Map<string, string>> {
   const timestamp = nowIso(dependencies.clock);
   const { checkpoint, snapshot } = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
-  const core = initialState(checkpoint, timestamp);
+  const leaseBaselines = createLeaseBaselinesLedger();
+  const core = initialState(checkpoint, timestamp, leaseBaselinesReference(leaseBaselines));
   const { event, state } = buildEvent(undefined, core, "project.initialized", {
     actor: "synod",
     payload: { templateVersion: packageVersion }
@@ -847,8 +932,95 @@ export async function createInitialOrchestrationFiles(
     [ORCHESTRATION_STATE_PATH, serializeJson(state)],
     [ORCHESTRATION_EVENTS_PATH, `${JSON.stringify(event)}\n`],
     [ORCHESTRATION_STATUS_PATH, renderStatusMarkdown(state)],
-    [CHECKPOINT_SNAPSHOT_PATH, serializeCheckpointSnapshot(snapshot)]
+    [CHECKPOINT_SNAPSHOT_PATH, serializeCheckpointSnapshot(snapshot)],
+    [LEASE_BASELINES_PATH, serializeLeaseBaselinesLedger(leaseBaselines)]
   ]);
+}
+
+export type OrchestrationSchemaMigration =
+  | { status: "current" }
+  | { status: "migrated"; files: Map<string, string> };
+
+export async function createOrchestrationSchemaMigrationFiles(
+  targetDirectory: string,
+  dependencies: OrchestrationDependencies = {}
+): Promise<OrchestrationSchemaMigration> {
+  let rawState: unknown;
+  try {
+    rawState = parseJson(await readRecord(targetDirectory, ORCHESTRATION_STATE_PATH));
+  } catch (error) {
+    if (error instanceof SynodError) throw error;
+    throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, `Could not parse ${ORCHESTRATION_STATE_PATH}: ${errorMessage(error)}`, { cause: error });
+  }
+  if (isRecord(rawState) && rawState.schemaVersion === ORCHESTRATION_SCHEMA_VERSION) {
+    validateOrchestrationState(rawState);
+    return { status: "current" };
+  }
+  if (!isLegacyOrchestrationStateShape(rawState)) {
+    invalidState("Legacy Synod state is not a valid schema-1 orchestration record.");
+  }
+
+  const rawEvents = await readRecord(targetDirectory, ORCHESTRATION_EVENTS_PATH);
+  let parsedEvents: unknown[];
+  try {
+    parsedEvents = rawEvents.split(/\r?\n/).filter(Boolean).map(line => parseJson(line));
+  } catch (error) {
+    throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, `Could not parse ${ORCHESTRATION_EVENTS_PATH}: ${errorMessage(error)}`, { cause: error });
+  }
+  const events = validateEventLog(parsedEvents);
+  const last = events.at(-1);
+  const rawLast = parsedEvents.at(-1);
+  if (!last || !isLegacyOrchestrationEvent(rawLast)) {
+    throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "Schema-1 migration requires a legacy-only event log.");
+  }
+  const expectedLegacyState: LegacyOrchestrationState = {
+    ...rawLast.state,
+    lastEvent: { sequence: rawLast.sequence, id: rawLast.id, hash: rawLast.eventHash }
+  };
+  if (stableStringify(rawState) !== stableStringify(expectedLegacyState)) {
+    throw new SynodError(ERROR_CODES.STATE_LOG_MISMATCH, "Legacy canonical state does not match its last append-only event.", {
+      details: { stateSequence: rawState.lastEvent.sequence, eventSequence: rawLast.sequence }
+    });
+  }
+
+  const leaseBaselines = createLeaseBaselinesLedger();
+  const checkpointSnapshot = await readCheckpointSnapshot(targetDirectory, rawState.checkpoint);
+  const timestamp = nowIso(dependencies.clock);
+  const nextCore = migrateLegacyStateCore(rawState, leaseBaselinesReference(leaseBaselines), timestamp);
+  const unsignedEvent: Omit<OrchestrationEvent, "eventHash"> = {
+    schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+    sequence: last.sequence + 1,
+    id: randomUUID(),
+    timestamp,
+    type: "orchestration.migrated",
+    actor: "synod",
+    checkpoint: nextCore.checkpoint,
+    payload: {
+      fromSchemaVersion: LEGACY_ORCHESTRATION_SCHEMA_VERSION,
+      toSchemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+      preservedEventCount: events.length,
+      preLeaseTasks: nextCore.taskOrder.filter(id => nextCore.tasks[id]?.preLease)
+    },
+    previousHash: last.eventHash,
+    state: nextCore
+  };
+  const event: OrchestrationEvent = { ...unsignedEvent, eventHash: eventHash(unsignedEvent) };
+  const state = validateOrchestrationState({
+    ...nextCore,
+    lastEvent: { sequence: event.sequence, id: event.id, hash: event.eventHash }
+  });
+  validateEventLog([...parsedEvents, event]);
+  const separator = rawEvents.endsWith("\n") ? "" : "\n";
+  return {
+    status: "migrated",
+    files: new Map([
+      [ORCHESTRATION_STATE_PATH, serializeJson(state)],
+      [ORCHESTRATION_EVENTS_PATH, `${rawEvents}${separator}${JSON.stringify(event)}\n`],
+      [ORCHESTRATION_STATUS_PATH, renderStatusMarkdown(state)],
+      [LEASE_BASELINES_PATH, serializeLeaseBaselinesLedger(leaseBaselines)],
+      ...(checkpointSnapshot ? [[CHECKPOINT_SNAPSHOT_PATH, serializeCheckpointSnapshot(checkpointSnapshot)] as const] : [])
+    ])
+  };
 }
 
 export type CheckpointSnapshotAdoption =
@@ -956,6 +1128,10 @@ function isOrchestrationTask(value: unknown): value is OrchestrationTask {
     && typeof value.executor === "string"
     && value.executor.length > 0
     && isNonNegativeInteger(value.correctionRound)
+    && isCorrectionPolicy(value.correctionPolicy)
+    && value.correctionPolicy.used === value.correctionRound
+    && isNonNegativeInteger(value.leaseGeneration)
+    && (value.lease === undefined || isTaskLease(value.lease))
     && isStringArray(value.acceptance.criteria)
     && value.acceptance.criteria.length > 0
     && value.acceptance.criteria.every(item => item.length > 0)
@@ -974,7 +1150,86 @@ function isOrchestrationTask(value: unknown): value is OrchestrationTask {
     && typeof value.updatedAt === "string"
     && (value.blocker === undefined || typeof value.blocker === "string")
     && (value.blockedFrom === undefined || isTaskState(value.blockedFrom))
-    && (value.supersededReason === undefined || typeof value.supersededReason === "string");
+    && (value.supersededReason === undefined || typeof value.supersededReason === "string")
+    && (value.preLease === undefined || value.preLease === true);
+}
+
+function isLegacyOrchestrationTask(value: unknown): value is LegacyOrchestrationTask {
+  if (!isRecord(value) || !isNonNegativeInteger(value.correctionRound)) return false;
+  return value.correctionPolicy === undefined
+    && value.leaseGeneration === undefined
+    && value.lease === undefined
+    && value.preLease === undefined
+    && isOrchestrationTask({
+      ...value,
+      correctionPolicy: correctionPolicyForRound(value.correctionRound),
+      leaseGeneration: 0
+    });
+}
+
+function isLegacyOrchestrationStateCoreShape(value: unknown): value is LegacyOrchestrationStateCore {
+  return isRecord(value)
+    && value.schemaVersion === LEGACY_ORCHESTRATION_SCHEMA_VERSION
+    && typeof value.templateVersion === "string"
+    && typeof value.createdAt === "string"
+    && typeof value.updatedAt === "string"
+    && isGitCheckpoint(value.checkpoint)
+    && isStringArray(value.taskOrder)
+    && isRecord(value.tasks)
+    && new Set(value.taskOrder).size === value.taskOrder.length
+    && Object.keys(value.tasks).length === value.taskOrder.length
+    && value.taskOrder.every(id => Object.hasOwn(value.tasks as object, id))
+    && Object.values(value.tasks).every(isLegacyOrchestrationTask)
+    && isNonNegativeInteger(value.evidenceCounter);
+}
+
+function isLegacyOrchestrationStateShape(value: unknown): value is LegacyOrchestrationState {
+  return isLegacyOrchestrationStateCoreShape(value)
+    && isRecord(value)
+    && isRecord(value.lastEvent)
+    && isNonNegativeInteger(value.lastEvent.sequence)
+    && typeof value.lastEvent.id === "string"
+    && typeof value.lastEvent.hash === "string";
+}
+
+function leaseMigrationState(state: TaskState | undefined): boolean {
+  return state !== undefined && ["ACTIVE", "REVIEW", "ACCEPTED", "VERIFIED"].includes(state);
+}
+
+function legacyTaskRequiresLeaseMigration(task: LegacyOrchestrationTask): boolean {
+  return leaseMigrationState(task.state)
+    || (task.state === "BLOCKED" && leaseMigrationState(task.blockedFrom));
+}
+
+function correctionPolicyForRound(correctionRound: number): CorrectionPolicy {
+  return { limit: Math.max(2, correctionRound), used: correctionRound, overrides: [] };
+}
+
+function migrateLegacyTask(task: LegacyOrchestrationTask): OrchestrationTask {
+  return {
+    ...task,
+    correctionPolicy: correctionPolicyForRound(task.correctionRound),
+    leaseGeneration: 0,
+    ...(legacyTaskRequiresLeaseMigration(task) ? { preLease: true as const } : {})
+  };
+}
+
+function migrateLegacyStateCore(
+  state: LegacyOrchestrationStateCore,
+  leaseBaselines: LeaseBaselineReference,
+  timestamp = state.updatedAt
+): OrchestrationStateCore {
+  return {
+    schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+    templateVersion: packageVersion,
+    createdAt: state.createdAt,
+    updatedAt: timestamp,
+    checkpoint: state.checkpoint,
+    leaseBaselines,
+    taskOrder: [...state.taskOrder],
+    tasks: Object.fromEntries(state.taskOrder.map(id => [id, migrateLegacyTask(state.tasks[id]!)])),
+    evidenceCounter: state.evidenceCounter
+  };
 }
 
 function isOrchestrationStateCoreShape(value: unknown): value is OrchestrationStateCore {
@@ -984,6 +1239,7 @@ function isOrchestrationStateCoreShape(value: unknown): value is OrchestrationSt
     && typeof value.createdAt === "string"
     && typeof value.updatedAt === "string"
     && isGitCheckpoint(value.checkpoint)
+    && isLeaseBaselineReference(value.leaseBaselines)
     && isStringArray(value.taskOrder)
     && isRecord(value.tasks)
     && Object.values(value.tasks).every(isOrchestrationTask)
@@ -1025,6 +1281,23 @@ export function validateOrchestrationState(value: unknown): OrchestrationState {
     }
     if (task.state === "BLOCKED" && !isTaskState(task.blockedFrom)) {
       invalidState(`Blocked task ${id} is missing its prior state.`, { taskId: id });
+    }
+    if (task.lease && (
+      task.lease.generation !== task.leaseGeneration
+      || task.lease.taskId !== task.id
+      || task.lease.taskRevision !== task.revision
+      || task.lease.executor !== task.executor
+    )) {
+      invalidState(`Task ${id} lease does not match its canonical task generation, revision, or executor.`, { taskId: id });
+    }
+    if (task.state === "ACTIVE" && !task.lease && !task.preLease) {
+      invalidState(`Active task ${id} is missing its durable writer lease.`, { taskId: id });
+    }
+    if (task.preLease && !leaseMigrationState(task.state) && !(task.state === "BLOCKED" && leaseMigrationState(task.blockedFrom))) {
+      invalidState(`Task ${id} has an invalid pre-lease migration marker.`, { taskId: id, state: task.state });
+    }
+    if (task.lease && !["READY", "ACTIVE", "REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state) && !(task.state === "BLOCKED" && leaseMigrationState(task.blockedFrom))) {
+      invalidState(`Task ${id} holds a writer lease in an ineligible state.`, { taskId: id, state: task.state });
     }
     for (const dependency of task.dependsOn) {
       if (!state.tasks[dependency] || dependency === id) invalidState(`Task ${id} has an invalid dependency.`, { taskId: id, dependency });
@@ -1103,24 +1376,62 @@ function isOrchestrationEvent(value: unknown): value is OrchestrationEvent {
     && typeof value.eventHash === "string";
 }
 
+function isLegacyOrchestrationEvent(value: unknown): value is LegacyOrchestrationEvent {
+  return isRecord(value)
+    && value.schemaVersion === LEGACY_ORCHESTRATION_SCHEMA_VERSION
+    && isNonNegativeInteger(value.sequence)
+    && typeof value.id === "string"
+    && typeof value.timestamp === "string"
+    && typeof value.type === "string"
+    && typeof value.actor === "string"
+    && (value.taskId === undefined || typeof value.taskId === "string")
+    && (value.fromState === undefined || isTaskState(value.fromState))
+    && (value.toState === undefined || isTaskState(value.toState))
+    && (value.revision === undefined || isNonNegativeInteger(value.revision))
+    && isGitCheckpoint(value.checkpoint)
+    && isRecord(value.payload)
+    && isNullableString(value.previousHash)
+    && isLegacyOrchestrationStateCoreShape(value.state)
+    && typeof value.eventHash === "string";
+}
+
 function validateEventLog(events: unknown[]): OrchestrationEvent[] {
   let previousHash = null;
+  let legacySeen = false;
+  let migrationSeen = false;
+  let schemaTwoStarted = false;
+  const emptyLeaseBaselines = leaseBaselinesReference(createLeaseBaselinesLedger());
   const validated: OrchestrationEvent[] = [];
   for (const [index, event] of events.entries()) {
+    const legacy = isLegacyOrchestrationEvent(event);
+    const current = isOrchestrationEvent(event);
     if (
-      !isOrchestrationEvent(event) || event.sequence !== index + 1
+      (!legacy && !current) || event.sequence !== index + 1
       || event.previousHash !== previousHash || event.eventHash !== eventHash(event)
+      || (legacy && schemaTwoStarted)
+      || (current && legacySeen && !schemaTwoStarted && event.type !== "orchestration.migrated")
+      || (current && event.type === "orchestration.migrated" && (!legacySeen || migrationSeen || schemaTwoStarted))
     ) {
       throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "Synod event log failed sequence or hash-chain validation.", {
         details: { sequence: isRecord(event) ? event.sequence : undefined, expectedSequence: index + 1 }
       });
     }
-    validateOrchestrationState({
-      ...event.state,
-      lastEvent: { sequence: event.sequence, id: event.id, hash: event.eventHash }
-    });
+    if (current) {
+      if (event.type === "orchestration.migrated") migrationSeen = true;
+      schemaTwoStarted = true;
+      validateOrchestrationState({
+        ...event.state,
+        lastEvent: { sequence: event.sequence, id: event.id, hash: event.eventHash }
+      });
+    } else {
+      legacySeen = true;
+      validateOrchestrationState({
+        ...migrateLegacyStateCore(event.state, emptyLeaseBaselines),
+        lastEvent: { sequence: event.sequence, id: event.id, hash: event.eventHash }
+      });
+    }
     previousHash = event.eventHash;
-    validated.push(event);
+    validated.push(event as unknown as OrchestrationEvent);
   }
   if (events.length === 0) throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "Synod event log is empty.");
   return validated;
@@ -1180,9 +1491,54 @@ async function readCheckpointSnapshot(
   return snapshot;
 }
 
+async function readLeaseBaselines(
+  targetDirectory: string,
+  reference: LeaseBaselineReference,
+  state: OrchestrationState
+): Promise<LeaseBaselinesLedger> {
+  let content: string;
+  let ledger: LeaseBaselinesLedger;
+  try {
+    content = await readRecord(targetDirectory, reference.path);
+    ledger = validateLeaseBaselinesLedger(parseJson(content));
+  } catch (error) {
+    if (error instanceof SynodError && error.code === ERROR_CODES.LEASE_BASELINE_INVALID) throw error;
+    throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, `Could not read ${reference.path}: ${errorMessage(error)}`, {
+      cause: error,
+      details: { path: reference.path }
+    });
+  }
+  if (contentHash(content) !== reference.contentHash) {
+    throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, "Lease baseline ledger does not match canonical state.", {
+      details: { path: reference.path, expectedHash: reference.contentHash, actualHash: contentHash(content) }
+    });
+  }
+  const byIdentity = new Map(ledger.baselines.map(item => [`${item.leaseId}:${item.generation}`, item]));
+  for (const task of taskList(state)) {
+    if (!task.lease) continue;
+    const baseline = byIdentity.get(`${task.lease.id}:${task.lease.generation}`);
+    if (!baseline || baseline.taskId !== task.id || baseline.taskRevision !== task.revision) {
+      throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, `Task ${task.id} lease baseline is missing or mismatched.`, {
+        details: { taskId: task.id, leaseId: task.lease.id, generation: task.lease.generation }
+      });
+    }
+    if (
+      task.lease.baseline.snapshotContentHash !== baseline.snapshot.contentHash
+      || task.lease.baseline.branch !== baseline.snapshot.branch
+      || task.lease.baseline.head !== baseline.snapshot.head
+      || task.lease.baseline.worktreeFingerprint !== baseline.snapshot.worktreeFingerprint
+    ) {
+      throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, `Task ${task.id} lease baseline identity is mismatched.`, {
+        details: { taskId: task.id, leaseId: task.lease.id, generation: task.lease.generation }
+      });
+    }
+  }
+  return ledger;
+}
+
 async function readOrchestrationRaw(
   targetDirectory: string
-): Promise<{ state: OrchestrationState; events: OrchestrationEvent[]; snapshot?: CheckpointSnapshot }> {
+): Promise<{ state: OrchestrationState; events: OrchestrationEvent[]; leaseBaselines: LeaseBaselinesLedger; snapshot?: CheckpointSnapshot }> {
   let state: OrchestrationState;
   try {
     state = validateOrchestrationState(parseJson(await readRecord(targetDirectory, ORCHESTRATION_STATE_PATH)));
@@ -1212,12 +1568,13 @@ async function readOrchestrationRaw(
     });
   }
   const snapshot = await readCheckpointSnapshot(targetDirectory, state.checkpoint);
-  return { state, events, ...(snapshot ? { snapshot } : {}) };
+  const leaseBaselines = await readLeaseBaselines(targetDirectory, state.leaseBaselines, state);
+  return { state, events, leaseBaselines, ...(snapshot ? { snapshot } : {}) };
 }
 
 export async function readOrchestration(
   targetDirectory: string
-): Promise<{ state: OrchestrationState; events: OrchestrationEvent[]; snapshot?: CheckpointSnapshot }> {
+): Promise<{ state: OrchestrationState; events: OrchestrationEvent[]; leaseBaselines: LeaseBaselinesLedger; snapshot?: CheckpointSnapshot }> {
   const release = await acquireLock(targetDirectory);
   try {
     await recoverPendingMutation(targetDirectory);
@@ -1436,6 +1793,8 @@ interface PendingMutation {
   expectedStatusHash: string;
   checkpointSnapshot?: CheckpointSnapshot;
   expectedCheckpointSnapshot?: { type: "missing" } | { type: "file"; hash: string };
+  leaseBaselines?: LeaseBaselinesLedger;
+  expectedLeaseBaselines?: { type: "file"; hash: string };
 }
 
 function isExpectedCheckpointSnapshot(value: unknown): value is PendingMutation["expectedCheckpointSnapshot"] {
@@ -1446,6 +1805,15 @@ function isExpectedCheckpointSnapshot(value: unknown): value is PendingMutation[
 function isValidCheckpointSnapshot(value: unknown): value is CheckpointSnapshot {
   try {
     validateCheckpointSnapshot(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isValidLeaseBaselinesLedger(value: unknown): value is LeaseBaselinesLedger {
+  try {
+    validateLeaseBaselinesLedger(value);
     return true;
   } catch {
     return false;
@@ -1463,6 +1831,15 @@ function isPendingMutation(value: unknown): value is PendingMutation {
     && (
       (value.checkpointSnapshot === undefined && value.expectedCheckpointSnapshot === undefined)
       || (isValidCheckpointSnapshot(value.checkpointSnapshot) && isExpectedCheckpointSnapshot(value.expectedCheckpointSnapshot))
+    )
+    && (
+      (value.leaseBaselines === undefined && value.expectedLeaseBaselines === undefined)
+      || (
+        isValidLeaseBaselinesLedger(value.leaseBaselines)
+        && isRecord(value.expectedLeaseBaselines)
+        && value.expectedLeaseBaselines.type === "file"
+        && typeof value.expectedLeaseBaselines.hash === "string"
+      )
     );
 }
 
@@ -1502,6 +1879,12 @@ async function readPendingMutation(
     && pending.state.checkpoint.worktree.snapshot?.contentHash !== pending.checkpointSnapshot.contentHash
   ) {
     throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, "Pending checkpoint snapshot does not match its canonical state reference.");
+  }
+  if (
+    pending.leaseBaselines
+    && pending.state.leaseBaselines.contentHash !== leaseBaselinesReference(pending.leaseBaselines).contentHash
+  ) {
+    throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, "Pending lease baselines do not match their canonical state reference.");
   }
   return { inspected, pending };
 }
@@ -1580,6 +1963,14 @@ async function recoverPendingMutation(targetDirectory: string): Promise<boolean>
       details: { path: CHECKPOINT_SNAPSHOT_PATH, type: snapshotInspected.type }
     });
   }
+  const leaseBaselinesInspected = pending.leaseBaselines
+    ? await inspectPath(resolveProjectPath(targetDirectory, LEASE_BASELINES_PATH))
+    : undefined;
+  if (leaseBaselinesInspected && leaseBaselinesInspected.type !== "file") {
+    throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, "Canonical lease baseline ledger is not a regular file.", {
+      details: { path: LEASE_BASELINES_PATH, type: leaseBaselinesInspected.type }
+    });
+  }
   const nextStateContent = serializeJson(pending.state);
   const nextStateHash = contentHash(nextStateContent);
   const nextStatusHash = contentHash(pending.status);
@@ -1588,15 +1979,30 @@ async function recoverPendingMutation(targetDirectory: string): Promise<boolean>
     : undefined;
   const nextSnapshotHash = nextSnapshotContent ? contentHash(nextSnapshotContent) : undefined;
   const snapshotAlreadyCommitted = snapshotInspected?.type === "file" && snapshotInspected.hash === nextSnapshotHash;
-  if (stateInspected.hash !== nextStateHash || statusInspected.hash !== nextStatusHash || (snapshotInspected && !snapshotAlreadyCommitted)) {
+  const nextLeaseBaselinesContent = pending.leaseBaselines
+    ? serializeLeaseBaselinesLedger(pending.leaseBaselines)
+    : undefined;
+  const nextLeaseBaselinesHash = nextLeaseBaselinesContent ? contentHash(nextLeaseBaselinesContent) : undefined;
+  const leaseBaselinesAlreadyCommitted = leaseBaselinesInspected?.type === "file"
+    && leaseBaselinesInspected.hash === nextLeaseBaselinesHash;
+  if (
+    stateInspected.hash !== nextStateHash
+    || statusInspected.hash !== nextStatusHash
+    || (snapshotInspected && !snapshotAlreadyCommitted)
+    || (leaseBaselinesInspected && !leaseBaselinesAlreadyCommitted)
+  ) {
     const expectedSnapshot = pending.expectedCheckpointSnapshot;
     const snapshotCanRecover = !snapshotInspected || !expectedSnapshot || snapshotAlreadyCommitted
       || (expectedSnapshot.type === "missing" && snapshotInspected.type === "missing")
       || (expectedSnapshot.type === "file" && snapshotInspected.type === "file" && snapshotInspected.hash === expectedSnapshot.hash);
+    const leaseBaselinesCanRecover = !leaseBaselinesInspected
+      || leaseBaselinesAlreadyCommitted
+      || leaseBaselinesInspected.hash === pending.expectedLeaseBaselines?.hash;
     if (
       ![pending.expectedStateHash, nextStateHash].includes(stateInspected.hash)
       || ![pending.expectedStatusHash, nextStatusHash].includes(statusInspected.hash)
       || !snapshotCanRecover
+      || !leaseBaselinesCanRecover
     ) {
       throw new SynodError(ERROR_CODES.DESTINATION_CHANGED, "Canonical orchestration files changed while recovering a pending mutation.", {
         details: {
@@ -1606,6 +2012,12 @@ async function recoverPendingMutation(targetDirectory: string): Promise<boolean>
             checkpointSnapshot: {
               expected: expectedSnapshot,
               actual: snapshotInspected.type === "file" ? { type: "file", hash: snapshotInspected.hash } : { type: snapshotInspected.type }
+            }
+          } : {}),
+          ...(leaseBaselinesInspected ? {
+            leaseBaselines: {
+              expected: pending.expectedLeaseBaselines,
+              actual: { type: leaseBaselinesInspected.type, hash: leaseBaselinesInspected.hash }
             }
           } : {})
         }
@@ -1635,6 +2047,14 @@ async function recoverPendingMutation(targetDirectory: string): Promise<boolean>
           : { type: "missing" }
       });
     }
+    if (leaseBaselinesInspected && nextLeaseBaselinesContent && !leaseBaselinesAlreadyCommitted) {
+      operations.push({
+        action: "write",
+        path: LEASE_BASELINES_PATH,
+        content: nextLeaseBaselinesContent,
+        expected: { type: "file", hash: leaseBaselinesInspected.hash }
+      });
+    }
     await applyTransaction(targetDirectory, operations);
   }
   await unlink(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
@@ -1645,24 +2065,29 @@ async function commitMutation<Result extends Record<string, unknown>>(
   targetDirectory: string,
   type: string,
   metadata: EventMetadata,
-  reducer: (state: OrchestrationState, context: MutationContext) => MutationResult<Result>,
+  reducer: (state: OrchestrationState, context: MutationContext) => MutationResult<Result> | Promise<MutationResult<Result>>,
   dependencies: OrchestrationDependencies = {}
 ): Promise<{ state: OrchestrationState; event: OrchestrationEvent } & Result> {
   const release = await acquireLock(targetDirectory);
   try {
     await recoverPendingMutation(targetDirectory);
-    const { state: current } = await readOrchestrationRaw(targetDirectory);
+    const { state: current, leaseBaselines: currentLeaseBaselines } = await readOrchestrationRaw(targetDirectory);
     const timestamp = nowIso(dependencies.clock);
     const captured = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
     const checkpoint = captured.checkpoint;
     const draft = structuredClone(current);
-    const reducerResult = reducer(draft, {
+    const reducerResult = await reducer(draft, {
       timestamp,
       checkpoint,
+      snapshot: captured.snapshot,
+      leaseBaselines: currentLeaseBaselines,
       nextSequence: current.lastEvent.sequence + 1
     }) || {};
     draft.updatedAt = timestamp;
     if (reducerResult.updateCheckpoint) draft.checkpoint = checkpoint;
+    if (reducerResult.leaseBaselines) {
+      draft.leaseBaselines = leaseBaselinesReference(reducerResult.leaseBaselines);
+    }
     validateOrchestrationState(draft);
 
     const eventMetadata: EventMetadata = {
@@ -1695,6 +2120,14 @@ async function commitMutation<Result extends Record<string, unknown>>(
         details: { path: CHECKPOINT_SNAPSHOT_PATH, type: snapshotInspected.type }
       });
     }
+    const leaseBaselinesInspected = reducerResult.leaseBaselines
+      ? await inspectPath(resolveProjectPath(targetDirectory, LEASE_BASELINES_PATH))
+      : undefined;
+    if (leaseBaselinesInspected && leaseBaselinesInspected.type !== "file") {
+      throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, "Canonical lease baseline ledger is not a regular file.", {
+        details: { path: LEASE_BASELINES_PATH, type: leaseBaselinesInspected.type }
+      });
+    }
     const pending = {
       schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
       event,
@@ -1707,6 +2140,10 @@ async function commitMutation<Result extends Record<string, unknown>>(
         expectedCheckpointSnapshot: snapshotInspected.type === "file"
           ? { type: "file" as const, hash: snapshotInspected.hash }
           : { type: "missing" as const }
+      } : {}),
+      ...(reducerResult.leaseBaselines && leaseBaselinesInspected ? {
+        leaseBaselines: reducerResult.leaseBaselines,
+        expectedLeaseBaselines: { type: "file" as const, hash: leaseBaselinesInspected.hash }
       } : {})
     };
     await applyTransaction(targetDirectory, [{
@@ -1739,6 +2176,14 @@ async function commitMutation<Result extends Record<string, unknown>>(
           expected: snapshotInspected.type === "file"
             ? { type: "file", hash: snapshotInspected.hash }
             : { type: "missing" }
+        });
+      }
+      if (reducerResult.leaseBaselines && leaseBaselinesInspected) {
+        operations.push({
+          action: "write",
+          path: LEASE_BASELINES_PATH,
+          content: serializeLeaseBaselinesLedger(reducerResult.leaseBaselines),
+          expected: { type: "file", hash: leaseBaselinesInspected.hash }
         });
       }
       await applyTransaction(targetDirectory, operations, dependencies);
@@ -1818,6 +2263,8 @@ export async function addTask({
       revision: 0,
       executor: taskExecutor,
       correctionRound: 0,
+      correctionPolicy: { limit: 2, used: 0, overrides: [] },
+      leaseGeneration: 0,
       acceptance: { criteria, status: "pending", revision: null, evidenceIds: [] },
       verification: { commands, status: "pending", revision: null, evidenceIds: [] },
       evidence: [],
@@ -1831,6 +2278,341 @@ export async function addTask({
       result: { task }
     };
   }, dependencies);
+}
+
+function taskIdValue(value: unknown): string {
+  return String(value || "").trim().toUpperCase();
+}
+
+function leaseDeadline(timestamp: string, ttlSeconds: number): string {
+  return new Date(Date.parse(timestamp) + ttlSeconds * 1_000).toISOString();
+}
+
+function retainedLeaseBaselines(
+  state: OrchestrationState,
+  leaseBaselines: LeaseBaselinesLedger
+): LeaseBaselinesLedger | undefined {
+  const retained = retainLeaseBaselinesLedger(
+    leaseBaselines,
+    taskList(state).flatMap(task => task.lease ? [task.lease] : [])
+  );
+  return retained.baselines.length === leaseBaselines.baselines.length ? undefined : retained;
+}
+
+async function validateLeaseScopeFilesystemPaths(targetDirectory: string, scopes: TaskLease["scopes"]): Promise<void> {
+  for (const scope of scopes) {
+    const absolutePath = resolveProjectPath(targetDirectory, scope.path);
+    const unsafe = await unsafeAncestor(targetDirectory, absolutePath);
+    const type = await pathType(absolutePath);
+    if (unsafe || type === "symlink") {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease scope traverses a symbolic link or non-directory ancestor: ${scope.path}`, {
+        details: { path: scope.path, ...(unsafe ? { unsafeAncestor: unsafe } : { type }) }
+      });
+    }
+  }
+}
+
+function requireLeaseIdentity(
+  task: OrchestrationTask,
+  {
+    leaseId,
+    generation,
+    revision,
+    expectedHeartbeatAt,
+    ownerThread
+  }: {
+    leaseId?: unknown;
+    generation?: unknown;
+    revision?: unknown;
+    expectedHeartbeatAt?: unknown;
+    ownerThread?: unknown;
+  },
+  { requireOwner = true }: { requireOwner?: boolean } = {}
+): TaskLease {
+  const lease = task.lease;
+  if (!lease) {
+    throw new SynodError(ERROR_CODES.LEASE_NOT_FOUND, `Task ${task.id} has no active writer lease.`, {
+      details: { taskId: task.id }
+    });
+  }
+  if (String(leaseId || "") !== lease.id || generation !== lease.generation) {
+    throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${task.id} lease generation is stale.`, {
+      details: {
+        taskId: task.id,
+        expected: { leaseId: lease.id, generation: lease.generation },
+        actual: { leaseId, generation }
+      }
+    });
+  }
+  if (revision !== task.revision || revision !== lease.taskRevision) {
+    throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${task.id} lease revision is stale.`, {
+      details: { taskId: task.id, expectedRevision: task.revision, actualRevision: revision }
+    });
+  }
+  if (String(expectedHeartbeatAt || "") !== lease.heartbeatAt) {
+    throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${task.id} lease heartbeat fence is stale.`, {
+      details: { taskId: task.id, expectedHeartbeatAt: lease.heartbeatAt, actualHeartbeatAt: expectedHeartbeatAt }
+    });
+  }
+  if (requireOwner && String(ownerThread || "").trim() !== lease.ownerThread) {
+    throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${task.id} lease owner does not match.`, {
+      details: { taskId: task.id, expectedOwnerThread: lease.ownerThread, actualOwnerThread: ownerThread }
+    });
+  }
+  return lease;
+}
+
+export interface AcquireLeaseOptions {
+  directory?: string;
+  id?: string;
+  ownerThread?: string;
+  read?: unknown[];
+  write?: unknown[];
+  ttlSeconds?: number;
+  heartbeatIntervalSeconds?: number;
+  actor?: string;
+}
+
+export async function acquireTaskLease({
+  directory = ".",
+  id,
+  ownerThread,
+  read = [],
+  write = [],
+  ttlSeconds = DEFAULT_LEASE_TTL_SECONDS,
+  heartbeatIntervalSeconds = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+  actor = "supervisor"
+}: AcquireLeaseOptions = {}, dependencies: OrchestrationDependencies = {}) {
+  const taskId = taskIdValue(id);
+  const owner = String(ownerThread || "").trim();
+  const ttl = parseLeaseDuration(ttlSeconds, "ttlSeconds");
+  const heartbeat = parseLeaseDuration(heartbeatIntervalSeconds, "heartbeatIntervalSeconds");
+  if (!owner) throw new SynodError(ERROR_CODES.LEASE_INVALID, "A writer lease requires --owner-thread.");
+  if (ttl < MIN_LEASE_TTL_SECONDS || ttl > MAX_LEASE_TTL_SECONDS || heartbeat >= ttl) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease heartbeat/expiry policy is outside the supported bounds.", {
+      details: {
+        ttlSeconds: ttl,
+        heartbeatIntervalSeconds: heartbeat,
+        minimumTtlSeconds: MIN_LEASE_TTL_SECONDS,
+        maximumTtlSeconds: MAX_LEASE_TTL_SECONDS
+      }
+    });
+  }
+  const scopes = normalizeLeaseScopes({ read, write });
+  const targetDirectory = path.resolve(directory);
+  return commitMutation(targetDirectory, "lease.acquired", { actor, taskId }, async (state, context) => {
+    await validateLeaseScopeFilesystemPaths(targetDirectory, scopes);
+    const task = state.tasks[taskId];
+    if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    const eligible = task.state === "READY"
+      || (task.state === "ACTIVE" && task.preLease)
+      || ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)
+      || (task.state === "BLOCKED" && (
+        task.blockedFrom === "ACTIVE"
+        || (task.preLease && leaseMigrationState(task.blockedFrom))
+      ));
+    if (!eligible) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, `Task ${taskId} cannot acquire a writer lease from ${task.state}.`, {
+        details: { taskId, state: task.state }
+      });
+    }
+    if (task.lease) {
+      throw new SynodError(ERROR_CODES.LEASE_CONFLICT, `Task ${taskId} already has an active writer lease.`, {
+        details: { taskId, leaseId: task.lease.id, generation: task.lease.generation }
+      });
+    }
+    for (const other of taskList(state)) {
+      if (!other.lease) continue;
+      const collisions = scopes.filter(scope => other.lease?.scopes.some(existing => leaseScopesOverlap(scope, existing)));
+      if (collisions.length > 0) {
+        throw new SynodError(ERROR_CODES.LEASE_CONFLICT, `Task ${taskId} write scope overlaps task ${other.id}.`, {
+          details: { taskId, conflictingTaskId: other.id, paths: collisions.map(scope => scope.path) }
+        });
+      }
+    }
+    task.leaseGeneration += 1;
+    const lease: TaskLease = {
+      id: randomUUID(),
+      generation: task.leaseGeneration,
+      taskId,
+      taskRevision: task.revision,
+      ownerThread: owner,
+      executor: task.executor,
+      scopes,
+      acquiredAt: context.timestamp,
+      heartbeatAt: context.timestamp,
+      expiresAt: leaseDeadline(context.timestamp, ttl),
+      heartbeatIntervalSeconds: heartbeat,
+      ttlSeconds: ttl,
+      baseline: {
+        path: LEASE_BASELINES_PATH,
+        snapshotContentHash: context.snapshot.contentHash,
+        branch: context.snapshot.branch,
+        head: context.snapshot.head,
+        worktreeFingerprint: context.snapshot.worktreeFingerprint,
+        lastEvent: state.lastEvent
+      },
+      status: "ACTIVE"
+    };
+    task.lease = lease;
+    delete task.preLease;
+    task.updatedAt = context.timestamp;
+    const baseline: LeaseBaseline = {
+      leaseId: lease.id,
+      generation: lease.generation,
+      taskId,
+      taskRevision: task.revision,
+      capturedAt: context.snapshot.capturedAt,
+      snapshot: context.snapshot
+    };
+    const leaseBaselines = retainLeaseBaselinesLedger(validateLeaseBaselinesLedger({
+      ...context.leaseBaselines,
+      baselines: [...context.leaseBaselines.baselines, baseline]
+    }), taskList(state).flatMap(currentTask => currentTask.lease ? [currentTask.lease] : []));
+    return {
+      leaseBaselines,
+      metadata: {
+        revision: task.revision,
+        payload: { lease, baselineHash: context.snapshot.contentHash }
+      },
+      result: { task, lease }
+    };
+  }, dependencies);
+}
+
+export interface LeaseIdentityOptions {
+  directory?: string;
+  id?: string;
+  leaseId?: string;
+  generation?: number;
+  revision?: number;
+  expectedHeartbeatAt?: string;
+  ownerThread?: string;
+  actor?: string;
+  reason?: string;
+}
+
+export async function heartbeatTaskLease({
+  directory = ".",
+  id,
+  leaseId,
+  generation,
+  revision,
+  expectedHeartbeatAt,
+  ownerThread,
+  actor = "supervisor"
+}: LeaseIdentityOptions = {}, dependencies: OrchestrationDependencies = {}) {
+  const taskId = taskIdValue(id);
+  return commitMutation(path.resolve(directory), "lease.heartbeat", { actor, taskId }, (state, context) => {
+    const task = state.tasks[taskId];
+    if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    const lease = requireLeaseIdentity(task, { leaseId, generation, revision, expectedHeartbeatAt, ownerThread });
+    if (Date.parse(context.timestamp) >= Date.parse(lease.expiresAt)) {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, "The writer lease has expired and cannot be renewed by its former owner.", {
+        details: { taskId, expiresAt: lease.expiresAt, observedAt: context.timestamp }
+      });
+    }
+    if (Date.parse(context.timestamp) < Date.parse(lease.heartbeatAt)) {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, "Lease clock moved behind the last canonical heartbeat.", {
+        details: { taskId, heartbeatAt: lease.heartbeatAt, observedAt: context.timestamp }
+      });
+    }
+    lease.heartbeatAt = context.timestamp;
+    lease.expiresAt = leaseDeadline(context.timestamp, lease.ttlSeconds);
+    task.updatedAt = context.timestamp;
+    return {
+      metadata: { revision: task.revision, payload: { leaseId: lease.id, generation: lease.generation, expiresAt: lease.expiresAt } },
+      result: { task, lease }
+    };
+  }, dependencies);
+}
+
+export async function releaseTaskLease({
+  directory = ".",
+  id,
+  leaseId,
+  generation,
+  revision,
+  expectedHeartbeatAt,
+  ownerThread,
+  actor = "supervisor"
+}: LeaseIdentityOptions = {}, dependencies: OrchestrationDependencies = {}) {
+  const taskId = taskIdValue(id);
+  return commitMutation(path.resolve(directory), "lease.released", { actor, taskId }, (state, context) => {
+    const task = state.tasks[taskId];
+    if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    const lease = requireLeaseIdentity(task, { leaseId, generation, revision, expectedHeartbeatAt, ownerThread });
+    if (Date.parse(context.timestamp) >= Date.parse(lease.expiresAt)) {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, "The writer lease has expired and must be ended by the supervisor.", {
+        details: { taskId, expiresAt: lease.expiresAt, observedAt: context.timestamp }
+      });
+    }
+    if (task.state === "ACTIVE" || (task.state === "BLOCKED" && task.blockedFrom === "ACTIVE")) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "An executing task lease can be released only by delivery, revocation, or expiry.", {
+        details: { taskId, state: task.state }
+      });
+    }
+    delete task.lease;
+    task.updatedAt = context.timestamp;
+    const leaseBaselines = retainedLeaseBaselines(state, context.leaseBaselines);
+    const endedLease: EndedTaskLease = { ...lease, status: "RELEASED" };
+    return {
+      ...(leaseBaselines ? { leaseBaselines } : {}),
+      metadata: { revision: task.revision, payload: { leaseId: lease.id, generation: lease.generation } },
+      result: { task, lease: endedLease }
+    };
+  }, dependencies);
+}
+
+async function endTaskLease(
+  action: "expire" | "revoke",
+  { directory = ".", id, leaseId, generation, revision, expectedHeartbeatAt, actor = "supervisor", reason }: LeaseIdentityOptions = {},
+  dependencies: OrchestrationDependencies = {}
+) {
+  const taskId = taskIdValue(id);
+  const explanation = String(reason || "").trim();
+  if (!explanation) throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease ${action} requires --reason.`);
+  return commitMutation(path.resolve(directory), `lease.${action === "expire" ? "expired" : "revoked"}`, { actor, taskId }, (state, context) => {
+    const task = state.tasks[taskId];
+    if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    const lease = requireLeaseIdentity(task, { leaseId, generation, revision, expectedHeartbeatAt }, { requireOwner: false });
+    if (action === "expire" && Date.parse(context.timestamp) < Date.parse(lease.expiresAt)) {
+      throw new SynodError(ERROR_CODES.LEASE_NOT_EXPIRED, `Task ${taskId} lease has not reached its expiry deadline.`, {
+        details: { taskId, expiresAt: lease.expiresAt, observedAt: context.timestamp }
+      });
+    }
+    const fromState = task.state;
+    delete task.lease;
+    if (task.state === "ACTIVE") {
+      task.state = "BLOCKED";
+      task.blockedFrom = "ACTIVE";
+      task.blocker = `Writer lease ${action}d: ${explanation}`;
+    }
+    task.updatedAt = context.timestamp;
+    const leaseBaselines = retainedLeaseBaselines(state, context.leaseBaselines);
+    const endedLease: EndedTaskLease = {
+      ...lease,
+      status: action === "expire" ? "EXPIRED" : "REVOKED"
+    };
+    return {
+      ...(leaseBaselines ? { leaseBaselines } : {}),
+      metadata: {
+        fromState,
+        toState: task.state,
+        revision: task.revision,
+        payload: { leaseId: lease.id, generation: lease.generation, reason: explanation }
+      },
+      result: { task, lease: endedLease }
+    };
+  }, dependencies);
+}
+
+export function expireTaskLease(options: LeaseIdentityOptions = {}, dependencies: OrchestrationDependencies = {}) {
+  return endTaskLease("expire", options, dependencies);
+}
+
+export function revokeTaskLease(options: LeaseIdentityOptions = {}, dependencies: OrchestrationDependencies = {}) {
+  return endTaskLease("revoke", options, dependencies);
 }
 
 function requireRevision(task: OrchestrationTask, targetState: TaskState, revision: unknown): asserts revision is number {
@@ -1946,6 +2728,11 @@ export async function transitionTask({
         details: { taskId, blockedFrom: task.blockedFrom, targetState }
       });
     }
+    if (task.preLease && !["BLOCKED", "SUPERSEDED"].includes(targetState)) {
+      throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} was migrated from schema 1 and must acquire a writer lease before further progress.`, {
+        details: { taskId, state: task.state, targetState }
+      });
+    }
     requireRevision(task, targetState, revision);
     const references = requireEvidence(task, targetState, evidence);
     if (["BLOCKED", "SUPERSEDED"].includes(targetState) && !String(reason || "").trim()) {
@@ -1961,8 +2748,35 @@ export async function transitionTask({
         });
       }
     }
+    if (targetState === "ACTIVE" && !task.lease) {
+      throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} requires an active writer lease before execution.`, {
+        details: { taskId, revision: task.revision }
+      });
+    }
+    if (
+      task.lease
+      && (targetState === "ACTIVE" || (task.state === "ACTIVE" && targetState === "REVIEW"))
+      && Date.parse(context.timestamp) >= Date.parse(task.lease.expiresAt)
+    ) {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} writer lease has expired.`, {
+        details: { taskId, leaseId: task.lease.id, generation: task.lease.generation, expiresAt: task.lease.expiresAt }
+      });
+    }
+    if (["ACCEPTED", "VERIFIED", "DONE"].includes(targetState) && task.lease) {
+      throw new SynodError(ERROR_CODES.LEASE_CONFLICT, `Task ${taskId} must release its reserved writer lease before ${targetState}.`, {
+        details: { taskId, leaseId: task.lease.id, generation: task.lease.generation }
+      });
+    }
 
     const fromState = task.state;
+    const deliveredLease = fromState === "ACTIVE" && targetState === "REVIEW" ? task.lease : undefined;
+    const releasedLease = deliveredLease
+      || (targetState === "BLOCKED" && fromState !== "ACTIVE" ? task.lease : undefined);
+    if (fromState === "ACTIVE" && targetState === "REVIEW" && !deliveredLease) {
+      throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} cannot deliver without its active writer lease.`, {
+        details: { taskId, revision }
+      });
+    }
     if (fromState === "ACTIVE" && targetState === "REVIEW") task.revision = revision;
     const kind = evidenceKind(fromState, targetState);
     const createdEvidence = kind
@@ -1971,6 +2785,7 @@ export async function transitionTask({
 
     if (targetState === "ACTIVE" && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(fromState)) {
       task.correctionRound += 1;
+      task.correctionPolicy.used += 1;
       resetAcceptanceAndVerification(task);
     }
     if (fromState === "REVIEW" && targetState === "ACCEPTED") {
@@ -2005,6 +2820,7 @@ export async function transitionTask({
     }
 
     task.state = targetState;
+    if (releasedLease || targetState === "SUPERSEDED") delete task.lease;
     task.updatedAt = context.timestamp;
     if (targetState === "BLOCKED") {
       task.blocker = String(reason).trim();
@@ -2015,7 +2831,11 @@ export async function transitionTask({
     }
     if (targetState === "SUPERSEDED") task.supersededReason = String(reason).trim();
 
+    const leaseBaselines = releasedLease || targetState === "SUPERSEDED"
+      ? retainedLeaseBaselines(state, context.leaseBaselines)
+      : undefined;
     return {
+      ...(leaseBaselines ? { leaseBaselines } : {}),
       metadata: {
         fromState,
         toState: targetState,
@@ -2023,6 +2843,7 @@ export async function transitionTask({
         payload: {
           correctionRound: task.correctionRound,
           evidenceIds: createdEvidence.map(item => item.id),
+          ...(releasedLease ? { releasedLease: { id: releasedLease.id, generation: releasedLease.generation } } : {}),
           ...(reason ? { reason: String(reason).trim() } : {})
         }
       },
@@ -2157,6 +2978,15 @@ export async function orchestrationStatus(
     SUPERSEDED: 0
   };
   for (const task of taskList(state)) counts[task.state] += 1;
+  const leaseExpiryCandidates = taskList(state).flatMap(task => task.lease && Date.parse(currentCheckpoint.capturedAt) >= Date.parse(task.lease.expiresAt)
+    ? [{
+        taskId: task.id,
+        leaseId: task.lease.id,
+        generation: task.lease.generation,
+        heartbeatAt: task.lease.heartbeatAt,
+        expiresAt: task.lease.expiresAt
+      }]
+    : []);
   return {
     targetDirectory,
     healthy: !drift.detected,
@@ -2170,6 +3000,7 @@ export async function orchestrationStatus(
     drift,
     taskCounts: counts,
     tasks: taskList(state),
+    leaseExpiryCandidates,
     markdownView: ORCHESTRATION_STATUS_PATH,
     ...(delta ? { delta } : {})
   };
@@ -2262,7 +3093,13 @@ export function formatOrchestrationStatus(result: OrchestrationStatusResult): st
   lines.push(`Checkpoint: ${checkpointLabel(result.checkpoint)}`);
   lines.push(`Current: ${checkpointLabel(result.currentCheckpoint)}`);
   for (const task of result.tasks) {
-    lines.push(`${task.id.padEnd(12)} ${task.state.padEnd(10)} r${task.revision} correction ${task.correctionRound} executor ${task.executor}; acceptance ${task.acceptance.status}; verification ${task.verification.status}`);
+    const lease = task.lease
+      ? `lease ${task.lease.id} g${task.lease.generation} owner ${task.lease.ownerThread} expires ${task.lease.expiresAt}`
+      : task.preLease ? "lease migration required" : "no writer lease";
+    lines.push(`${task.id.padEnd(12)} ${task.state.padEnd(10)} r${task.revision} correction ${task.correctionRound} executor ${task.executor}; acceptance ${task.acceptance.status}; verification ${task.verification.status}; ${lease}`);
+  }
+  for (const candidate of result.leaseExpiryCandidates) {
+    lines.push(`Expiry candidate: ${candidate.taskId} lease ${candidate.leaseId} g${candidate.generation}; heartbeat ${candidate.heartbeatAt}; expired ${candidate.expiresAt}`);
   }
   if (result.tasks.length === 0) lines.push("No tasks recorded.");
   for (const reason of result.drift.reasons) lines.push(`Drift ${reason.field}: expected ${reason.expected}, actual ${reason.actual}`);

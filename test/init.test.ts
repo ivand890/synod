@@ -86,7 +86,7 @@ test("is idempotent when generated files are unchanged", async () => {
   assert.equal(second.created.length, 0);
   assert.equal(second.updated.length, 0);
   assert.equal(second.operations.length, 0);
-  assert.equal(second.preserved.length, 9);
+  assert.equal(second.preserved.length, 10);
   assert.equal(second.unchanged.length + second.preserved.length, first.created.length);
 });
 

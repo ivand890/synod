@@ -1,6 +1,6 @@
 import { errorEnvelope, successEnvelope } from "./contracts.js";
 import type { Warning } from "./contracts.js";
-import { parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs } from "./command-options.js";
+import { parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs } from "./command-options.js";
 import type { HelpOptions, LifecycleOptions } from "./command-options.js";
 import { doctorProject } from "./doctor.js";
 import type { DoctorClient, DoctorDependencies } from "./doctor.js";
@@ -12,9 +12,14 @@ import { listProfiles } from "./profiles.js";
 import { collectUsage, formatUsageReport } from "./usage.js";
 import {
   addTask,
+  acquireTaskLease,
+  expireTaskLease,
   formatOrchestrationStatus,
+  heartbeatTaskLease,
   orchestrationStatus,
   recordCheckpoint,
+  releaseTaskLease,
+  revokeTaskLease,
   transitionTask
 } from "./orchestration.js";
 import type { OrchestrationDependencies } from "./orchestration.js";
@@ -40,6 +45,11 @@ Usage:
   synod bundle restore <bundle> --cwd <directory> [--json]
   synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--cwd <directory>] [--json]
   synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
+  synod lease acquire <task-id> --owner-thread <thread-id> --write <path> [--read <path>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
+  synod lease heartbeat <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
+  synod lease release <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
+  synod lease expire <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --reason <text> [--cwd <directory>] [--json]
+  synod lease revoke <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --reason <text> [--cwd <directory>] [--json]
   synod doctor [directory] [--json]
   synod uninstall [directory] [--dry-run] [--force] [--json]
   synod profiles [--json]
@@ -56,6 +66,7 @@ Commands:
   checkpoint  Accept the current Git/worktree checkpoint in canonical state.
   bundle      Export, verify, or transactionally restore a recovery bundle.
   task        Add tasks and apply validated, revision-aware state transitions.
+  lease       Acquire and mutate fenced durable writer leases.
   doctor      Probe Codex version, App Server, model, and reasoning capabilities.
   uninstall   Remove the local runtime and unchanged managed content; preserve durable state.
   profiles    List built-in model profiles and their requirements.
@@ -70,6 +81,10 @@ Options:
   --by-model  Group consumption by model (the default and currently supported view).
   --revision  Require the exact task revision for a transition.
   --evidence  Attach evidence to the exact task revision and current checkpoint.
+  --owner-thread
+              Bind a writer lease to one opaque Codex thread ID.
+  --write     Add a repository-relative writer scope to a lease.
+  --read      Add a repository-relative read scope to a lease.
   --explain   Include a read-only path-level delta from the acknowledged checkpoint.
   --include-untracked
               Include acknowledged untracked files in a recovery bundle.
@@ -334,6 +349,30 @@ export async function run(
           for (const item of result.evidence) output.log(`Recorded evidence ${item.id}: ${item.kind} @ revision ${item.revision}.`);
         }
       }
+      return 0;
+    }
+
+    if (command === "lease") {
+      const options = parseLeaseArgs(args.slice(1));
+      if (isHelpOptions(options)) { output.log(HELP); return 0; }
+      const result = options.action === "acquire"
+        ? await acquireTaskLease(options, dependencies)
+        : options.action === "heartbeat"
+          ? await heartbeatTaskLease(options, dependencies)
+          : options.action === "release"
+            ? await releaseTaskLease(options, dependencies)
+            : options.action === "expire"
+              ? await expireTaskLease(options, dependencies)
+              : await revokeTaskLease(options, dependencies);
+      const data = {
+        action: options.action,
+        task: result.task,
+        lease: result.lease,
+        checkpoint: result.state.checkpoint,
+        lastEvent: result.state.lastEvent
+      };
+      if (options.json) output.log(JSON.stringify(successEnvelope("lease", data), null, 2));
+      else output.log(`Lease ${options.action} for ${result.task.id}: ${result.lease.id} generation ${result.lease.generation}.`);
       return 0;
     }
 

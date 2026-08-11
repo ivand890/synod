@@ -55,8 +55,7 @@ changing its CLI, runtime, package, security, or orchestration behavior. The
 migration is a prerequisite for new roadmap features, not a feature delivery of
 its own.
 
-Status: delivered in `v0.6.3`. The implementation backlog for the next
-increment is maintained in [`V0.7-IMPLEMENTATION.md`](V0.7-IMPLEMENTATION.md).
+Status: delivered in `v0.6.3`.
 
 The supported runtime remains Node 20/22/24. Synod will publish compiled ESM
 JavaScript and keep a minimal JavaScript `bin/synod.js` shim; consumers will not

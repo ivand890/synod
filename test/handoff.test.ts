@@ -12,6 +12,7 @@ import {
   ORCHESTRATION_EVENTS_PATH,
   ORCHESTRATION_STATE_PATH,
   ORCHESTRATION_STATUS_PATH,
+  acquireTaskLease,
   addTask,
   recordCheckpoint,
   transitionTask
@@ -59,7 +60,12 @@ async function add(directory: string, id: string, dependsOn: string[] = []): Pro
 
 async function activate(directory: string, id: string): Promise<void> {
   await transitionTask({ directory, id, to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id, ownerThread: `test:${id}`, write: [`src/${id.toLowerCase()}.ts`] });
   await transitionTask({ directory, id, to: "ACTIVE", revision: 0 });
+}
+
+async function reacquire(directory: string, id: string): Promise<void> {
+  await acquireTaskLease({ directory, id, ownerThread: `test:${id}`, write: [`src/${id.toLowerCase()}.ts`] });
 }
 
 async function review(directory: string, id: string, revision = 1): Promise<void> {
@@ -82,12 +88,14 @@ test("handoff derives focus, current evidence, blockers, gates, and legal transi
   await activate(directory, "T-CORRECTION");
   await review(directory, "T-CORRECTION");
   await transitionTask({ directory, id: "T-CORRECTION", to: "ACCEPTED", revision: 1, evidence: ["acceptance:T-CORRECTION:r1"] });
+  await reacquire(directory, "T-CORRECTION");
   await transitionTask({ directory, id: "T-CORRECTION", to: "ACTIVE", revision: 1, evidence: ["correction:T-CORRECTION:r1"] });
 
   await add(directory, "T-REVIEW");
   await activate(directory, "T-REVIEW");
   await review(directory, "T-REVIEW");
   await transitionTask({ directory, id: "T-REVIEW", to: "ACCEPTED", revision: 1, evidence: ["acceptance:T-REVIEW:r1"] });
+  await reacquire(directory, "T-REVIEW");
   await transitionTask({ directory, id: "T-REVIEW", to: "ACTIVE", revision: 1, evidence: ["correction:T-REVIEW:r1"] });
   await review(directory, "T-REVIEW", 2);
 

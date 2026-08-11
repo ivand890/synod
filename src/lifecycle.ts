@@ -32,8 +32,10 @@ import {
   extractManagedAgentsBlock,
   findManagedAgentsBlocks,
   generatedConfigMarker,
+  LEGACY_RECORD_PATHS,
   loadTemplateSet,
   ownershipFor,
+  RECORD_PATHS,
   removeAgentsBlocks,
   replaceAgentsBlocks
 } from "./templates.js";
@@ -46,17 +48,12 @@ import {
   ORCHESTRATION_STATUS_PATH,
   createCheckpointSnapshotAdoptionFiles,
   createInitialOrchestrationFiles,
+  createOrchestrationSchemaMigrationFiles,
   orchestrationStatus,
   validateOrchestrationReadOnly
 } from "./orchestration.js";
 import { CHECKPOINT_SNAPSHOT_PATH } from "./checkpoint.js";
-
-const ORCHESTRATION_RECORD_PATHS = [
-  ORCHESTRATION_STATE_PATH,
-  ORCHESTRATION_EVENTS_PATH,
-  CHECKPOINT_SNAPSHOT_PATH,
-  ORCHESTRATION_STATUS_PATH
-];
+import { LEASE_BASELINES_PATH } from "./leases.js";
 
 const USER_GUIDANCE_PATHS = new Set([
   "docs/synod/DECISIONS.md",
@@ -359,18 +356,32 @@ export async function initProject(
   const profile = getProfile(profileId);
   const templates = await loadTemplateSet(packageVersion, profile);
   const existingRecords = await Promise.all(
-    ORCHESTRATION_RECORD_PATHS.map(async (relativePath): Promise<[string, ManagedInspection]> => [
+    [...RECORD_PATHS].map(async (relativePath): Promise<[string, ManagedInspection]> => [
       relativePath,
       await inspectManagedPath(targetDirectory, relativePath)
     ])
   );
+  const existingRecordMap = new Map(existingRecords);
+  const legacyRecordsWithoutLedger = [...LEGACY_RECORD_PATHS].every(
+    relativePath => existingRecordMap.get(relativePath)?.type === "file"
+  ) && existingRecordMap.get(LEASE_BASELINES_PATH)?.type === "missing";
   const adoptExistingRecords = !existingManifest
-    && existingRecords.every(([, inspected]) => inspected.type === "file");
+    && (existingRecords.every(([, inspected]) => inspected.type === "file") || legacyRecordsWithoutLedger);
+  let adoptedSchemaMigrationFiles: Map<string, string> | undefined;
   if (adoptExistingRecords) {
-    if (dryRun) await validateOrchestrationReadOnly({ directory: targetDirectory });
+    if (legacyRecordsWithoutLedger) {
+      const migration = await createOrchestrationSchemaMigrationFiles(targetDirectory, dependencies);
+      if (migration.status !== "migrated") {
+        throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, "A schema-2 orchestration record is missing its lease-baseline ledger.");
+      }
+      adoptedSchemaMigrationFiles = migration.files;
+      for (const [relativePath, content] of migration.files) templates.files.set(relativePath, content);
+    } else if (dryRun) await validateOrchestrationReadOnly({ directory: targetDirectory });
     else await orchestrationStatus({ directory: targetDirectory }, dependencies);
     for (const [relativePath, inspected] of existingRecords) {
-      if (inspected.type === "file") templates.files.set(relativePath, inspected.content);
+      if (inspected.type === "file" && !adoptedSchemaMigrationFiles?.has(relativePath)) {
+        templates.files.set(relativePath, inspected.content);
+      }
     }
   } else {
     const orchestrationDependencies = { ...dependencies, checkpointOverlay: templates.files };
@@ -444,9 +455,14 @@ export async function initProject(
       state = { path: relativePath, action: "create" };
       operations.push(operationForWrite(relativePath, templateContent, inspected));
     } else if (ownership === "record") {
-      state = adoptExistingRecords
-        ? { path: relativePath, action: "preserve" }
-        : { path: relativePath, conflict: true };
+      if (adoptedSchemaMigrationFiles?.has(relativePath)) {
+        state = { path: relativePath, action: "update" };
+        operations.push(operationForWrite(relativePath, templateContent, inspected));
+      } else {
+        state = adoptExistingRecords
+          ? { path: relativePath, action: "preserve" }
+          : { path: relativePath, conflict: true };
+      }
     } else if (relativePath.startsWith("docs/synod/")) {
       ownership = "user";
       state = { path: relativePath, action: "preserve" };
@@ -485,7 +501,9 @@ export async function initProject(
       conflicts.push(relativePath);
       continue;
     }
-    const installedHash = ownership === "record" && previousEntry
+    const installedHash = adoptedSchemaMigrationFiles?.has(relativePath)
+      ? contentHash(templateContent)
+      : ownership === "record" && previousEntry
       ? previousEntry.contentHash
       : ownership === "record" && inspectionHash(inspected)
         ? inspectionHash(inspected)
@@ -557,18 +575,30 @@ export async function upgradeProject(
   const templates = await loadTemplateSet(packageVersion, profile);
   const previous = manifestFileMap(installed);
   const legacyOrchestrationPaths = [ORCHESTRATION_STATE_PATH, ORCHESTRATION_EVENTS_PATH, ORCHESTRATION_STATUS_PATH];
-  const checkpointAdoption = legacyOrchestrationPaths.every(relativePath => previous.get(relativePath)?.ownership === "record")
+  const hasOrchestrationRecords = legacyOrchestrationPaths.every(relativePath => previous.get(relativePath)?.ownership === "record");
+  const schemaMigration = hasOrchestrationRecords
+    ? await createOrchestrationSchemaMigrationFiles(targetDirectory, dependencies)
+    : undefined;
+  const checkpointAdoption = hasOrchestrationRecords && schemaMigration?.status !== "migrated"
     ? await createCheckpointSnapshotAdoptionFiles(targetDirectory, dependencies)
     : undefined;
   const orchestrationDependencies = { ...dependencies, checkpointOverlay: templates.files };
   for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, orchestrationDependencies)) {
     templates.files.set(relativePath, content);
   }
-  if (checkpointAdoption?.status === "adopted") {
+  if (schemaMigration?.status === "migrated") {
+    for (const [relativePath, content] of schemaMigration.files) templates.files.set(relativePath, content);
+    if (!schemaMigration.files.has(CHECKPOINT_SNAPSHOT_PATH)) templates.files.delete(CHECKPOINT_SNAPSHOT_PATH);
+  } else if (checkpointAdoption?.status === "adopted") {
     for (const [relativePath, content] of checkpointAdoption.files) templates.files.set(relativePath, content);
   } else if (checkpointAdoption?.status === "unavailable") {
     templates.files.delete(CHECKPOINT_SNAPSHOT_PATH);
   }
+  const generatedRecordFiles = schemaMigration?.status === "migrated"
+    ? schemaMigration.files
+    : checkpointAdoption?.status === "adopted"
+      ? checkpointAdoption.files
+      : undefined;
   const nextEntries = new Map<string, ManifestEntry>();
   const operations: TransactionOperation[] = [];
   const states: LifecycleState[] = [];
@@ -609,9 +639,16 @@ export async function upgradeProject(
 
     if (inspected.type === "unsafe" || (inspected.type !== "missing" && inspected.type !== "file")) {
       state = { path: relativePath, conflict: true };
-    } else if (checkpointAdoption?.status === "adopted" && checkpointAdoption.files.has(relativePath)) {
+    } else if (generatedRecordFiles?.has(relativePath)) {
       ownership = "record";
-      if (inspected.type === "file" && normalizeText(inspected.content) === normalizeText(templateContent)) {
+      if (
+        !old
+        && inspected.type === "file"
+        && normalizeText(inspected.content) !== normalizeText(templateContent)
+        && !force
+      ) {
+        state = { path: relativePath, conflict: true };
+      } else if (inspected.type === "file" && normalizeText(inspected.content) === normalizeText(templateContent)) {
         state = { path: relativePath, action: "unchanged" };
       } else {
         state = { path: relativePath, action: inspected.type === "missing" ? "create" : "update" };
@@ -670,7 +707,7 @@ export async function upgradeProject(
       continue;
     }
     const installedHash = ownership === "record"
-      ? checkpointAdoption?.status === "adopted" && checkpointAdoption.files.has(relativePath)
+      ? generatedRecordFiles?.has(relativePath)
         ? contentHash(templateContent)
         : old?.contentHash || inspectionHash(inspected) || contentHash(templateContent)
       : ownership === "user"
