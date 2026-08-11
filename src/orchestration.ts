@@ -52,9 +52,11 @@ import {
   leaseScopesOverlap,
   normalizeLeaseScopes,
   parseLeaseDuration,
+  retainLeaseBaselinesLedger,
   serializeLeaseBaselinesLedger,
   validateLeaseBaselinesLedger,
   type CorrectionPolicy,
+  type EndedTaskLease,
   type LeaseBaseline,
   type LeaseBaselinesLedger,
   type LeaseBaselineReference,
@@ -943,7 +945,13 @@ export async function createOrchestrationSchemaMigrationFiles(
   targetDirectory: string,
   dependencies: OrchestrationDependencies = {}
 ): Promise<OrchestrationSchemaMigration> {
-  const rawState = parseJson(await readRecord(targetDirectory, ORCHESTRATION_STATE_PATH));
+  let rawState: unknown;
+  try {
+    rawState = parseJson(await readRecord(targetDirectory, ORCHESTRATION_STATE_PATH));
+  } catch (error) {
+    if (error instanceof SynodError) throw error;
+    throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, `Could not parse ${ORCHESTRATION_STATE_PATH}: ${errorMessage(error)}`, { cause: error });
+  }
   if (isRecord(rawState) && rawState.schemaVersion === ORCHESTRATION_SCHEMA_VERSION) {
     validateOrchestrationState(rawState);
     return { status: "current" };
@@ -976,6 +984,7 @@ export async function createOrchestrationSchemaMigrationFiles(
   }
 
   const leaseBaselines = createLeaseBaselinesLedger();
+  const checkpointSnapshot = await readCheckpointSnapshot(targetDirectory, rawState.checkpoint);
   const timestamp = nowIso(dependencies.clock);
   const nextCore = migrateLegacyStateCore(rawState, leaseBaselinesReference(leaseBaselines), timestamp);
   const unsignedEvent: Omit<OrchestrationEvent, "eventHash"> = {
@@ -1008,7 +1017,8 @@ export async function createOrchestrationSchemaMigrationFiles(
       [ORCHESTRATION_STATE_PATH, serializeJson(state)],
       [ORCHESTRATION_EVENTS_PATH, `${rawEvents}${separator}${JSON.stringify(event)}\n`],
       [ORCHESTRATION_STATUS_PATH, renderStatusMarkdown(state)],
-      [LEASE_BASELINES_PATH, serializeLeaseBaselinesLedger(leaseBaselines)]
+      [LEASE_BASELINES_PATH, serializeLeaseBaselinesLedger(leaseBaselines)],
+      ...(checkpointSnapshot ? [[CHECKPOINT_SNAPSHOT_PATH, serializeCheckpointSnapshot(checkpointSnapshot)] as const] : [])
     ])
   };
 }
@@ -1152,11 +1162,7 @@ function isLegacyOrchestrationTask(value: unknown): value is LegacyOrchestration
     && value.preLease === undefined
     && isOrchestrationTask({
       ...value,
-      correctionPolicy: {
-        limit: Math.max(2, value.correctionRound),
-        used: value.correctionRound,
-        overrides: []
-      },
+      correctionPolicy: correctionPolicyForRound(value.correctionRound),
       leaseGeneration: 0
     });
 }
@@ -1170,6 +1176,9 @@ function isLegacyOrchestrationStateCoreShape(value: unknown): value is LegacyOrc
     && isGitCheckpoint(value.checkpoint)
     && isStringArray(value.taskOrder)
     && isRecord(value.tasks)
+    && new Set(value.taskOrder).size === value.taskOrder.length
+    && Object.keys(value.tasks).length === value.taskOrder.length
+    && value.taskOrder.every(id => Object.hasOwn(value.tasks as object, id))
     && Object.values(value.tasks).every(isLegacyOrchestrationTask)
     && isNonNegativeInteger(value.evidenceCounter);
 }
@@ -1188,14 +1197,14 @@ function legacyTaskRequiresLeaseMigration(task: LegacyOrchestrationTask): boolea
     || (task.state === "BLOCKED" && task.blockedFrom === "ACTIVE");
 }
 
+function correctionPolicyForRound(correctionRound: number): CorrectionPolicy {
+  return { limit: Math.max(2, correctionRound), used: correctionRound, overrides: [] };
+}
+
 function migrateLegacyTask(task: LegacyOrchestrationTask): OrchestrationTask {
   return {
     ...task,
-    correctionPolicy: {
-      limit: Math.max(2, task.correctionRound),
-      used: task.correctionRound,
-      overrides: []
-    },
+    correctionPolicy: correctionPolicyForRound(task.correctionRound),
     leaseGeneration: 0,
     ...(legacyTaskRequiresLeaseMigration(task) ? { preLease: true as const } : {})
   };
@@ -1387,6 +1396,7 @@ function validateEventLog(events: unknown[]): OrchestrationEvent[] {
   let legacySeen = false;
   let migrationSeen = false;
   let schemaTwoStarted = false;
+  const emptyLeaseBaselines = leaseBaselinesReference(createLeaseBaselinesLedger());
   const validated: OrchestrationEvent[] = [];
   for (const [index, event] of events.entries()) {
     const legacy = isLegacyOrchestrationEvent(event);
@@ -1411,9 +1421,8 @@ function validateEventLog(events: unknown[]): OrchestrationEvent[] {
       });
     } else {
       legacySeen = true;
-      const leaseBaselines = createLeaseBaselinesLedger();
       validateOrchestrationState({
-        ...migrateLegacyStateCore(event.state, leaseBaselinesReference(leaseBaselines)),
+        ...migrateLegacyStateCore(event.state, emptyLeaseBaselines),
         lastEvent: { sequence: event.sequence, id: event.id, hash: event.eventHash }
       });
     }
@@ -1798,6 +1807,15 @@ function isValidCheckpointSnapshot(value: unknown): value is CheckpointSnapshot 
   }
 }
 
+function isValidLeaseBaselinesLedger(value: unknown): value is LeaseBaselinesLedger {
+  try {
+    validateLeaseBaselinesLedger(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isPendingMutation(value: unknown): value is PendingMutation {
   return isRecord(value)
     && value.schemaVersion === ORCHESTRATION_SCHEMA_VERSION
@@ -1813,14 +1831,7 @@ function isPendingMutation(value: unknown): value is PendingMutation {
     && (
       (value.leaseBaselines === undefined && value.expectedLeaseBaselines === undefined)
       || (
-        (() => {
-          try {
-            validateLeaseBaselinesLedger(value.leaseBaselines);
-            return true;
-          } catch {
-            return false;
-          }
-        })()
+        isValidLeaseBaselinesLedger(value.leaseBaselines)
         && isRecord(value.expectedLeaseBaselines)
         && value.expectedLeaseBaselines.type === "file"
         && typeof value.expectedLeaseBaselines.hash === "string"
@@ -2273,6 +2284,17 @@ function leaseDeadline(timestamp: string, ttlSeconds: number): string {
   return new Date(Date.parse(timestamp) + ttlSeconds * 1_000).toISOString();
 }
 
+function retainedLeaseBaselines(
+  state: OrchestrationState,
+  leaseBaselines: LeaseBaselinesLedger
+): LeaseBaselinesLedger | undefined {
+  const retained = retainLeaseBaselinesLedger(
+    leaseBaselines,
+    taskList(state).flatMap(task => task.lease ? [task.lease] : [])
+  );
+  return retained.baselines.length === leaseBaselines.baselines.length ? undefined : retained;
+}
+
 function requireLeaseIdentity(
   task: OrchestrationTask,
   {
@@ -2422,10 +2444,10 @@ export async function acquireTaskLease({
       capturedAt: context.snapshot.capturedAt,
       snapshot: context.snapshot
     };
-    const leaseBaselines = validateLeaseBaselinesLedger({
+    const leaseBaselines = retainLeaseBaselinesLedger(validateLeaseBaselinesLedger({
       ...context.leaseBaselines,
       baselines: [...context.leaseBaselines.baselines, baseline]
-    });
+    }), taskList(state).flatMap(currentTask => currentTask.lease ? [currentTask.lease] : []));
     return {
       leaseBaselines,
       metadata: {
@@ -2511,9 +2533,12 @@ export async function releaseTaskLease({
     }
     delete task.lease;
     task.updatedAt = context.timestamp;
+    const leaseBaselines = retainedLeaseBaselines(state, context.leaseBaselines);
+    const endedLease: EndedTaskLease = { ...lease, status: "RELEASED" };
     return {
+      ...(leaseBaselines ? { leaseBaselines } : {}),
       metadata: { revision: task.revision, payload: { leaseId: lease.id, generation: lease.generation } },
-      result: { task, lease: { ...lease, status: "RELEASED" as const } }
+      result: { task, lease: endedLease }
     };
   }, dependencies);
 }
@@ -2543,14 +2568,20 @@ async function endTaskLease(
       task.blocker = `Writer lease ${action}d: ${explanation}`;
     }
     task.updatedAt = context.timestamp;
+    const leaseBaselines = retainedLeaseBaselines(state, context.leaseBaselines);
+    const endedLease: EndedTaskLease = {
+      ...lease,
+      status: action === "expire" ? "EXPIRED" : "REVOKED"
+    };
     return {
+      ...(leaseBaselines ? { leaseBaselines } : {}),
       metadata: {
         fromState,
         toState: task.state,
         revision: task.revision,
         payload: { leaseId: lease.id, generation: lease.generation, reason: explanation }
       },
-      result: { task, lease: { ...lease, status: action === "expire" ? "EXPIRED" as const : "REVOKED" as const } }
+      result: { task, lease: endedLease }
     };
   }, dependencies);
 }
@@ -2779,7 +2810,11 @@ export async function transitionTask({
     }
     if (targetState === "SUPERSEDED") task.supersededReason = String(reason).trim();
 
+    const leaseBaselines = releasedLease || targetState === "SUPERSEDED"
+      ? retainedLeaseBaselines(state, context.leaseBaselines)
+      : undefined;
     return {
+      ...(leaseBaselines ? { leaseBaselines } : {}),
       metadata: {
         fromState,
         toState: targetState,

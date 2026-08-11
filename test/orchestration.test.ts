@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { link, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -10,7 +10,11 @@ import { promisify } from "node:util";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
 import { CHECKPOINT_SNAPSHOT_PATH } from "../src/checkpoint.js";
 import { contentHash } from "../src/filesystem.js";
-import { LEASE_BASELINES_PATH } from "../src/leases.js";
+import {
+  LEASE_BASELINES_PATH,
+  MAX_RETAINED_LEASE_BASELINES,
+  retainLeaseBaselinesLedger
+} from "../src/leases.js";
 import { initProject } from "../src/lifecycle.js";
 import {
   ORCHESTRATION_EVENTS_PATH,
@@ -310,7 +314,8 @@ test("writer leases persist fenced generations, heartbeat deadlines, and immutab
 
   const beforeRejectedHeartbeat = await Promise.all([
     readFile(path.join(directory, ORCHESTRATION_STATE_PATH), "utf8"),
-    readFile(path.join(directory, ORCHESTRATION_EVENTS_PATH), "utf8")
+    readFile(path.join(directory, ORCHESTRATION_EVENTS_PATH), "utf8"),
+    readFile(path.join(directory, LEASE_BASELINES_PATH), "utf8")
   ]);
   await assert.rejects(
     heartbeatTaskLease({
@@ -326,7 +331,8 @@ test("writer leases persist fenced generations, heartbeat deadlines, and immutab
   );
   assert.deepEqual(await Promise.all([
     readFile(path.join(directory, ORCHESTRATION_STATE_PATH), "utf8"),
-    readFile(path.join(directory, ORCHESTRATION_EVENTS_PATH), "utf8")
+    readFile(path.join(directory, ORCHESTRATION_EVENTS_PATH), "utf8"),
+    readFile(path.join(directory, LEASE_BASELINES_PATH), "utf8")
   ]), beforeRejectedHeartbeat);
 
   await releaseTaskLease({
@@ -373,6 +379,31 @@ test("lease baseline tampering fails closed before canonical state is exposed", 
     readOrchestration(directory),
     error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_BASELINE_INVALID
   );
+});
+
+test("lease baseline retention preserves active identities and bounds inactive history", async () => {
+  const directory = await temporaryProject();
+  const snapshot = JSON.parse(await readFile(path.join(directory, CHECKPOINT_SNAPSHOT_PATH), "utf8"));
+  const identities = Array.from({ length: MAX_RETAINED_LEASE_BASELINES + 3 }, (_, index) => ({
+    id: randomUUID(),
+    generation: index + 1
+  }));
+  const active = identities[0];
+  assert.ok(active);
+  const retained = retainLeaseBaselinesLedger({
+    schemaVersion: 1,
+    baselines: identities.map((identity, index) => ({
+      leaseId: identity.id,
+      generation: identity.generation,
+      taskId: `T-${String(index).padStart(3, "0")}`,
+      taskRevision: 0,
+      capturedAt: snapshot.capturedAt,
+      snapshot
+    }))
+  }, [active]);
+
+  assert.equal(retained.baselines.length, MAX_RETAINED_LEASE_BASELINES + 1);
+  assert.ok(retained.baselines.some(item => item.leaseId === active.id && item.generation === active.generation));
 });
 
 test("pending mutation recovery completes an interrupted lease-baseline replacement", async () => {

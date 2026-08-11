@@ -526,6 +526,7 @@ test("upgrade preserves the schema-1 event prefix and fences migrated in-flight 
     readFile(eventsPath, "utf8"),
     readFile(manifestPath, "utf8")
   ]), beforeDryRun);
+  await assert.rejects(readFile(ledgerPath, "utf8"), { code: "ENOENT" });
 
   const upgraded = await upgradeProject({ directory, profile: "portable" }, {
     clock: () => "2026-08-10T13:00:00.000Z"
@@ -562,6 +563,17 @@ test("upgrade preserves the schema-1 event prefix and fences migrated in-flight 
   await assert.rejects(
     readOrchestration(directory),
     error => error instanceof SynodError && error.code === ERROR_CODES.EVENT_LOG_INVALID
+  );
+});
+
+test("upgrade reports malformed canonical state with a stable orchestration code", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory, profile: "portable" });
+  await writeFile(path.join(directory, ".synod/state.json"), "{", "utf8");
+
+  await assert.rejects(
+    upgradeProject({ directory, profile: "portable" }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.ORCHESTRATION_STATE_INVALID
   );
 });
 

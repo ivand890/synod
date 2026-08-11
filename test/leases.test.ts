@@ -11,10 +11,15 @@ test("lease scope normalization rejects administrative and non-portable aliases"
   for (const candidate of [
     "",
     ".",
+    "..",
     "../outside.ts",
     "/absolute.ts",
+    ".git",
     ".git/index",
+    ".synod",
     ".synod/state.json",
+    "src/\0.ts",
+    "src/",
     "src\\windows.ts",
     "src/../outside.ts"
   ]) {
@@ -44,4 +49,9 @@ test("tree collisions are component-aware while readers may overlap writers", ()
   assert.equal(leaseScopesOverlap(tree, { path: "src/a/file.ts", access: "write", kind: "file" }), true);
   assert.equal(leaseScopesOverlap(tree, { path: "src/ab/file.ts", access: "write", kind: "file" }), false);
   assert.equal(leaseScopesOverlap(tree, { path: "src/a/file.ts", access: "read", kind: "file" }), false);
+  assert.equal(leaseScopesOverlap({ path: "src/a/file.ts", access: "write", kind: "file" }, tree), true);
+  assert.equal(leaseScopesOverlap(
+    { path: "src/Task.ts", access: "write", kind: "file" },
+    { path: "src/task.ts", access: "write", kind: "file" }
+  ), true);
 });

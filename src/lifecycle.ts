@@ -34,6 +34,7 @@ import {
   generatedConfigMarker,
   loadTemplateSet,
   ownershipFor,
+  RECORD_PATHS,
   removeAgentsBlocks,
   replaceAgentsBlocks
 } from "./templates.js";
@@ -51,15 +52,6 @@ import {
   validateOrchestrationReadOnly
 } from "./orchestration.js";
 import { CHECKPOINT_SNAPSHOT_PATH } from "./checkpoint.js";
-import { LEASE_BASELINES_PATH } from "./leases.js";
-
-const ORCHESTRATION_RECORD_PATHS = [
-  ORCHESTRATION_STATE_PATH,
-  ORCHESTRATION_EVENTS_PATH,
-  CHECKPOINT_SNAPSHOT_PATH,
-  LEASE_BASELINES_PATH,
-  ORCHESTRATION_STATUS_PATH
-];
 
 const USER_GUIDANCE_PATHS = new Set([
   "docs/synod/DECISIONS.md",
@@ -362,7 +354,7 @@ export async function initProject(
   const profile = getProfile(profileId);
   const templates = await loadTemplateSet(packageVersion, profile);
   const existingRecords = await Promise.all(
-    ORCHESTRATION_RECORD_PATHS.map(async (relativePath): Promise<[string, ManagedInspection]> => [
+    [...RECORD_PATHS].map(async (relativePath): Promise<[string, ManagedInspection]> => [
       relativePath,
       await inspectManagedPath(targetDirectory, relativePath)
     ])
@@ -573,11 +565,17 @@ export async function upgradeProject(
   }
   if (schemaMigration?.status === "migrated") {
     for (const [relativePath, content] of schemaMigration.files) templates.files.set(relativePath, content);
+    if (!schemaMigration.files.has(CHECKPOINT_SNAPSHOT_PATH)) templates.files.delete(CHECKPOINT_SNAPSHOT_PATH);
   } else if (checkpointAdoption?.status === "adopted") {
     for (const [relativePath, content] of checkpointAdoption.files) templates.files.set(relativePath, content);
   } else if (checkpointAdoption?.status === "unavailable") {
     templates.files.delete(CHECKPOINT_SNAPSHOT_PATH);
   }
+  const generatedRecordFiles = schemaMigration?.status === "migrated"
+    ? schemaMigration.files
+    : checkpointAdoption?.status === "adopted"
+      ? checkpointAdoption.files
+      : undefined;
   const nextEntries = new Map<string, ManifestEntry>();
   const operations: TransactionOperation[] = [];
   const states: LifecycleState[] = [];
@@ -618,10 +616,7 @@ export async function upgradeProject(
 
     if (inspected.type === "unsafe" || (inspected.type !== "missing" && inspected.type !== "file")) {
       state = { path: relativePath, conflict: true };
-    } else if (
-      (schemaMigration?.status === "migrated" && schemaMigration.files.has(relativePath))
-      || (checkpointAdoption?.status === "adopted" && checkpointAdoption.files.has(relativePath))
-    ) {
+    } else if (generatedRecordFiles?.has(relativePath)) {
       ownership = "record";
       if (inspected.type === "file" && normalizeText(inspected.content) === normalizeText(templateContent)) {
         state = { path: relativePath, action: "unchanged" };
@@ -682,8 +677,7 @@ export async function upgradeProject(
       continue;
     }
     const installedHash = ownership === "record"
-      ? (schemaMigration?.status === "migrated" && schemaMigration.files.has(relativePath))
-        || (checkpointAdoption?.status === "adopted" && checkpointAdoption.files.has(relativePath))
+      ? generatedRecordFiles?.has(relativePath)
         ? contentHash(templateContent)
         : old?.contentHash || inspectionHash(inspected) || contentHash(templateContent)
       : ownership === "user"

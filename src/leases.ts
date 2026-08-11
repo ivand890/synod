@@ -13,6 +13,7 @@ export const DEFAULT_LEASE_TTL_SECONDS = 1_800;
 export const DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 300;
 export const MIN_LEASE_TTL_SECONDS = 30;
 export const MAX_LEASE_TTL_SECONDS = 86_400;
+export const MAX_RETAINED_LEASE_BASELINES = 64;
 
 export type LeaseAccess = "read" | "write";
 export type LeaseScopeKind = "file" | "tree";
@@ -55,6 +56,10 @@ export interface TaskLease {
   };
   status: "ACTIVE";
 }
+
+export type EndedTaskLease = Omit<TaskLease, "status"> & {
+  status: "RELEASED" | "EXPIRED" | "REVOKED";
+};
 
 export interface CorrectionPolicy {
   limit: number;
@@ -111,6 +116,7 @@ export function normalizeLeaseScopePath(value: unknown): string {
     || candidate.includes("\0")
     || path.posix.isAbsolute(candidate)
     || path.posix.normalize(candidate) !== candidate
+    || candidate.endsWith("/")
     || candidate === "."
     || candidate === ".."
     || candidate.startsWith("../")
@@ -154,9 +160,11 @@ export function normalizeLeaseScopes({
 
 export function leaseScopesOverlap(left: LeaseScope, right: LeaseScope): boolean {
   if (left.access !== "write" || right.access !== "write") return false;
-  if (left.path === right.path) return true;
-  if (left.kind === "tree" && right.path.startsWith(`${left.path}/`)) return true;
-  if (right.kind === "tree" && left.path.startsWith(`${right.path}/`)) return true;
+  const leftPath = left.path.normalize("NFC").toLowerCase();
+  const rightPath = right.path.normalize("NFC").toLowerCase();
+  if (leftPath === rightPath) return true;
+  if (left.kind === "tree" && rightPath.startsWith(`${leftPath}/`)) return true;
+  if (right.kind === "tree" && leftPath.startsWith(`${rightPath}/`)) return true;
   return false;
 }
 
@@ -240,6 +248,7 @@ function validateLeaseBaseline(value: unknown): LeaseBaseline {
     || !isUuid(value.leaseId)
     || !isPositiveInteger(value.generation)
     || typeof value.taskId !== "string"
+    || value.taskId.length === 0
     || !isNonNegativeInteger(value.taskRevision)
     || !validIsoTimestamp(value.capturedAt)
   ) {
@@ -291,6 +300,29 @@ export function validateLeaseBaselinesLedger(value: unknown): LeaseBaselinesLedg
 
 export function createLeaseBaselinesLedger(): LeaseBaselinesLedger {
   return { schemaVersion: LEASE_BASELINES_SCHEMA_VERSION, baselines: [] };
+}
+
+export function retainLeaseBaselinesLedger(
+  value: LeaseBaselinesLedger,
+  activeLeases: ReadonlyArray<Pick<TaskLease, "id" | "generation">>,
+  historyLimit = MAX_RETAINED_LEASE_BASELINES
+): LeaseBaselinesLedger {
+  if (!Number.isSafeInteger(historyLimit) || historyLimit < 0) {
+    throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, "Lease baseline history limit is invalid.");
+  }
+  const ledger = validateLeaseBaselinesLedger(value);
+  const active = new Set(activeLeases.map(lease => `${lease.id}:${lease.generation}`));
+  const retainedActive = ledger.baselines.filter(item => active.has(`${item.leaseId}:${item.generation}`));
+  const retainedHistory = ledger.baselines
+    .filter(item => !active.has(`${item.leaseId}:${item.generation}`))
+    .sort((left, right) => right.capturedAt.localeCompare(left.capturedAt)
+      || right.generation - left.generation
+      || right.leaseId.localeCompare(left.leaseId))
+    .slice(0, historyLimit);
+  return validateLeaseBaselinesLedger({
+    schemaVersion: LEASE_BASELINES_SCHEMA_VERSION,
+    baselines: [...retainedActive, ...retainedHistory]
+  });
 }
 
 export function serializeLeaseBaselinesLedger(value: LeaseBaselinesLedger): string {

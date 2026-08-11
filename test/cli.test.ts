@@ -154,6 +154,23 @@ test("task parsing rejects inherited Object.prototype names", async () => {
   assert.equal(envelope.error.details.argument, "toString");
 });
 
+test("lease parsing rejects malformed numeric fences before orchestration", async () => {
+  const { messages, output } = capturedOutput();
+  const status = await run([
+    "lease", "heartbeat", "T-001",
+    "--lease-id", "00000000-0000-4000-8000-000000000000",
+    "--generation", "not-a-number",
+    "--revision", "0",
+    "--expected-heartbeat-at", "2026-08-10T00:00:00.000Z",
+    "--owner-thread", "thread:test",
+    "--json"
+  ], output);
+  const envelope = JSON.parse(takeMessage(messages));
+  assert.equal(status, 1);
+  assert.equal(envelope.error.code, ERROR_CODES.LEASE_INVALID);
+  assert.equal(envelope.error.details.option, "--generation");
+});
+
 test("check and doctor emit failure JSON when their health gates fail", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-health-json-test-"));
   const { messages, output } = capturedOutput();

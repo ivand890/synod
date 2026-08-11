@@ -4,7 +4,7 @@ import { ERROR_CODES, SynodError } from "./errors.js";
 import { inspectPath, unsafeAncestor } from "./filesystem.js";
 import { parseVersion } from "./compatibility.js";
 import { errorMessage, isRecord, parseJson } from "./validation.js";
-import { LEASE_BASELINES_PATH } from "./leases.js";
+import { RECORD_PATHS } from "./templates.js";
 
 export const MANIFEST_PATH = ".synod/manifest.json";
 export const MANIFEST_SCHEMA_VERSION = 3;
@@ -42,17 +42,9 @@ export interface ManagedManifest {
 
 export type SynodManifest = LegacyManifest | ManagedManifest;
 
-const recordPaths = new Set([
-  ".synod/state.json",
-  ".synod/events.jsonl",
-  ".synod/checkpoint.json",
-  LEASE_BASELINES_PATH,
-  "docs/synod/STATUS.md"
-]);
-
 function allowedManifestPath(value: string): boolean {
   if (value === "AGENTS.md" || value === ".codex/config.toml") return true;
-  return recordPaths.has(value)
+  return RECORD_PATHS.has(value)
     || value.startsWith("docs/synod/")
     || value.startsWith(".codex/agents/synod-")
     || value.startsWith(".agents/skills/synod-advisor/");
@@ -177,10 +169,10 @@ export function validateManifest(manifest: unknown, { allowLegacy = true }: { al
     }
     if (
       (entry.path === "AGENTS.md" && entry.ownership !== "shared") ||
-      (recordPaths.has(entry.path) && entry.ownership !== "record") ||
-      (entry.path.startsWith("docs/synod/") && !recordPaths.has(entry.path) && entry.ownership !== "user") ||
+      (RECORD_PATHS.has(entry.path) && entry.ownership !== "record") ||
+      (entry.path.startsWith("docs/synod/") && !RECORD_PATHS.has(entry.path) && entry.ownership !== "user") ||
       (entry.path !== "AGENTS.md" && entry.ownership === "shared") ||
-      (!recordPaths.has(entry.path) && entry.ownership === "record") ||
+      (!RECORD_PATHS.has(entry.path) && entry.ownership === "record") ||
       ((entry.path.startsWith(".codex/agents/") || entry.path.startsWith(".agents/skills/")) && entry.ownership !== "synod")
     ) {
       throw new SynodError(ERROR_CODES.MANIFEST_INVALID, `Ownership does not match the managed path ${entry.path}.`);

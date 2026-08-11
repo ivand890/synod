@@ -74,10 +74,10 @@ export interface LeaseAcquireCommandOptions extends LeaseCommonOptions {
 
 export interface LeaseMutationCommandOptions extends LeaseCommonOptions {
   action: "heartbeat" | "release" | "expire" | "revoke";
-  leaseId?: string;
-  generation?: number;
-  revision?: number;
-  expectedHeartbeatAt?: string;
+  leaseId: string;
+  generation: number;
+  revision: number;
+  expectedHeartbeatAt: string;
   ownerThread?: string;
   reason?: string;
 }
@@ -332,6 +332,18 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     else heartbeatIntervalSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
     index += 1;
   }
+  for (const [option, value] of [
+    ["--generation", generation],
+    ["--revision", revision],
+    ["--ttl-seconds", ttlSeconds],
+    ["--heartbeat-seconds", heartbeatIntervalSeconds]
+  ] as const) {
+    if (value !== undefined && Number.isNaN(value)) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease ${action} requires an integer value for ${option}.`, {
+        details: { option }
+      });
+    }
+  }
   if (action === "acquire") {
     if (leaseId !== undefined || generation !== undefined || revision !== undefined || expectedHeartbeatAt !== undefined || reason !== undefined) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Lease acquire received a mutation-only option.");
@@ -368,10 +380,10 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     json,
     actor,
     ...(ownerThread === undefined ? {} : { ownerThread }),
-    ...(leaseId === undefined ? {} : { leaseId }),
-    ...(generation === undefined ? {} : { generation }),
-    ...(revision === undefined ? {} : { revision }),
-    ...(expectedHeartbeatAt === undefined ? {} : { expectedHeartbeatAt }),
+    leaseId,
+    generation,
+    revision,
+    expectedHeartbeatAt,
     ...(reason === undefined ? {} : { reason })
   };
 }
