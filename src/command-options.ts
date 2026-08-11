@@ -68,6 +68,8 @@ export interface LeaseAcquireCommandOptions extends LeaseCommonOptions {
   ownerThread?: string;
   read: string[];
   write: string[];
+  readTree: string[];
+  writeTree: string[];
   ttlSeconds?: number;
   heartbeatIntervalSeconds?: number;
 }
@@ -301,6 +303,8 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
   let reason: string | undefined;
   const read: string[] = [];
   const write: string[] = [];
+  const readTree: string[] = [];
+  const writeTree: string[] = [];
   for (let index = 2; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg) continue;
@@ -311,7 +315,7 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     }
     const valueOptions = [
       "--cwd", "--actor", "--owner-thread", "--lease-id", "--generation", "--revision", "--expected-heartbeat-at",
-      "--ttl-seconds", "--heartbeat-seconds", "--reason", "--read", "--write"
+      "--ttl-seconds", "--heartbeat-seconds", "--reason", "--read", "--write", "--read-tree", "--write-tree"
     ];
     if (!valueOptions.includes(arg)) {
       if (arg.startsWith("-")) throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
@@ -326,6 +330,8 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     else if (arg === "--reason") reason = value;
     else if (arg === "--read") read.push(value);
     else if (arg === "--write") write.push(value);
+    else if (arg === "--read-tree") readTree.push(value);
+    else if (arg === "--write-tree") writeTree.push(value);
     else if (arg === "--generation") generation = /^\d+$/.test(value) ? Number(value) : Number.NaN;
     else if (arg === "--revision") revision = /^\d+$/.test(value) ? Number(value) : Number.NaN;
     else if (arg === "--ttl-seconds") ttlSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
@@ -356,12 +362,15 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
       actor,
       read,
       write,
+      readTree,
+      writeTree,
       ...(ownerThread === undefined ? {} : { ownerThread }),
       ...(ttlSeconds === undefined ? {} : { ttlSeconds }),
       ...(heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds })
     };
   }
-  if (read.length > 0 || write.length > 0 || ttlSeconds !== undefined || heartbeatIntervalSeconds !== undefined) {
+  if (read.length > 0 || write.length > 0 || readTree.length > 0 || writeTree.length > 0
+    || ttlSeconds !== undefined || heartbeatIntervalSeconds !== undefined) {
     throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Lease ${action} received an acquire-only option.`);
   }
   if (leaseId === undefined || generation === undefined || revision === undefined || expectedHeartbeatAt === undefined) {

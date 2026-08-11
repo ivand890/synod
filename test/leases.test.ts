@@ -19,6 +19,11 @@ test("lease scope normalization rejects administrative and non-portable aliases"
     ".synod",
     ".synod/state.json",
     "src/\0.ts",
+    "src/e\u0301.ts",
+    "src/CON",
+    "src/trailing.",
+    "src/trailing ",
+    "src/a:b.ts",
     "src/",
     "src\\windows.ts",
     "src/../outside.ts"
@@ -40,6 +45,21 @@ test("lease scopes are deterministic and require at least one writer", () => {
   ]);
   assert.throws(
     () => normalizeLeaseScopes({ read: ["README.md"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_INVALID
+  );
+  assert.deepEqual(normalizeLeaseScopes({
+    read: ["src/input.ts"],
+    writeTree: ["src/output"]
+  }), [
+    { path: "src/input.ts", access: "read", kind: "file" },
+    { path: "src/output", access: "write", kind: "tree" }
+  ]);
+  assert.throws(
+    () => normalizeLeaseScopes({ write: ["src/Task.ts"], read: ["src/task.ts"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_INVALID
+  );
+  assert.throws(
+    () => normalizeLeaseScopes({ writeTree: ["src"], write: ["src/task.ts"] }),
     error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_INVALID
   );
 });

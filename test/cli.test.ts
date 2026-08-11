@@ -29,6 +29,19 @@ function takeMessage(messages: string[]): string {
   return message ?? "";
 }
 
+function initializeGitHead(directory: string): void {
+  for (const args of [
+    ["init", "--quiet"],
+    ["config", "user.name", "Synod Tests"],
+    ["config", "user.email", "synod-tests@example.invalid"],
+    ["add", "."],
+    ["commit", "--quiet", "-m", "fixture"]
+  ]) {
+    const result = spawnSync("git", ["-C", directory, ...args], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  }
+}
+
 test("keeps canonical diagnostics authoritative and preserves error-like messages", () => {
   const diagnostics = baseDiagnostics({
     synodVersion: "spoofed",
@@ -372,6 +385,7 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
 
   try {
     await run(["init", directory], output);
+    initializeGitHead(directory);
     messages.length = 0;
     await run([
       "task", "add", "T-LEASE",
@@ -388,7 +402,7 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
     const acquireCode = await run([
       "lease", "acquire", "T-LEASE",
       "--owner-thread", "thread:cli",
-      "--write", "src/lease.ts",
+      "--write-tree", "src/lease",
       "--ttl-seconds", "120",
       "--heartbeat-seconds", "30",
       "--cwd", directory,
@@ -400,6 +414,7 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
     assert.equal(acquired.data.action, "acquire");
     assert.equal(acquired.data.lease.ownerThread, "thread:cli");
     assert.equal(acquired.data.lease.generation, 1);
+    assert.deepEqual(acquired.data.lease.scopes, [{ path: "src/lease", access: "write", kind: "tree" }]);
 
     const heartbeatCode = await run([
       "lease", "heartbeat", "T-LEASE",

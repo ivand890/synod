@@ -16,10 +16,11 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { compareCheckpointPaths } from "./checkpoint.js";
-import type { CheckpointEntry } from "./checkpoint.js";
+import type { CheckpointEntry, CheckpointSnapshot } from "./checkpoint.js";
 import { ERROR_CODES, SynodError } from "./errors.js";
+import { isLeaseScope, type LeaseScope } from "./leases.js";
 import { captureGitCheckpointSnapshot, checkpointDrift, withValidatedCheckpointSource } from "./orchestration.js";
-import type { OrchestrationDependencies } from "./orchestration.js";
+import type { GitCheckpoint, OrchestrationDependencies, OrchestrationLastEvent } from "./orchestration.js";
 import { packageVersion } from "./package.js";
 import { generatedConfigMarker, removeAgentsBlocks } from "./templates.js";
 import { errorCode, errorMessage, isRecord, parseJson } from "./validation.js";
@@ -83,9 +84,21 @@ export interface RecoveryManifestPayload {
   source: { branch: string | null; head: string | null };
   checkpoint: { fingerprint: string; snapshotHash: string };
   event: { sequence: number; hash: string };
+  proposal?: RecoveryProposalIdentity;
   includeUntracked: boolean;
   entries: RecoveryEntry[];
   objects: RecoveryObject[];
+}
+
+export interface RecoveryProposalIdentity {
+  taskId: string;
+  leaseId: string;
+  generation: number;
+  baseRevision: number;
+  revision: number;
+  scopes: LeaseScope[];
+  ownedPaths: string[];
+  baseline: { snapshotHash: string; worktreeFingerprint: string };
 }
 
 export interface RecoveryManifest extends RecoveryManifestPayload {
@@ -103,6 +116,18 @@ export interface BundleVerification {
 
 export interface BundleExportResult extends BundleVerification {
   destination: string;
+}
+
+export interface SnapshotBundleExportOptions {
+  directory: string;
+  destination: string;
+  snapshot: CheckpointSnapshot;
+  source: { branch: string | null; head: string | null };
+  event: Pick<OrchestrationLastEvent, "sequence" | "hash">;
+  proposal?: RecoveryProposalIdentity;
+  guardCheckpoint: GitCheckpoint;
+  includeUntracked?: boolean;
+  allowInsideSource?: boolean;
 }
 
 interface RawIndexEntry {
@@ -173,6 +198,13 @@ function exactKeys(value: Record<string, unknown>, required: string[], optional:
 
 function isHash(value: unknown): value is string {
   return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
+}
+
+function isSortedUniqueStringArray(value: unknown): value is string[] {
+  return Array.isArray(value)
+    && value.every(item => typeof item === "string" && item.length > 0)
+    && new Set(value).size === value.length
+    && value.every((item, index) => index === 0 || value[index - 1]! < item);
 }
 
 function hasUnpairedSurrogate(value: string): boolean {
@@ -329,7 +361,7 @@ export function validateRecoveryManifest(value: unknown): RecoveryManifest {
     || !exactKeys(value, [
       "schemaVersion", "bundleId", "synodVersion", "createdAt", "source", "checkpoint",
       "event", "includeUntracked", "entries", "objects"
-    ])
+    ], ["proposal"])
     || value.schemaVersion !== RECOVERY_BUNDLE_SCHEMA_VERSION
     || !isHash(value.bundleId)
     || typeof value.synodVersion !== "string"
@@ -356,6 +388,48 @@ export function validateRecoveryManifest(value: unknown): RecoveryManifest {
     || value.event.sequence < 1
     || !isHash(value.event.hash)) {
     invalid("Recovery bundle manifest schema is invalid.");
+  }
+  let proposal: RecoveryProposalIdentity | undefined;
+  if (value.proposal !== undefined) {
+    const candidate = value.proposal;
+    if (!isRecord(candidate)
+      || !exactKeys(candidate, ["taskId", "leaseId", "generation", "baseRevision", "revision", "scopes", "ownedPaths", "baseline"])
+      || typeof candidate.taskId !== "string"
+      || candidate.taskId.length === 0
+      || typeof candidate.leaseId !== "string"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(candidate.leaseId)
+      || typeof candidate.generation !== "number"
+      || !Number.isSafeInteger(candidate.generation)
+      || candidate.generation < 1
+      || typeof candidate.baseRevision !== "number"
+      || !Number.isSafeInteger(candidate.baseRevision)
+      || candidate.baseRevision < 0
+      || candidate.revision !== candidate.baseRevision + 1
+      || !Array.isArray(candidate.scopes)
+      || candidate.scopes.length === 0
+      || !candidate.scopes.every(isLeaseScope)
+      || !candidate.scopes.some(scope => scope.access === "write")
+      || !isSortedUniqueStringArray(candidate.ownedPaths)
+      || !candidate.ownedPaths.every(isSafePath)
+      || !isRecord(candidate.baseline)
+      || !exactKeys(candidate.baseline, ["snapshotHash", "worktreeFingerprint"])
+      || !isHash(candidate.baseline.snapshotHash)
+      || !isHash(candidate.baseline.worktreeFingerprint)) {
+      invalid("Recovery bundle proposal identity is invalid.");
+    }
+    proposal = {
+      taskId: candidate.taskId,
+      leaseId: candidate.leaseId,
+      generation: candidate.generation,
+      baseRevision: candidate.baseRevision,
+      revision: candidate.revision,
+      scopes: candidate.scopes,
+      ownedPaths: candidate.ownedPaths,
+      baseline: {
+        snapshotHash: candidate.baseline.snapshotHash,
+        worktreeFingerprint: candidate.baseline.worktreeFingerprint
+      }
+    };
   }
   const entries = value.entries.map(validateEntry);
   const sortedEntries = [...entries].sort((left, right) => compareCheckpointPaths(
@@ -403,6 +477,7 @@ export function validateRecoveryManifest(value: unknown): RecoveryManifest {
       snapshotHash: value.checkpoint.snapshotHash as string
     },
     event: { sequence: value.event.sequence, hash: value.event.hash as string },
+    ...(proposal ? { proposal } : {}),
     includeUntracked: value.includeUntracked,
     entries,
     objects
@@ -771,6 +846,144 @@ export async function verifyRecoveryBundle(
   };
 }
 
+async function materializeSnapshotBundle(
+  targetDirectory: string,
+  destinationPath: string,
+  destinationParent: DirectoryIdentity,
+  {
+    snapshot,
+    source,
+    event,
+    guardCheckpoint,
+    proposal,
+    includeUntracked
+  }: Omit<SnapshotBundleExportOptions, "directory" | "destination" | "allowInsideSource">,
+  dependencies: RecoveryDependencies
+): Promise<BundleExportResult> {
+  if (!source.head) {
+    throw new SynodError(ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE, "Recovery export requires an acknowledged Git HEAD.", {
+      details: { source }
+    });
+  }
+  const untracked = snapshot.entries.filter(entry => entry.status === "??").map(entry => entry.path);
+  if (untracked.length > 0 && !includeUntracked) {
+    throw new SynodError(ERROR_CODES.RECOVERY_UNTRACKED_REQUIRED, "The checkpoint contains untracked files; export requires --include-untracked.", {
+      details: { paths: untracked }
+    });
+  }
+  const rawGitRunner = dependencies.rawGitRunner || defaultRawGitRunner;
+  let indexOutput: Buffer;
+  try {
+    indexOutput = await rawGitRunner(targetDirectory, ["ls-files", "--stage", "-z", "--", "."]);
+  } catch (error) {
+    throw new SynodError(ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE, "The Git index required for recovery export is unavailable.", {
+      cause: error
+    });
+  }
+  const index = indexRecords(indexOutput);
+  const objects = new Map<string, Buffer>();
+  const entries: RecoveryEntry[] = [];
+  for (const snapshotEntry of snapshot.entries) {
+    if (snapshotEntry.status === "??" && !includeUntracked) continue;
+    if (snapshotEntry.type === "directory") {
+      throw new SynodError(ERROR_CODES.RECOVERY_SUBMODULE_UNSUPPORTED, "Dirty submodules are not supported by recovery bundle schema 1.", {
+        details: { path: snapshotEntry.path }
+      });
+    }
+    const indexEntries: RecoveryIndexEntry[] = [];
+    const rawIndexEntries = (index.get(snapshotEntry.path) || []).sort((left, right) => left.stage - right.stage);
+    for (const item of rawIndexEntries) {
+      let raw: Buffer;
+      try {
+        raw = await rawGitRunner(targetDirectory, ["cat-file", "blob", item.objectId]);
+      } catch (error) {
+        throw new SynodError(ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE, "A Git index object required for recovery export is unavailable.", {
+          cause: error,
+          details: { path: snapshotEntry.path, objectId: item.objectId }
+        });
+      }
+      const material = recoveryMaterial(snapshotEntry.path, raw);
+      if (material) objects.set(hashBytes(material), material);
+      indexEntries.push({ mode: item.mode, stage: item.stage, object: material ? hashBytes(material) : null });
+    }
+    const worktree = await readWorktreeMaterial(targetDirectory, snapshotEntry);
+    if (worktree.material) objects.set(hashBytes(worktree.material), worktree.material);
+    assertEntryMaterialMatchesSnapshot(snapshotEntry, rawIndexEntries, indexEntries, worktree.descriptor);
+    entries.push({
+      path: snapshotEntry.path,
+      ...(snapshotEntry.sourcePath ? { sourcePath: snapshotEntry.sourcePath } : {}),
+      status: snapshotEntry.status,
+      binary: Boolean(snapshotEntry.binary),
+      filtered: isFilteredPath(snapshotEntry.path),
+      index: indexEntries,
+      worktree: worktree.descriptor
+    });
+  }
+  entries.sort((left, right) => compareCheckpointPaths(`${left.path}\0${left.sourcePath || ""}`, `${right.path}\0${right.sourcePath || ""}`));
+  const objectList = [...objects.entries()]
+    .sort(([left], [right]) => compareCheckpointPaths(left, right))
+    .map(([hash, content]) => ({ hash, size: content.byteLength }));
+  const payload: RecoveryManifestPayload = {
+    schemaVersion: RECOVERY_BUNDLE_SCHEMA_VERSION,
+    synodVersion: packageVersion,
+    createdAt: snapshot.capturedAt,
+    source,
+    checkpoint: { fingerprint: snapshot.worktreeFingerprint, snapshotHash: snapshot.contentHash },
+    event,
+    ...(proposal ? { proposal } : {}),
+    includeUntracked: Boolean(includeUntracked),
+    entries,
+    objects: objectList
+  };
+  const manifest: RecoveryManifest = { ...payload, bundleId: payloadHash(payload) };
+  validateRecoveryManifest(manifest);
+  await assertSourceStillMatches(targetDirectory, guardCheckpoint, dependencies);
+
+  const parent = path.dirname(destinationPath);
+  await assertDirectoryIdentity(destinationParent, "Recovery bundle parent");
+  const temporary = await mkdtemp(path.join(parent, `.${path.basename(destinationPath)}.synod-`));
+  try {
+    await assertDirectoryIdentity(destinationParent, "Recovery bundle parent");
+    const objectDirectory = path.join(temporary, RECOVERY_OBJECTS_PATH);
+    await mkdir(objectDirectory, { mode: 0o700 });
+    for (const [hash, content] of [...objects.entries()].sort(([left], [right]) => compareCheckpointPaths(left, right))) {
+      await writeDurableFile(path.join(objectDirectory, hash.slice("sha256:".length)), content);
+    }
+    await writeDurableFile(path.join(temporary, RECOVERY_MANIFEST_PATH), serializeManifest(manifest));
+    await verifyRecoveryBundle({ bundle: temporary });
+    await assertSourceStillMatches(targetDirectory, guardCheckpoint, dependencies);
+    await publishBundle(temporary, destinationPath, destinationParent, dependencies.beforePublish);
+    const verified = await verifyRecoveryBundle({ bundle: destinationPath });
+    return { ...verified, destination: destinationPath };
+  } finally {
+    await rm(temporary, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+export async function exportSnapshotRecoveryBundle(
+  options: SnapshotBundleExportOptions,
+  dependencies: RecoveryDependencies = {}
+): Promise<BundleExportResult> {
+  const targetDirectory = await realpath(path.resolve(options.directory));
+  const resolvedDestination = await canonicalDestination(options.destination);
+  const destinationPath = resolvedDestination.path;
+  const relativeDestination = path.relative(targetDirectory, destinationPath);
+  const insideSource = relativeDestination === ""
+    || (!relativeDestination.startsWith(`..${path.sep}`) && relativeDestination !== ".." && !path.isAbsolute(relativeDestination));
+  if (insideSource && !options.allowInsideSource) {
+    invalid("Recovery bundle destination must be outside the source checkout.", { destination: destinationPath });
+  }
+  await requireMissingDestination(destinationPath);
+  return materializeSnapshotBundle(targetDirectory, destinationPath, resolvedDestination.parent, {
+    snapshot: options.snapshot,
+    source: options.source,
+    event: options.event,
+    ...(options.proposal ? { proposal: options.proposal } : {}),
+    guardCheckpoint: options.guardCheckpoint,
+    includeUntracked: Boolean(options.includeUntracked)
+  }, dependencies);
+}
+
 export async function exportRecoveryBundle(
   { directory = ".", destination, includeUntracked = false }: BundleExportOptions,
   dependencies: RecoveryDependencies = {}
@@ -783,109 +996,13 @@ export async function exportRecoveryBundle(
     invalid("Recovery bundle destination must be outside the source checkout.", { destination: destinationPath });
   }
   await requireMissingDestination(destinationPath);
-  const rawGitRunner = dependencies.rawGitRunner || defaultRawGitRunner;
   return await withValidatedCheckpointSource({ directory: targetDirectory }, dependencies, async source => {
-    if (!source.state.checkpoint.available || !source.state.checkpoint.head) {
-      throw new SynodError(ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE, "Recovery export requires an acknowledged Git HEAD.", {
-        details: { checkpoint: source.state.checkpoint }
-      });
-    }
-    const untracked = source.snapshot.entries.filter(entry => entry.status === "??").map(entry => entry.path);
-    if (untracked.length > 0 && !includeUntracked) {
-      throw new SynodError(ERROR_CODES.RECOVERY_UNTRACKED_REQUIRED, "The checkpoint contains untracked files; export requires --include-untracked.", {
-        details: { paths: untracked }
-      });
-    }
-    let indexOutput: Buffer;
-    try {
-      indexOutput = await rawGitRunner(source.targetDirectory, ["ls-files", "--stage", "-z", "--", "."]);
-    } catch (error) {
-      throw new SynodError(ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE, "The Git index required for recovery export is unavailable.", {
-        cause: error
-      });
-    }
-    const index = indexRecords(indexOutput);
-    const objects = new Map<string, Buffer>();
-    const entries: RecoveryEntry[] = [];
-    for (const snapshotEntry of source.snapshot.entries) {
-      if (snapshotEntry.status === "??" && !includeUntracked) continue;
-      if (snapshotEntry.type === "directory") {
-        throw new SynodError(ERROR_CODES.RECOVERY_SUBMODULE_UNSUPPORTED, "Dirty submodules are not supported by recovery bundle schema 1.", {
-          details: { path: snapshotEntry.path }
-        });
-      }
-      const indexEntries: RecoveryIndexEntry[] = [];
-      const rawIndexEntries = (index.get(snapshotEntry.path) || []).sort((left, right) => left.stage - right.stage);
-      for (const item of rawIndexEntries) {
-        let raw: Buffer;
-        try {
-          raw = await rawGitRunner(source.targetDirectory, ["cat-file", "blob", item.objectId]);
-        } catch (error) {
-          throw new SynodError(ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE, "A Git index object required for recovery export is unavailable.", {
-            cause: error,
-            details: { path: snapshotEntry.path, objectId: item.objectId }
-          });
-        }
-        const material = recoveryMaterial(snapshotEntry.path, raw);
-        if (material) objects.set(hashBytes(material), material);
-        indexEntries.push({ mode: item.mode, stage: item.stage, object: material ? hashBytes(material) : null });
-      }
-      const worktree = await readWorktreeMaterial(source.targetDirectory, snapshotEntry);
-      if (worktree.material) objects.set(hashBytes(worktree.material), worktree.material);
-      assertEntryMaterialMatchesSnapshot(snapshotEntry, rawIndexEntries, indexEntries, worktree.descriptor);
-      entries.push({
-        path: snapshotEntry.path,
-        ...(snapshotEntry.sourcePath ? { sourcePath: snapshotEntry.sourcePath } : {}),
-        status: snapshotEntry.status,
-        binary: Boolean(snapshotEntry.binary),
-        filtered: isFilteredPath(snapshotEntry.path),
-        index: indexEntries,
-        worktree: worktree.descriptor
-      });
-    }
-    entries.sort((left, right) => compareCheckpointPaths(
-      `${left.path}\0${left.sourcePath || ""}`,
-      `${right.path}\0${right.sourcePath || ""}`
-    ));
-    const objectList = [...objects.entries()]
-      .sort(([left], [right]) => compareCheckpointPaths(left, right))
-      .map(([hash, content]) => ({ hash, size: content.byteLength }));
-    const payload: RecoveryManifestPayload = {
-      schemaVersion: RECOVERY_BUNDLE_SCHEMA_VERSION,
-      synodVersion: packageVersion,
-      createdAt: source.snapshot.capturedAt,
+    return materializeSnapshotBundle(source.targetDirectory, destinationPath, resolvedDestination.parent, {
+      snapshot: source.snapshot,
       source: { branch: source.state.checkpoint.branch, head: source.state.checkpoint.head },
-      checkpoint: {
-        fingerprint: source.state.checkpoint.worktree.fingerprint,
-        snapshotHash: source.snapshot.contentHash
-      },
       event: { sequence: source.state.lastEvent.sequence, hash: source.state.lastEvent.hash },
-      includeUntracked,
-      entries,
-      objects: objectList
-    };
-    const manifest: RecoveryManifest = { ...payload, bundleId: payloadHash(payload) };
-    validateRecoveryManifest(manifest);
-    await assertSourceStillMatches(source.targetDirectory, source.state.checkpoint, dependencies);
-
-    const parent = path.dirname(destinationPath);
-    await assertDirectoryIdentity(resolvedDestination.parent, "Recovery bundle parent");
-    const temporary = await mkdtemp(path.join(parent, `.${path.basename(destinationPath)}.synod-`));
-    try {
-      await assertDirectoryIdentity(resolvedDestination.parent, "Recovery bundle parent");
-      const objectDirectory = path.join(temporary, RECOVERY_OBJECTS_PATH);
-      await mkdir(objectDirectory, { mode: 0o700 });
-      for (const [hash, content] of [...objects.entries()].sort(([left], [right]) => compareCheckpointPaths(left, right))) {
-        await writeDurableFile(path.join(objectDirectory, hash.slice("sha256:".length)), content);
-      }
-      await writeDurableFile(path.join(temporary, RECOVERY_MANIFEST_PATH), serializeManifest(manifest));
-      await verifyRecoveryBundle({ bundle: temporary });
-      await assertSourceStillMatches(source.targetDirectory, source.state.checkpoint, dependencies);
-      await publishBundle(temporary, destinationPath, resolvedDestination.parent, dependencies.beforePublish);
-      const verified = await verifyRecoveryBundle({ bundle: destinationPath });
-      return { ...verified, destination: destinationPath };
-    } finally {
-      await rm(temporary, { recursive: true, force: true }).catch(() => {});
-    }
+      guardCheckpoint: source.state.checkpoint,
+      includeUntracked
+    }, dependencies);
   });
 }

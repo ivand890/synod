@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { link, lstat, open, readFile, readlink, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, readFile, readlink, unlink } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { ERROR_CODES, SynodError } from "./errors.js";
@@ -28,6 +28,7 @@ import {
   explainCheckpointDelta,
   formatCheckpointDelta,
   serializeCheckpointSnapshot,
+  stableCheckpointStringify,
   validateCheckpointSnapshot
 } from "./checkpoint.js";
 import type {
@@ -48,7 +49,9 @@ import {
   isCorrectionPolicy,
   isLeaseBaselineReference,
   isTaskLease,
+  isTaskProposalReference,
   leaseBaselinesReference,
+  leaseScopeCoversPath,
   leaseScopesOverlap,
   normalizeLeaseScopes,
   parseLeaseDuration,
@@ -60,7 +63,8 @@ import {
   type LeaseBaseline,
   type LeaseBaselinesLedger,
   type LeaseBaselineReference,
-  type TaskLease
+  type TaskLease,
+  type TaskProposalReference
 } from "./leases.js";
 
 export const LEGACY_ORCHESTRATION_SCHEMA_VERSION = 1;
@@ -137,6 +141,7 @@ export interface OrchestrationTask {
   correctionPolicy: CorrectionPolicy;
   leaseGeneration: number;
   lease?: TaskLease;
+  proposal?: TaskProposalReference;
   acceptance: {
     criteria: string[];
     status: "pending" | "accepted";
@@ -200,7 +205,7 @@ export interface OrchestrationEvent {
 
 type LegacyOrchestrationTask = Omit<
   OrchestrationTask,
-  "correctionPolicy" | "leaseGeneration" | "lease" | "preLease"
+  "correctionPolicy" | "leaseGeneration" | "lease" | "proposal" | "preLease"
 >;
 
 interface LegacyOrchestrationStateCore {
@@ -889,6 +894,9 @@ export function renderStatusMarkdown(
         `- Revision: ${task.revision}`,
         `- Correction round: ${task.correctionRound}`,
         `- Writer lease: ${task.lease ? `${task.lease.id} generation ${task.lease.generation}; owner ${markdownCell(task.lease.ownerThread)}; expires ${task.lease.expiresAt}` : task.preLease ? "migration required before further progress" : "—"}`,
+        `- Sealed proposal: ${task.proposal ? `${task.proposal.bundleId}; lease ${task.proposal.leaseId} generation ${task.proposal.generation}; revision ${task.proposal.revision}; ${task.proposal.path}` : "—"}`,
+        `- Proposal-owned paths: ${task.proposal && task.proposal.ownedPaths.length > 0 ? task.proposal.ownedPaths.map(markdownCell).join(", ") : "—"}`,
+        `- Excluded foreign paths: ${task.proposal && task.proposal.excludedForeignPaths.length > 0 ? task.proposal.excludedForeignPaths.map(markdownCell).join(", ") : "—"}`,
         "- Acceptance criteria:"
       );
       for (const criterion of task.acceptance.criteria) lines.push(`  - ${markdownCell(criterion)}`);
@@ -1132,6 +1140,7 @@ function isOrchestrationTask(value: unknown): value is OrchestrationTask {
     && value.correctionPolicy.used === value.correctionRound
     && isNonNegativeInteger(value.leaseGeneration)
     && (value.lease === undefined || isTaskLease(value.lease))
+    && (value.proposal === undefined || isTaskProposalReference(value.proposal))
     && isStringArray(value.acceptance.criteria)
     && value.acceptance.criteria.length > 0
     && value.acceptance.criteria.every(item => item.length > 0)
@@ -1159,6 +1168,7 @@ function isLegacyOrchestrationTask(value: unknown): value is LegacyOrchestration
   return value.correctionPolicy === undefined
     && value.leaseGeneration === undefined
     && value.lease === undefined
+    && value.proposal === undefined
     && value.preLease === undefined
     && isOrchestrationTask({
       ...value,
@@ -1289,6 +1299,16 @@ export function validateOrchestrationState(value: unknown): OrchestrationState {
       || task.lease.executor !== task.executor
     )) {
       invalidState(`Task ${id} lease does not match its canonical task generation, revision, or executor.`, { taskId: id });
+    }
+    if (task.proposal && (
+      task.proposal.revision !== task.revision
+      || task.proposal.baseRevision + 1 !== task.revision
+      || task.proposal.path !== `.synod/proposals/${task.proposal.leaseId}/${task.proposal.generation}`
+    )) {
+      invalidState(`Task ${id} proposal does not match its canonical revision or lease identity.`, { taskId: id });
+    }
+    if (task.proposal && ["PLANNED", "READY", "ACTIVE"].includes(task.state)) {
+      invalidState(`Task ${id} cannot retain a sealed proposal while it is ${task.state}.`, { taskId: id, state: task.state });
     }
     if (task.state === "ACTIVE" && !task.lease && !task.preLease) {
       invalidState(`Active task ${id} is missing its durable writer lease.`, { taskId: id });
@@ -1515,22 +1535,38 @@ async function readLeaseBaselines(
   }
   const byIdentity = new Map(ledger.baselines.map(item => [`${item.leaseId}:${item.generation}`, item]));
   for (const task of taskList(state)) {
-    if (!task.lease) continue;
-    const baseline = byIdentity.get(`${task.lease.id}:${task.lease.generation}`);
-    if (!baseline || baseline.taskId !== task.id || baseline.taskRevision !== task.revision) {
-      throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, `Task ${task.id} lease baseline is missing or mismatched.`, {
-        details: { taskId: task.id, leaseId: task.lease.id, generation: task.lease.generation }
-      });
-    }
-    if (
-      task.lease.baseline.snapshotContentHash !== baseline.snapshot.contentHash
-      || task.lease.baseline.branch !== baseline.snapshot.branch
-      || task.lease.baseline.head !== baseline.snapshot.head
-      || task.lease.baseline.worktreeFingerprint !== baseline.snapshot.worktreeFingerprint
-    ) {
-      throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, `Task ${task.id} lease baseline identity is mismatched.`, {
-        details: { taskId: task.id, leaseId: task.lease.id, generation: task.lease.generation }
-      });
+    const identities = [
+      ...(task.lease ? [{
+        id: task.lease.id,
+        generation: task.lease.generation,
+        taskRevision: task.revision,
+        reference: task.lease.baseline
+      }] : []),
+      ...(task.proposal ? [{
+        id: task.proposal.leaseId,
+        generation: task.proposal.generation,
+        taskRevision: task.proposal.baseRevision,
+        reference: undefined
+      }] : [])
+    ];
+    for (const identity of identities) {
+      const baseline = byIdentity.get(`${identity.id}:${identity.generation}`);
+      if (!baseline || baseline.taskId !== task.id || baseline.taskRevision !== identity.taskRevision) {
+        throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, `Task ${task.id} lease baseline is missing or mismatched.`, {
+          details: { taskId: task.id, leaseId: identity.id, generation: identity.generation }
+        });
+      }
+      if (!identity.reference) continue;
+      if (
+        identity.reference.snapshotContentHash !== baseline.snapshot.contentHash
+        || identity.reference.branch !== baseline.snapshot.branch
+        || identity.reference.head !== baseline.snapshot.head
+        || identity.reference.worktreeFingerprint !== baseline.snapshot.worktreeFingerprint
+      ) {
+        throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, `Task ${task.id} lease baseline identity is mismatched.`, {
+          details: { taskId: task.id, leaseId: identity.id, generation: identity.generation }
+        });
+      }
     }
   }
   return ledger;
@@ -2294,7 +2330,10 @@ function retainedLeaseBaselines(
 ): LeaseBaselinesLedger | undefined {
   const retained = retainLeaseBaselinesLedger(
     leaseBaselines,
-    taskList(state).flatMap(task => task.lease ? [task.lease] : [])
+    taskList(state).flatMap(task => [
+      ...(task.lease ? [task.lease] : []),
+      ...(task.proposal ? [{ id: task.proposal.leaseId, generation: task.proposal.generation }] : [])
+    ])
   );
   return retained.baselines.length === leaseBaselines.baselines.length ? undefined : retained;
 }
@@ -2304,12 +2343,311 @@ async function validateLeaseScopeFilesystemPaths(targetDirectory: string, scopes
     const absolutePath = resolveProjectPath(targetDirectory, scope.path);
     const unsafe = await unsafeAncestor(targetDirectory, absolutePath);
     const type = await pathType(absolutePath);
-    if (unsafe || type === "symlink") {
-      throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease scope traverses a symbolic link or non-directory ancestor: ${scope.path}`, {
-        details: { path: scope.path, ...(unsafe ? { unsafeAncestor: unsafe } : { type }) }
+    const invalidTarget = scope.kind === "tree"
+      ? type !== "missing" && type !== "directory"
+      : type === "directory" || type === "other";
+    if (unsafe || invalidTarget) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease scope has an unsafe ancestor or incompatible target: ${scope.path}`, {
+        details: { path: scope.path, kind: scope.kind, ...(unsafe ? { unsafeAncestor: unsafe } : { type }) }
       });
     }
   }
+}
+
+function leaseBaselineFor(
+  task: OrchestrationTask,
+  lease: Pick<TaskLease, "id" | "generation" | "taskRevision">,
+  leaseBaselines: LeaseBaselinesLedger
+): LeaseBaseline {
+  const baseline = leaseBaselines.baselines.find(item =>
+    item.leaseId === lease.id && item.generation === lease.generation
+  );
+  if (!baseline || baseline.taskId !== task.id || baseline.taskRevision !== lease.taskRevision) {
+    throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, `Task ${task.id} lease baseline is missing or mismatched.`, {
+      details: { taskId: task.id, leaseId: lease.id, generation: lease.generation }
+    });
+  }
+  return baseline;
+}
+
+interface ClassifiedLeaseDelta {
+  owned: CheckpointDelta["paths"];
+  foreign: CheckpointDelta["paths"];
+  readDrift: CheckpointDelta["paths"];
+  unowned: CheckpointDelta["paths"];
+}
+
+function deltaPaths(item: CheckpointDelta["paths"][number]): string[] {
+  return [item.path, ...(item.sourcePath ? [item.sourcePath] : [])];
+}
+
+function scopesCoverPaths(scopes: TaskLease["scopes"], access: "read" | "write", paths: string[]): boolean {
+  return paths.every(candidate => scopes.some(scope => scope.access === access && leaseScopeCoversPath(scope, candidate)));
+}
+
+function classifyLeaseDelta(
+  state: OrchestrationState,
+  task: OrchestrationTask,
+  lease: Pick<TaskLease, "id" | "generation" | "scopes">,
+  baseline: CheckpointSnapshot,
+  current: CheckpointSnapshot
+): ClassifiedLeaseDelta {
+  const classified: ClassifiedLeaseDelta = { owned: [], foreign: [], readDrift: [], unowned: [] };
+  const delta = explainCheckpointDelta(baseline, current);
+  if (baseline.available !== current.available || baseline.branch !== current.branch || baseline.head !== current.head) {
+    classified.unowned.push({
+      path: ".git",
+      untracked: false,
+      binary: false,
+      resolved: false
+    });
+  }
+  const foreignScopes = taskList(state).flatMap(other =>
+    other.id !== task.id && other.lease
+      ? other.lease.scopes.filter(scope => scope.access === "write")
+      : []
+  );
+  const sealedForeignPaths = new Set(taskList(state).flatMap(other =>
+    other.id !== task.id && other.proposal
+      ? other.proposal.ownedPaths.map(candidate => candidate.normalize("NFC").toLowerCase())
+      : []
+  ));
+  for (const item of delta.paths) {
+    const affected = deltaPaths(item);
+    const owned = scopesCoverPaths(lease.scopes, "write", affected);
+    const sealedConflict = owned && affected.some(candidate =>
+      sealedForeignPaths.has(candidate.normalize("NFC").toLowerCase())
+    );
+    if (owned && !sealedConflict) classified.owned.push(item);
+    else if (affected.some(candidate => lease.scopes.some(scope =>
+      scope.access === "read" && leaseScopeCoversPath(scope, candidate)
+    ))) classified.readDrift.push(item);
+    else if (affected.every(candidate =>
+      foreignScopes.some(scope => leaseScopeCoversPath(scope, candidate))
+      || sealedForeignPaths.has(candidate.normalize("NFC").toLowerCase())
+    )) classified.foreign.push(item);
+    else classified.unowned.push(item);
+  }
+  return classified;
+}
+
+function proposalSnapshot(
+  current: CheckpointSnapshot,
+  owned: ClassifiedLeaseDelta["owned"],
+  capturedAt: string
+): CheckpointSnapshot {
+  const ownedDestinations = new Set(owned.map(item => item.path));
+  const entries = current.entries.filter(entry => ownedDestinations.has(entry.path));
+  return validateCheckpointSnapshot(createCheckpointSnapshot({
+    capturedAt,
+    available: current.available,
+    branch: current.branch,
+    head: current.head,
+    worktreeFingerprint: sha256(stableCheckpointStringify(entries)),
+    entries
+  }));
+}
+
+function rejectUnacceptableLeaseDrift(task: OrchestrationTask, classified: ClassifiedLeaseDelta): void {
+  if (classified.readDrift.length === 0 && classified.unowned.length === 0) return;
+  throw new SynodError(ERROR_CODES.LEASE_SCOPE_DRIFT, `Task ${task.id} contains changed paths outside its writer lease.`, {
+    details: {
+      taskId: task.id,
+      readDrift: classified.readDrift.map(item => ({ path: item.path, ...(item.sourcePath ? { sourcePath: item.sourcePath } : {}) })),
+      unowned: classified.unowned.map(item => ({ path: item.path, ...(item.sourcePath ? { sourcePath: item.sourcePath } : {}) })),
+      foreign: classified.foreign.map(item => ({ path: item.path, ...(item.sourcePath ? { sourcePath: item.sourcePath } : {}) }))
+    }
+  });
+}
+
+async function ensureProposalParent(targetDirectory: string, proposalPath: string): Promise<string> {
+  const destination = resolveProjectPath(targetDirectory, proposalPath);
+  const parent = path.dirname(destination);
+  const unsafeBefore = await unsafeAncestor(targetDirectory, parent);
+  if (unsafeBefore) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, "Proposal path traverses an unsafe ancestor.", {
+      details: { path: proposalPath, unsafeAncestor: unsafeBefore }
+    });
+  }
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  const unsafeAfter = await unsafeAncestor(targetDirectory, parent);
+  if (unsafeAfter || await pathType(parent) !== "directory") {
+    throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, "Proposal parent is not a safe directory.", {
+      details: { path: proposalPath, ...(unsafeAfter ? { unsafeAncestor: unsafeAfter } : {}) }
+    });
+  }
+  return destination;
+}
+
+async function sealTaskProposal(
+  targetDirectory: string,
+  state: OrchestrationState,
+  task: OrchestrationTask,
+  lease: TaskLease,
+  revision: number,
+  context: MutationContext,
+  dependencies: OrchestrationDependencies
+): Promise<{ proposal: TaskProposalReference; foreign: ClassifiedLeaseDelta["foreign"] }> {
+  await validateLeaseScopeFilesystemPaths(targetDirectory, lease.scopes);
+  const baseline = leaseBaselineFor(task, lease, context.leaseBaselines);
+  const classified = classifyLeaseDelta(state, task, lease, baseline.snapshot, context.snapshot);
+  rejectUnacceptableLeaseDrift(task, classified);
+  const snapshot = proposalSnapshot(context.snapshot, classified.owned, baseline.capturedAt);
+  const ownedPaths = [...new Set(classified.owned.flatMap(deltaPaths))].sort(compareCheckpointPaths);
+  const proposalPath = `.synod/proposals/${lease.id}/${lease.generation}`;
+  const destination = await ensureProposalParent(targetDirectory, proposalPath);
+  const recovery = await import("./recovery.js");
+  const proposalIdentity: import("./recovery.js").RecoveryProposalIdentity = {
+    taskId: task.id,
+    leaseId: lease.id,
+    generation: lease.generation,
+    baseRevision: task.revision,
+    revision,
+    scopes: lease.scopes,
+    ownedPaths,
+    baseline: {
+      snapshotHash: baseline.snapshot.contentHash,
+      worktreeFingerprint: baseline.snapshot.worktreeFingerprint
+    }
+  };
+  let verified: Awaited<ReturnType<typeof recovery.verifyRecoveryBundle>>;
+  if (await pathType(destination) === "missing") {
+    verified = await recovery.exportSnapshotRecoveryBundle({
+      directory: targetDirectory,
+      destination,
+      snapshot,
+      source: { branch: context.checkpoint.branch, head: context.checkpoint.head },
+      event: { sequence: state.lastEvent.sequence, hash: state.lastEvent.hash },
+      proposal: proposalIdentity,
+      guardCheckpoint: context.checkpoint,
+      includeUntracked: true,
+      allowInsideSource: true
+    }, dependencies);
+  } else {
+    try {
+      verified = await recovery.verifyRecoveryBundle({ bundle: destination });
+    } catch (error) {
+      throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, "Existing immutable proposal material is invalid and was preserved.", {
+        cause: error,
+        details: { taskId: task.id, path: proposalPath }
+      });
+    }
+  }
+  const manifest = verified.manifest;
+  if (
+    manifest.checkpoint.fingerprint !== snapshot.worktreeFingerprint
+    || manifest.checkpoint.snapshotHash !== snapshot.contentHash
+    || manifest.source.branch !== context.checkpoint.branch
+    || manifest.source.head !== context.checkpoint.head
+    || manifest.event.sequence !== state.lastEvent.sequence
+    || manifest.event.hash !== state.lastEvent.hash
+    || stableStringify(manifest.proposal) !== stableStringify(proposalIdentity)
+  ) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, "Existing immutable proposal material does not match this delivery attempt.", {
+      details: { taskId: task.id, path: proposalPath, bundleId: verified.bundleId }
+    });
+  }
+  return {
+    proposal: {
+      path: proposalPath,
+      bundleId: verified.bundleId,
+      leaseId: lease.id,
+      generation: lease.generation,
+      baseRevision: task.revision,
+      revision,
+      scopes: lease.scopes,
+      ownedPaths,
+      excludedForeignPaths: [...new Set(classified.foreign.flatMap(deltaPaths))].sort(compareCheckpointPaths),
+      fingerprint: snapshot.worktreeFingerprint,
+      snapshotHash: snapshot.contentHash,
+      sealedWorktreeFingerprint: context.snapshot.worktreeFingerprint,
+      sealedAt: context.timestamp,
+      status: "SEALED"
+    },
+    foreign: classified.foreign
+  };
+}
+
+async function verifyTaskProposalForAcceptance(
+  targetDirectory: string,
+  state: OrchestrationState,
+  task: OrchestrationTask,
+  context: MutationContext
+): Promise<ClassifiedLeaseDelta["foreign"]> {
+  const proposal = task.proposal;
+  if (!proposal || proposal.revision !== task.revision) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_REQUIRED, `Task ${task.id} requires a sealed proposal for revision ${task.revision}.`, {
+      details: { taskId: task.id, revision: task.revision }
+    });
+  }
+  if (task.leaseGeneration !== proposal.generation) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, `Task ${task.id} proposal generation is obsolete.`, {
+      details: { taskId: task.id, expectedGeneration: task.leaseGeneration, proposalGeneration: proposal.generation }
+    });
+  }
+  const baseline = leaseBaselineFor(task, {
+    id: proposal.leaseId,
+    generation: proposal.generation,
+    taskRevision: proposal.baseRevision
+  }, context.leaseBaselines);
+  const classified = classifyLeaseDelta(state, task, {
+    id: proposal.leaseId,
+    generation: proposal.generation,
+    scopes: proposal.scopes
+  }, baseline.snapshot, context.snapshot);
+  rejectUnacceptableLeaseDrift(task, classified);
+  const ownedPaths = [...new Set(classified.owned.flatMap(deltaPaths))].sort(compareCheckpointPaths);
+  const snapshot = proposalSnapshot(context.snapshot, classified.owned, baseline.capturedAt);
+  if (
+    stableStringify(ownedPaths) !== stableStringify(proposal.ownedPaths)
+    || snapshot.worktreeFingerprint !== proposal.fingerprint
+    || snapshot.contentHash !== proposal.snapshotHash
+  ) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, `Task ${task.id} owned material changed after proposal sealing.`, {
+      details: {
+        taskId: task.id,
+        expectedOwnedPaths: proposal.ownedPaths,
+        actualOwnedPaths: ownedPaths,
+        expectedFingerprint: proposal.fingerprint,
+        actualFingerprint: snapshot.worktreeFingerprint,
+        expectedSnapshotHash: proposal.snapshotHash,
+        actualSnapshotHash: snapshot.contentHash
+      }
+    });
+  }
+  const recovery = await import("./recovery.js");
+  let verified: Awaited<ReturnType<typeof recovery.verifyRecoveryBundle>>;
+  try {
+    verified = await recovery.verifyRecoveryBundle({ bundle: resolveProjectPath(targetDirectory, proposal.path) });
+  } catch (error) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, `Task ${task.id} sealed proposal failed verification.`, {
+      cause: error,
+      details: { taskId: task.id, path: proposal.path }
+    });
+  }
+  if (
+    verified.bundleId !== proposal.bundleId
+    || verified.manifest.checkpoint.fingerprint !== proposal.fingerprint
+    || verified.manifest.checkpoint.snapshotHash !== proposal.snapshotHash
+    || stableStringify(verified.manifest.proposal) !== stableStringify({
+      taskId: task.id,
+      leaseId: proposal.leaseId,
+      generation: proposal.generation,
+      baseRevision: proposal.baseRevision,
+      revision: proposal.revision,
+      scopes: proposal.scopes,
+      ownedPaths: proposal.ownedPaths,
+      baseline: {
+        snapshotHash: baseline.snapshot.contentHash,
+        worktreeFingerprint: baseline.snapshot.worktreeFingerprint
+      }
+    })
+  ) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, `Task ${task.id} sealed proposal identity does not match canonical state.`, {
+      details: { taskId: task.id, path: proposal.path, expectedBundleId: proposal.bundleId, actualBundleId: verified.bundleId }
+    });
+  }
+  return classified.foreign;
 }
 
 function requireLeaseIdentity(
@@ -2368,6 +2706,8 @@ export interface AcquireLeaseOptions {
   ownerThread?: string;
   read?: unknown[];
   write?: unknown[];
+  readTree?: unknown[];
+  writeTree?: unknown[];
   ttlSeconds?: number;
   heartbeatIntervalSeconds?: number;
   actor?: string;
@@ -2379,6 +2719,8 @@ export async function acquireTaskLease({
   ownerThread,
   read = [],
   write = [],
+  readTree = [],
+  writeTree = [],
   ttlSeconds = DEFAULT_LEASE_TTL_SECONDS,
   heartbeatIntervalSeconds = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
   actor = "supervisor"
@@ -2398,9 +2740,14 @@ export async function acquireTaskLease({
       }
     });
   }
-  const scopes = normalizeLeaseScopes({ read, write });
+  const scopes = normalizeLeaseScopes({ read, write, readTree, writeTree });
   const targetDirectory = path.resolve(directory);
   return commitMutation(targetDirectory, "lease.acquired", { actor, taskId }, async (state, context) => {
+    if (!context.snapshot.available || !context.snapshot.head) {
+      throw new SynodError(ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE, "A writer lease requires an exact Git HEAD and worktree snapshot.", {
+        details: { taskId, branch: context.snapshot.branch, head: context.snapshot.head }
+      });
+    }
     await validateLeaseScopeFilesystemPaths(targetDirectory, scopes);
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
@@ -2468,7 +2815,10 @@ export async function acquireTaskLease({
     const leaseBaselines = retainLeaseBaselinesLedger(validateLeaseBaselinesLedger({
       ...context.leaseBaselines,
       baselines: [...context.leaseBaselines.baselines, baseline]
-    }), taskList(state).flatMap(currentTask => currentTask.lease ? [currentTask.lease] : []));
+    }), taskList(state).flatMap(currentTask => [
+      ...(currentTask.lease ? [currentTask.lease] : []),
+      ...(currentTask.proposal ? [{ id: currentTask.proposal.leaseId, generation: currentTask.proposal.generation }] : [])
+    ]));
     return {
       leaseBaselines,
       metadata: {
@@ -2715,7 +3065,7 @@ export async function transitionTask({
   }
   const targetState = targetStateValue;
   const targetDirectory = path.resolve(directory);
-  return commitMutation(targetDirectory, "task.transitioned", { actor, taskId }, (state, context) => {
+  return commitMutation(targetDirectory, "task.transitioned", { actor, taskId }, async (state, context) => {
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
     if (!TRANSITIONS[task.state].has(targetState)) {
@@ -2777,6 +3127,13 @@ export async function transitionTask({
         details: { taskId, revision }
       });
     }
+    const sealed = deliveredLease
+      ? await sealTaskProposal(targetDirectory, state, task, deliveredLease, revision, context, dependencies)
+      : undefined;
+    const acceptanceForeign = fromState === "REVIEW" && targetState === "ACCEPTED"
+      ? await verifyTaskProposalForAcceptance(targetDirectory, state, task, context)
+      : [];
+    if (sealed) task.proposal = sealed.proposal;
     if (fromState === "ACTIVE" && targetState === "REVIEW") task.revision = revision;
     const kind = evidenceKind(fromState, targetState);
     const createdEvidence = kind
@@ -2787,6 +3144,7 @@ export async function transitionTask({
       task.correctionRound += 1;
       task.correctionPolicy.used += 1;
       resetAcceptanceAndVerification(task);
+      delete task.proposal;
     }
     if (fromState === "REVIEW" && targetState === "ACCEPTED") {
       task.acceptance = {
@@ -2843,6 +3201,17 @@ export async function transitionTask({
         payload: {
           correctionRound: task.correctionRound,
           evidenceIds: createdEvidence.map(item => item.id),
+          ...(sealed ? {
+            proposal: {
+              path: sealed.proposal.path,
+              bundleId: sealed.proposal.bundleId,
+              leaseId: sealed.proposal.leaseId,
+              generation: sealed.proposal.generation,
+              fingerprint: sealed.proposal.fingerprint
+            },
+            foreignPaths: sealed.foreign.map(item => item.path)
+          } : {}),
+          ...(acceptanceForeign.length > 0 ? { foreignPaths: acceptanceForeign.map(item => item.path) } : {}),
           ...(releasedLease ? { releasedLease: { id: releasedLease.id, generation: releasedLease.generation } } : {}),
           ...(reason ? { reason: String(reason).trim() } : {})
         }
