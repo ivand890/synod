@@ -147,7 +147,9 @@ function completion(statuses: ObservedThreadStatus[]): {
     && item.status.activeFlags.includes("waitingOnApproval"));
   const userInputNeeded = statuses.some(item => item.status.type === "active"
     && item.status.activeFlags.includes("waitingOnUserInput"));
-  const terminal = statuses.every(item => item.status.type === "idle" || item.status.type === "systemError");
+  const terminal = statuses.every(item =>
+    item.status.type === "notLoaded" || item.status.type === "idle" || item.status.type === "systemError"
+  );
   const systemError = statuses.some(item => item.status.type === "systemError");
   const attentionNeeded = approvalNeeded || userInputNeeded;
   return {

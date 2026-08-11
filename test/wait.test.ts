@@ -190,6 +190,22 @@ test("poll fallback is bounded and observable", async () => {
   assert.equal(report.incomplete, false);
 });
 
+test("a successfully read unloaded thread is already quiescent", async () => {
+  const adapter = new FakeAdapter({
+    notification: true,
+    reads: [{ statuses: [{ threadId: "thread:a", status: { type: "notLoaded" } }] }]
+  });
+
+  const report = await waitForThreads({ threadIds: ["thread:a"], timeoutMs: 100 }, {
+    adapterFactory: () => adapter
+  });
+
+  assert.equal(report.timedOut, false);
+  assert.equal(report.incomplete, false);
+  assert.equal(report.wakeCount, 0);
+  assert.equal(adapter.closed, 1);
+});
+
 test("the overall deadline bounds an initial status read", async () => {
   let closed = 0;
   const report = await waitForThreads({ threadIds: ["thread:a"], timeoutMs: 5 }, {
