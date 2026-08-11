@@ -433,6 +433,58 @@ test("schema 2 upgrade creates canonical orchestration records through migration
   assert.equal(state.lastEvent.sequence, 1);
 });
 
+test("init adopts and migrates no-manifest schema-1 records without a lease ledger", async () => {
+  const directory = await temporaryProject();
+  const manifestPath = path.join(directory, ".synod/manifest.json");
+  const statePath = path.join(directory, ".synod/state.json");
+  const eventsPath = path.join(directory, ".synod/events.jsonl");
+  const ledgerPath = path.join(directory, ".synod/lease-baselines.json");
+  await initProject({ directory, profile: "portable" });
+
+  const currentEvent = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  const legacyCore = structuredClone(currentEvent.state) as Record<string, any>;
+  legacyCore.schemaVersion = 1;
+  delete legacyCore.leaseBaselines;
+  for (const task of Object.values(legacyCore.tasks ?? {}) as Array<Record<string, unknown>>) {
+    delete task.correctionPolicy;
+    delete task.leaseGeneration;
+    delete task.lease;
+    delete task.preLease;
+  }
+  const legacyEvent = {
+    ...currentEvent,
+    schemaVersion: 1,
+    state: legacyCore
+  };
+  const unsigned = Object.fromEntries(Object.entries(legacyEvent).filter(([key]) => key !== "eventHash"));
+  legacyEvent.eventHash = `sha256:${createHash("sha256").update(stableCheckpointStringify(unsigned), "utf8").digest("hex")}`;
+  const legacyState = {
+    ...legacyCore,
+    lastEvent: {
+      sequence: legacyEvent.sequence,
+      id: legacyEvent.id,
+      hash: legacyEvent.eventHash
+    }
+  };
+  const legacyEventContent = `${JSON.stringify(legacyEvent)}\n`;
+  await writeFile(statePath, `${JSON.stringify(legacyState, null, 2)}\n`, "utf8");
+  await writeFile(eventsPath, legacyEventContent, "utf8");
+  await unlink(manifestPath);
+  await unlink(ledgerPath);
+
+  const adopted = await initProject({ directory, profile: "portable" }, {
+    clock: () => "2026-08-10T12:30:00.000Z"
+  });
+
+  assert.deepEqual(adopted.conflicts, []);
+  assert.ok(adopted.created.includes(".synod/lease-baselines.json"));
+  assert.ok(adopted.updated.includes(".synod/state.json"));
+  assert.ok((await readFile(eventsPath, "utf8")).startsWith(legacyEventContent));
+  const canonical = await readOrchestration(directory);
+  assert.equal(canonical.state.schemaVersion, 2);
+  assert.equal(canonical.events.at(-1)?.type, "orchestration.migrated");
+});
+
 test("upgrade preserves the schema-1 event prefix and fences migrated in-flight tasks", async () => {
   const directory = await temporaryProject();
   const manifestPath = path.join(directory, ".synod/manifest.json");

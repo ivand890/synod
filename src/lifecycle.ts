@@ -32,6 +32,7 @@ import {
   extractManagedAgentsBlock,
   findManagedAgentsBlocks,
   generatedConfigMarker,
+  LEGACY_RECORD_PATHS,
   loadTemplateSet,
   ownershipFor,
   RECORD_PATHS,
@@ -52,6 +53,7 @@ import {
   validateOrchestrationReadOnly
 } from "./orchestration.js";
 import { CHECKPOINT_SNAPSHOT_PATH } from "./checkpoint.js";
+import { LEASE_BASELINES_PATH } from "./leases.js";
 
 const USER_GUIDANCE_PATHS = new Set([
   "docs/synod/DECISIONS.md",
@@ -359,13 +361,27 @@ export async function initProject(
       await inspectManagedPath(targetDirectory, relativePath)
     ])
   );
+  const existingRecordMap = new Map(existingRecords);
+  const legacyRecordsWithoutLedger = [...LEGACY_RECORD_PATHS].every(
+    relativePath => existingRecordMap.get(relativePath)?.type === "file"
+  ) && existingRecordMap.get(LEASE_BASELINES_PATH)?.type === "missing";
   const adoptExistingRecords = !existingManifest
-    && existingRecords.every(([, inspected]) => inspected.type === "file");
+    && (existingRecords.every(([, inspected]) => inspected.type === "file") || legacyRecordsWithoutLedger);
+  let adoptedSchemaMigrationFiles: Map<string, string> | undefined;
   if (adoptExistingRecords) {
-    if (dryRun) await validateOrchestrationReadOnly({ directory: targetDirectory });
+    if (legacyRecordsWithoutLedger) {
+      const migration = await createOrchestrationSchemaMigrationFiles(targetDirectory, dependencies);
+      if (migration.status !== "migrated") {
+        throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, "A schema-2 orchestration record is missing its lease-baseline ledger.");
+      }
+      adoptedSchemaMigrationFiles = migration.files;
+      for (const [relativePath, content] of migration.files) templates.files.set(relativePath, content);
+    } else if (dryRun) await validateOrchestrationReadOnly({ directory: targetDirectory });
     else await orchestrationStatus({ directory: targetDirectory }, dependencies);
     for (const [relativePath, inspected] of existingRecords) {
-      if (inspected.type === "file") templates.files.set(relativePath, inspected.content);
+      if (inspected.type === "file" && !adoptedSchemaMigrationFiles?.has(relativePath)) {
+        templates.files.set(relativePath, inspected.content);
+      }
     }
   } else {
     const orchestrationDependencies = { ...dependencies, checkpointOverlay: templates.files };
@@ -439,9 +455,14 @@ export async function initProject(
       state = { path: relativePath, action: "create" };
       operations.push(operationForWrite(relativePath, templateContent, inspected));
     } else if (ownership === "record") {
-      state = adoptExistingRecords
-        ? { path: relativePath, action: "preserve" }
-        : { path: relativePath, conflict: true };
+      if (adoptedSchemaMigrationFiles?.has(relativePath)) {
+        state = { path: relativePath, action: "update" };
+        operations.push(operationForWrite(relativePath, templateContent, inspected));
+      } else {
+        state = adoptExistingRecords
+          ? { path: relativePath, action: "preserve" }
+          : { path: relativePath, conflict: true };
+      }
     } else if (relativePath.startsWith("docs/synod/")) {
       ownership = "user";
       state = { path: relativePath, action: "preserve" };
@@ -480,7 +501,9 @@ export async function initProject(
       conflicts.push(relativePath);
       continue;
     }
-    const installedHash = ownership === "record" && previousEntry
+    const installedHash = adoptedSchemaMigrationFiles?.has(relativePath)
+      ? contentHash(templateContent)
+      : ownership === "record" && previousEntry
       ? previousEntry.contentHash
       : ownership === "record" && inspectionHash(inspected)
         ? inspectionHash(inspected)
