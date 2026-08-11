@@ -1791,6 +1791,91 @@ export async function readOrchestration(
   }
 }
 
+export async function validateOrchestrationProposalArtifacts({
+  directory = ".",
+  readOnly = false
+}: { directory?: string; readOnly?: boolean } = {}): Promise<{
+  sealedProposals: number;
+  verifiedBundles: number;
+}> {
+  const targetDirectory = path.resolve(directory);
+  const release = await acquireLock(targetDirectory);
+  try {
+    if (readOnly) {
+      const pending = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
+      if (pending.type !== "missing") {
+        throw new SynodError(
+          ERROR_CODES.ORCHESTRATION_STATE_INVALID,
+          "Pending orchestration recovery is required; refusing read-only proposal validation.",
+          { details: { path: ORCHESTRATION_PENDING_PATH, type: pending.type } }
+        );
+      }
+    } else await recoverPendingMutation(targetDirectory);
+    const canonical = await readOrchestrationRaw(targetDirectory);
+    const recovery = await import("./recovery.js");
+    const verifiedPaths = new Map<string, string>();
+    let sealedProposals = 0;
+    for (const task of taskList(canonical.state)) {
+      const references: TaskProposalReference[] = [
+        ...(task.proposal ? [task.proposal] : []),
+        ...(task.recovery?.proposal ? [task.recovery.proposal] : []),
+        ...(task.recoveryHistory || []).flatMap(item => item.proposal ? [item.proposal] : [])
+      ];
+      for (const proposal of references) {
+        sealedProposals += 1;
+        const baseline = canonical.leaseBaselines.baselines.find(item =>
+          item.taskId === task.id
+          && item.leaseId === proposal.leaseId
+          && item.generation === proposal.generation
+          && item.taskRevision === proposal.baseRevision
+        );
+        if (!baseline) {
+          throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, `Task ${task.id} proposal baseline is missing.`, {
+            details: { taskId: task.id, leaseId: proposal.leaseId, generation: proposal.generation }
+          });
+        }
+        const priorBundleId = verifiedPaths.get(proposal.path);
+        if (priorBundleId && priorBundleId !== proposal.bundleId) {
+          throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, "One proposal path has conflicting canonical bundle identities.", {
+            details: { path: proposal.path, firstBundleId: priorBundleId, secondBundleId: proposal.bundleId }
+          });
+        }
+        if (priorBundleId) continue;
+        const verified = await recovery.verifyRecoveryBundle({
+          bundle: resolveProjectPath(targetDirectory, proposal.path)
+        });
+        const expectedIdentity: import("./recovery.js").RecoveryProposalIdentity = {
+          taskId: task.id,
+          leaseId: proposal.leaseId,
+          generation: proposal.generation,
+          baseRevision: proposal.baseRevision,
+          revision: proposal.revision,
+          scopes: proposal.scopes,
+          ownedPaths: proposal.ownedPaths,
+          baseline: {
+            snapshotHash: baseline.snapshot.contentHash,
+            worktreeFingerprint: baseline.snapshot.worktreeFingerprint
+          }
+        };
+        if (verified.bundleId !== proposal.bundleId
+          || verified.manifest.source.branch !== baseline.snapshot.branch
+          || verified.manifest.source.head !== baseline.snapshot.head
+          || verified.manifest.checkpoint.fingerprint !== proposal.fingerprint
+          || verified.manifest.checkpoint.snapshotHash !== proposal.snapshotHash
+          || stableStringify(verified.manifest.proposal) !== stableStringify(expectedIdentity)) {
+          throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, `Task ${task.id} sealed proposal artifact is invalid.`, {
+            details: { taskId: task.id, path: proposal.path, bundleId: proposal.bundleId }
+          });
+        }
+        verifiedPaths.set(proposal.path, proposal.bundleId);
+      }
+    }
+    return { sealedProposals, verifiedBundles: verifiedPaths.size };
+  } finally {
+    await release();
+  }
+}
+
 export async function withOrchestrationSnapshot<Result>(
   targetDirectory: string,
   action: (snapshot: {

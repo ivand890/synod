@@ -1,11 +1,12 @@
 # Synod Roadmap
 
 Last updated: 2026-08-10
-Current released baseline: `v0.7.0`
+Current release baseline: `v0.8.0`
 
 This roadmap converts the advisor loop's remaining operational risks into
-versioned, testable increments. It describes intended outcomes, not shipped
-commands. Exact CLI spelling remains provisional until an increment is
+versioned, testable increments. Entries at or below the current release
+baseline are delivered; later increments describe intended outcomes, not
+shipped commands. Exact CLI spelling remains provisional until an increment is
 implemented and released.
 
 ## Evidence behind this revision
@@ -172,6 +173,10 @@ Synod reaches a 1.0 candidate only after all of the following are demonstrated:
 - `v0.7.0`: hash-bound checkpoint snapshots and path deltas, deterministic
   local recovery bundles, transactional fresh-checkout restore, and canonical
   text/JSON handoff context with installed cross-platform recovery smoke.
+- `v0.8.0`: exact-fenced writer leases and ownership scopes, abandoned-worker
+  proposal recovery, enforced correction policy, change-driven waiting,
+  verifiable detached task worktrees, and explicit schema migration with
+  installed concurrency, interruption, upgrade, and cleanup drills.
 
 The worktrees/leases and economics originally associated with `v0.6` were not
 discarded. They are deliberately sequenced after recoverable phase boundaries

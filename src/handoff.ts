@@ -3,7 +3,8 @@ import { formatCheckpointDelta } from "./checkpoint.js";
 import type { CheckpointDelta } from "./checkpoint.js";
 import {
   legalTaskTransitions,
-  orchestrationStatus
+  orchestrationStatus,
+  validateOrchestrationProposalArtifacts
 } from "./orchestration.js";
 import type {
   GitCheckpoint,
@@ -14,6 +15,7 @@ import type {
   TaskState
 } from "./orchestration.js";
 import { verifyRecoveryBundle } from "./recovery.js";
+import { validateTaskWorktreeArtifacts } from "./worktrees.js";
 
 export interface HandoffOptions {
   directory?: string;
@@ -76,6 +78,10 @@ export interface HandoffResult {
   focusTaskIds: string[];
   tasks: HandoffTask[];
   recoveryBundle: HandoffRecoveryBundle;
+  artifacts: {
+    proposals: Awaited<ReturnType<typeof validateOrchestrationProposalArtifacts>>;
+    worktrees: Awaited<ReturnType<typeof validateTaskWorktreeArtifacts>>;
+  };
 }
 
 function gateEvidence(task: OrchestrationTask, evidenceIds: readonly string[]): TaskEvidence[] {
@@ -184,6 +190,8 @@ export async function generateHandoff(
   dependencies: OrchestrationDependencies = {}
 ): Promise<HandoffResult> {
   const status = await orchestrationStatus({ directory, explain: true, readOnly: true }, dependencies);
+  const proposals = await validateOrchestrationProposalArtifacts({ directory, readOnly: true });
+  const worktrees = await validateTaskWorktreeArtifacts({ directory });
   const verification = bundle ? await verifyRecoveryBundle({ bundle }) : undefined;
   if (!status.delta) throw new TypeError("Handoff checkpoint delta is unavailable.");
   const taskMap = Object.fromEntries(status.tasks.map(task => [task.id, task]));
@@ -204,6 +212,7 @@ export async function generateHandoff(
     },
     focusTaskIds,
     tasks,
+    artifacts: { proposals, worktrees },
     recoveryBundle: verification
       ? verifiedBundleMatches(verification, status.checkpoint, status.lastEvent)
       : { status: "not-supplied" }
@@ -227,6 +236,7 @@ export function formatHandoff(result: HandoffResult): string {
   lines.push(`Drift: ${result.checkpoint.drift.detected ? "detected" : "none"}`);
   lines.push(...formatCheckpointDelta(result.checkpoint.delta));
   lines.push(`Focus tasks: ${result.focusTaskIds.length > 0 ? result.focusTaskIds.join(", ") : "none"}`);
+  lines.push(`Durable artifacts: ${result.artifacts.proposals.verifiedBundles} task proposal bundle(s); ${result.artifacts.worktrees.records} worktree record(s), ${result.artifacts.worktrees.sealedProposals} worktree proposal(s)`);
   for (const task of result.tasks) {
     lines.push(`${task.id}: ${task.state} r${task.revision}; executor ${task.executor}`);
     lines.push(`  Objective: ${task.objective}`);

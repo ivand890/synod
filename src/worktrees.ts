@@ -377,6 +377,14 @@ function emptyRegistry(): TaskWorktreeRegistry {
   return { schemaVersion: TASK_WORKTREES_SCHEMA_VERSION, records: [], events: [] };
 }
 
+export function createTaskWorktreeRegistry(): TaskWorktreeRegistry {
+  return emptyRegistry();
+}
+
+export function serializeTaskWorktreeRegistry(value: TaskWorktreeRegistry): string {
+  return `${JSON.stringify(validateTaskWorktreeRegistry(value), null, 2)}\n`;
+}
+
 async function defaultGitRunner(directory: string, args: string[]): Promise<Buffer> {
   return await new Promise((resolve, reject) => {
     execFile("git", ["-C", directory, ...args], {
@@ -499,6 +507,55 @@ async function readRegistry(controlRoot: string): Promise<{
     invalid(`Task worktree registry is not valid JSON: ${errorMessage(error)}`);
   }
   return { registry: validateTaskWorktreeRegistry(parsed), expected: { type: "file", hash: inspected.hash } };
+}
+
+export async function validateTaskWorktreeArtifacts({
+  directory = ".",
+  required = true
+}: { directory?: string; required?: boolean } = {}): Promise<{
+  path: typeof TASK_WORKTREES_PATH;
+  schemaVersion: typeof TASK_WORKTREES_SCHEMA_VERSION;
+  records: number;
+  events: number;
+  sealedProposals: number;
+}> {
+  const controlRoot = await realpath(path.resolve(directory));
+  const loaded = await readRegistry(controlRoot);
+  if (loaded.expected.type === "missing" && required) {
+    invalid(`Task worktree registry is missing: ${TASK_WORKTREES_PATH}`);
+  }
+  let sealedProposals = 0;
+  for (const record of loaded.registry.records) {
+    if (record.integration.status === "COMPLETE"
+      && record.integration.fingerprint !== record.proposal?.fingerprint) {
+      invalid("Completed task worktree integration does not match its sealed proposal.", { recordId: record.id });
+    }
+    if (record.proposal?.status !== "SEALED") continue;
+    const verified = await verifyRecoveryBundle({
+      bundle: resolveProjectPath(controlRoot, record.proposal.path)
+    });
+    const proposal = verified.manifest.proposal;
+    if (verified.bundleId !== record.proposal.bundleId
+      || verified.manifest.source.head !== record.baseHead
+      || verified.manifest.source.branch !== null
+      || verified.manifest.checkpoint.fingerprint !== record.proposal.fingerprint
+      || !proposal
+      || proposal.taskId !== record.taskId
+      || proposal.leaseId !== record.leaseId
+      || proposal.generation !== record.generation
+      || proposal.baseRevision !== record.taskRevision
+      || proposal.revision !== record.taskRevision + 1) {
+      invalid("Task worktree proposal artifact does not match its registry record.", { recordId: record.id });
+    }
+    sealedProposals += 1;
+  }
+  return {
+    path: TASK_WORKTREES_PATH,
+    schemaVersion: TASK_WORKTREES_SCHEMA_VERSION,
+    records: loaded.registry.records.length,
+    events: loaded.registry.events.length,
+    sealedProposals
+  };
 }
 
 async function writeRegistry(

@@ -129,7 +129,7 @@ test("rejects existing, in-control, and symlink destinations before registration
       createTaskWorktree({ ...fixtureData.options, destination }),
       error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_CONFLICT
     );
-    await assert.rejects(readFile(path.join(fixtureData.control, TASK_WORKTREES_PATH), "utf8"), { code: "ENOENT" });
+    assert.equal(JSON.parse(await readFile(path.join(fixtureData.control, TASK_WORKTREES_PATH), "utf8")).records.length, 0);
   }
 });
 
@@ -142,7 +142,7 @@ test("rejects destinations nested in another registered worktree", async () => {
     error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_CONFLICT
   );
   assert.equal(await git(outer, "status", "--porcelain"), "");
-  await assert.rejects(readFile(path.join(data.control, TASK_WORKTREES_PATH), "utf8"), { code: "ENOENT" });
+  assert.equal(JSON.parse(await readFile(path.join(data.control, TASK_WORKTREES_PATH), "utf8")).records.length, 0);
 });
 
 test("fails closed when the exact lease fence or control HEAD moves", async () => {
@@ -160,7 +160,7 @@ test("fails closed when the exact lease fence or control HEAD moves", async () =
     createTaskWorktree(moved.options),
     error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_CONFLICT
   );
-  await assert.rejects(readFile(path.join(moved.control, TASK_WORKTREES_PATH), "utf8"), { code: "ENOENT" });
+  assert.equal(JSON.parse(await readFile(path.join(moved.control, TASK_WORKTREES_PATH), "utf8")).records.length, 0);
 });
 
 test("resumes an interrupted intent only when both path and registration are absent", async () => {

@@ -54,7 +54,11 @@ Before any implementation, give the worker a stable task ID from `PLAN.md` and i
 - required evidence and output format;
 - instruction not to expand scope or declare the parent goal complete.
 
-Use at most three concurrent subagents. Maintain one active writer per worktree. For parallel implementation, use separate worktrees and disjoint write scopes. While `synod_implementer` is editing a worktree, the primary agent must supervise rather than edit the same files.
+Use at most three concurrent subagents. Maintain one active writer per declared scope. Before a writer moves to `ACTIVE`, run `__SYNOD_COMMAND__ lease acquire <task-id> --owner-thread <thread-id>` with the narrowest repeatable `--write`, `--write-tree`, `--read`, and `--read-tree` scopes. Preserve the returned lease ID, generation, task revision, heartbeat timestamp, and owner together as the exact fence; use current returned values for heartbeat, release, worktree, revocation, and recovery commands instead of reconstructing them from chat.
+
+For parallel implementation, use disjoint leases or an explicit detached task worktree. Create it outside the control checkout with `__SYNOD_COMMAND__ worktree create`, let only the leased worker edit it, then inspect `worktree status`, seal the proposal, transactionally integrate it, and move the exact revision to `REVIEW`. `worktree cleanup` is non-force and must run only after the detached checkout is clean; the proposal and registry remain durable.
+
+Use `__SYNOD_COMMAND__ wait --thread <id>` to coordinate child completion. Prefer its notification or cursor mode when available, and inspect `fallbackPollCount`, timeout/abort, approval/user-input, warnings, and cleanup diagnostics before treating a child as quiescent.
 
 ## Review in a closed loop
 
@@ -64,11 +68,13 @@ Treat implementation output as a proposal, never as acceptance.
 2. Have the supervisor inspect the actual diff against the contract and check for unrelated changes.
 3. Have the supervisor run or reproduce the relevant deterministic verification instead of trusting the worker's claim.
 4. If incomplete, send only the missing delta to the same worker.
-5. Allow at most two correction rounds. Then split the task, escalate the profile, or mark it blocked.
+5. Obey the task's canonical correction limit. At exhaustion, explicitly split or supersede it, or record an approved bounded override; do not start another ordinary round.
 6. Let the supervisor accept and integrate only after the implementation and evidence satisfy the contract.
 7. Move tasks through `PLANNED`, `READY`, `ACTIVE`, `REVIEW`, `ACCEPTED`, `VERIFIED`, and `DONE`. Only the supervisor changes acceptance states.
 
 After integration, use `synod_verifier` when an independent pass materially reduces risk. The supervisor adjudicates its `PASS`, `FAIL`, or `INCONCLUSIVE` result and performs the final deterministic checks directly.
+
+If a worker stops or its lease expires, preserve its exact scoped delta through `lease revoke` or `lease expire`, then record one explicit `lease recover` decision: resume the same owner, reassign a replacement owner, or supersede the proposal. Use the ended generation's exact fence. Recovery does not accept, verify, or discard the proposal.
 
 ## Respect risk boundaries
 

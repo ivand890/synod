@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import type { SpawnSyncOptionsWithStringEncoding } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { isRecord, parseJson } from "../src/validation.js";
@@ -44,6 +44,24 @@ function nestedRecord(value: Record<string, unknown>, key: string, label: string
 type RunOptions = Omit<SpawnSyncOptionsWithStringEncoding, "encoding" | "stdio"> & {
   capture?: boolean;
 };
+
+interface RunResult {
+  status: number;
+  stdout: string;
+  stderr: string;
+}
+
+function runResult(command: string, args: string[], options: RunOptions = {}): RunResult {
+  const { capture: _capture, ...spawnOptions } = options;
+  const result = spawnSync(command, args, {
+    encoding: "utf8",
+    shell: process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command),
+    stdio: "pipe",
+    ...spawnOptions,
+  });
+  if (result.error) throw result.error;
+  return { status: result.status ?? 1, stdout: result.stdout?.trim() || "", stderr: result.stderr?.trim() || "" };
+}
 
 function run(command: string, args: string[], options: RunOptions = {}): string {
   const { capture = false, ...spawnOptions } = options;
@@ -89,6 +107,67 @@ function runSynodDlx(args: string[], options: RunOptions = {}): string {
       ...options.env,
     },
   });
+}
+
+function runSynodResult(args: string[], options: RunOptions = {}): RunResult {
+  return runResult(process.execPath, [synodEntryPoint, ...args], {
+    ...options,
+    env: {
+      ...process.env,
+      ...(runtimePackageSpec ? { SYNOD_RUNTIME_PACKAGE_SPEC: runtimePackageSpec } : {}),
+      ...options.env,
+    },
+  });
+}
+
+function runSynodAsync(args: string[], options: RunOptions = {}): Promise<RunResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [synodEntryPoint, ...args], {
+      cwd: options.cwd,
+      env: {
+        ...process.env,
+        ...(runtimePackageSpec ? { SYNOD_RUNTIME_PACKAGE_SPEC: runtimePackageSpec } : {}),
+        ...options.env,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", chunk => { stdout += chunk; });
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", status => resolve({ status: status ?? 1, stdout: stdout.trim(), stderr: stderr.trim() }));
+  });
+}
+
+function exactFence(lease: Record<string, unknown>): string[] {
+  for (const key of ["id", "generation", "taskRevision", "heartbeatAt", "ownerThread"]) {
+    if ((typeof lease[key] !== "string" && typeof lease[key] !== "number") || lease[key] === "") {
+      throw new Error(`Lease is missing exact fence field ${key}.`);
+    }
+  }
+  return [
+    "--lease-id", String(lease.id),
+    "--generation", String(lease.generation),
+    "--revision", String(lease.taskRevision),
+    "--expected-heartbeat-at", String(lease.heartbeatAt),
+    "--owner-thread", String(lease.ownerThread),
+  ];
+}
+
+function addReadyTask(directory: string, id: string): void {
+  runSynod([
+    "task", "add", id,
+    "--objective", `Installed package drill ${id}`,
+    "--executor", "synod_implementer",
+    "--acceptance", "The installed package drill passes",
+    "--verification", "pnpm test:package",
+    "--cwd", directory,
+    "--json",
+  ], { capture: true });
+  runSynod(["task", "transition", id, "READY", "--revision", "0", "--cwd", directory, "--json"], { capture: true });
 }
 
 try {
@@ -148,6 +227,66 @@ try {
     throw new Error(`Expected version ${expectedVersion}, received ${installedVersion}.`);
   }
 
+  const v07Directory = path.join(consumerDirectory, "v0.7-project");
+  mkdirSync(v07Directory, { recursive: true });
+  const releasedEnvironment = { ...process.env };
+  delete releasedEnvironment.SYNOD_RUNTIME_PACKAGE_SPEC;
+  const v07InitOutput = run(
+    pnpmExecutable,
+    ["--silent", "dlx", "@ivand890/synod@0.7.0", "init", v07Directory, "--profile", "portable", "--json"],
+    { cwd: consumerDirectory, capture: true, env: releasedEnvironment },
+  );
+  if (jsonRecord(v07InitOutput, "v0.7 init envelope").ok !== true) {
+    throw new Error(`Released v0.7 package failed to initialize its upgrade fixture: ${v07InitOutput}`);
+  }
+  const v08UpgradeOutput = runSynodDlx(["upgrade", v07Directory, "--profile", "portable", "--json"], {
+    cwd: consumerDirectory,
+    capture: true,
+  });
+  const v08UpgradeEnvelope = jsonRecord(v08UpgradeOutput, "v0.8 upgrade envelope");
+  const v08UpgradeData = nestedRecord(v08UpgradeEnvelope, "data", "v0.8 upgrade envelope");
+  const upgradedManifest = jsonRecord(
+    readFileSync(path.join(v07Directory, ".synod", "manifest.json"), "utf8"),
+    "upgraded v0.8 manifest",
+  );
+  const upgradedRuntime = jsonRecord(
+    readFileSync(path.join(v07Directory, ".synod", "runtime.json"), "utf8"),
+    "upgraded v0.8 runtime",
+  );
+  const upgradedState = jsonRecord(
+    readFileSync(path.join(v07Directory, ".synod", "state.json"), "utf8"),
+    "upgraded v0.8 orchestration state",
+  );
+  const upgradedLeaseBaselines = jsonRecord(
+    readFileSync(path.join(v07Directory, ".synod", "lease-baselines.json"), "utf8"),
+    "upgraded v0.8 lease baselines",
+  );
+  const upgradedWorktrees = jsonRecord(
+    readFileSync(path.join(v07Directory, ".synod", "task-worktrees.json"), "utf8"),
+    "upgraded v0.8 task worktrees",
+  );
+  if (
+    v08UpgradeEnvelope.ok !== true
+    || v08UpgradeData.templateVersion !== expectedVersion
+    || upgradedManifest.templateVersion !== expectedVersion
+    || upgradedRuntime.runtimeVersion !== expectedVersion
+    || upgradedState.schemaVersion !== 2
+    || upgradedLeaseBaselines.schemaVersion !== 1
+    || upgradedWorktrees.schemaVersion !== 1
+  ) {
+    throw new Error(`Released v0.7 project did not upgrade completely to ${expectedVersion}: ${v08UpgradeOutput}`);
+  }
+  const downgrade = runResult(
+    pnpmExecutable,
+    ["--silent", "dlx", "@ivand890/synod@0.7.0", "upgrade", v07Directory, "--profile", "portable", "--json"],
+    { cwd: consumerDirectory, env: releasedEnvironment },
+  );
+  const downgradeEnvelope = jsonRecord(downgrade.stdout, "v0.7 downgrade rejection envelope");
+  const downgradeError = nestedRecord(downgradeEnvelope, "error", "v0.7 downgrade rejection envelope");
+  if (downgrade.status === 0 || downgradeEnvelope.ok !== false || downgradeError.code !== "SYNOD_DOWNGRADE_UNSUPPORTED") {
+    throw new Error(`Released v0.7 CLI did not reject a v0.8 downgrade: ${downgrade.stdout}${downgrade.stderr}`);
+  }
+
   const initOutput = runSynodDlx(["init", targetDirectory, "--profile", "portable", "--json"], {
     cwd: consumerDirectory,
     capture: true,
@@ -196,6 +335,31 @@ try {
     "import { compareVersions } from '@ivand890/synod/src/compatibility.js'; process.stdout.write(String(compareVersions('1.0.0', '0.9.0')));"
   ], { cwd: consumerDirectory, capture: true });
   if (deepImportVersion !== "1") throw new Error("Legacy source deep imports no longer resolve to compiled output.");
+  const waitDrill = run(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    `import { waitForThreads } from '@ivand890/synod/src/wait.js';
+const active = { threadId: 'thread:package', status: { type: 'active', activeFlags: [] } };
+const idle = { threadId: 'thread:package', status: { type: 'idle' } };
+let notificationReads = 0;
+let listener;
+const notification = await waitForThreads({ threadIds: ['thread:package'], timeoutMs: 100 }, { adapterFactory: () => ({
+  async start() {}, capabilities: () => ({ notification: true, cursor: false }),
+  async read() { if (notificationReads++ === 0) { queueMicrotask(() => listener(idle)); return { statuses: [active] }; } return { statuses: [idle] }; },
+  subscribe(next) { listener = next; return () => {}; }, async close() {}, getWarnings: () => [], getDiagnostics: () => ({ installed: true })
+}) });
+let pollReads = 0;
+const poll = await waitForThreads({ threadIds: ['thread:package'], timeoutMs: 100, pollIntervalMs: 1 }, { adapterFactory: () => ({
+  async start() {}, capabilities: () => ({ notification: false, cursor: false }),
+  async read() { return { statuses: [pollReads++ === 0 ? active : idle] }; }, async close() {}, getWarnings: () => [], getDiagnostics: () => ({ installed: true })
+}) });
+if (notification.mode !== 'notification' || notification.wakeCount !== 1 || notification.incomplete || poll.mode !== 'poll' || poll.fallbackPollCount !== 1 || poll.incomplete) process.exit(2);
+process.stdout.write(JSON.stringify({ notification: notification.mode, fallbackPolls: poll.fallbackPollCount }));`,
+  ], { cwd: consumerDirectory, capture: true });
+  const waitDrillResult = jsonRecord(waitDrill, "installed wait drill");
+  if (waitDrillResult.notification !== "notification" || waitDrillResult.fallbackPolls !== 1) {
+    throw new Error(`Installed wait drill returned invalid observability: ${waitDrill}`);
+  }
   rmSync(path.join(targetDirectory, ".synod", "runtime", "node_modules"), { recursive: true });
   const delegatedVersion = runSynod(["--version"], { cwd: targetDirectory, capture: true });
   if (
@@ -216,16 +380,154 @@ try {
     || checkData.runtimeVersion !== expectedVersion
     || !Array.isArray(checkData.checks)
     || !checkData.checks.some(item => isRecord(item) && item.path === ".synod/runtime" && item.status === "ready")
+    || !checkData.checks.some(item => isRecord(item) && item.path === ".synod/proposals" && item.status === "valid")
+    || !checkData.checks.some(item => isRecord(item) && item.path === ".synod/task-worktrees" && item.status === "valid")
   ) {
     throw new Error(`Installed CLI failed its project check: ${checkOutput}`);
   }
   writeFileSync(path.join(targetDirectory, "package-recovery.txt"), "base\n");
+  writeFileSync(path.join(targetDirectory, "package-worktree.txt"), "base\n");
   run("git", ["-C", targetDirectory, "init"]);
   run("git", ["-C", targetDirectory, "config", "user.name", "Synod Package Smoke"]);
   run("git", ["-C", targetDirectory, "config", "user.email", "synod@example.invalid"]);
   run("git", ["-C", targetDirectory, "config", "commit.gpgsign", "false"]);
   run("git", ["-C", targetDirectory, "add", "."]);
   run("git", ["-C", targetDirectory, "commit", "-m", "package smoke base"]);
+
+  addReadyTask(targetDirectory, "T-CONCURRENT-A");
+  addReadyTask(targetDirectory, "T-CONCURRENT-B");
+  const concurrentCommands = [
+    [
+      "lease", "acquire", "T-CONCURRENT-A", "--owner-thread", "thread:concurrent-a",
+      "--write-tree", "concurrent", "--cwd", targetDirectory, "--json",
+    ],
+    [
+      "lease", "acquire", "T-CONCURRENT-B", "--owner-thread", "thread:concurrent-b",
+      "--write-tree", "concurrent", "--cwd", targetDirectory, "--json",
+    ],
+  ];
+  const concurrentResults = await Promise.all(concurrentCommands.map(command =>
+    runSynodAsync(command, { cwd: consumerDirectory })));
+  const successfulAcquire = concurrentResults.find(result => result.status === 0);
+  const initialRejectedIndex = concurrentResults.findIndex(result => result.status !== 0);
+  let rejectedAcquire = initialRejectedIndex >= 0 ? concurrentResults[initialRejectedIndex] : undefined;
+  if (!successfulAcquire || !rejectedAcquire) {
+    throw new Error(`Concurrent writers did not produce exactly one winner: ${JSON.stringify(concurrentResults)}`);
+  }
+  const successfulAcquireEnvelope = jsonRecord(successfulAcquire.stdout, "concurrent lease winner envelope");
+  const successfulAcquireData = nestedRecord(successfulAcquireEnvelope, "data", "concurrent lease winner envelope");
+  const successfulLease = nestedRecord(successfulAcquireData, "lease", "concurrent lease winner envelope.data");
+  let rejectedAcquireEnvelope = jsonRecord(rejectedAcquire.stdout, "concurrent lease rejection envelope");
+  let rejectedAcquireError = nestedRecord(rejectedAcquireEnvelope, "error", "concurrent lease rejection envelope");
+  if (rejectedAcquireError.code === "SYNOD_ORCHESTRATION_LOCKED") {
+    rejectedAcquire = runSynodResult(concurrentCommands[initialRejectedIndex]!, { cwd: consumerDirectory });
+    rejectedAcquireEnvelope = jsonRecord(rejectedAcquire.stdout, "serialized concurrent lease rejection envelope");
+    rejectedAcquireError = nestedRecord(rejectedAcquireEnvelope, "error", "serialized concurrent lease rejection envelope");
+  }
+  if (successfulAcquireEnvelope.ok !== true || rejectedAcquireError.code !== "SYNOD_LEASE_CONFLICT") {
+    throw new Error(`Concurrent writer fencing returned an invalid result: ${JSON.stringify(concurrentResults)}`);
+  }
+  const winningTask = successfulAcquireData.task;
+  if (!isRecord(winningTask) || typeof winningTask.id !== "string") throw new Error("Concurrent lease winner omitted its task.");
+  runSynod([
+    "lease", "release", winningTask.id,
+    ...exactFence(successfulLease),
+    "--cwd", targetDirectory,
+    "--json",
+  ], { cwd: consumerDirectory, capture: true });
+
+  addReadyTask(targetDirectory, "T-WORKTREE");
+  const worktreeAcquireOutput = runSynod([
+    "lease", "acquire", "T-WORKTREE", "--owner-thread", "thread:worktree",
+    "--write", "package-worktree.txt", "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  const worktreeAcquireData = nestedRecord(jsonRecord(worktreeAcquireOutput, "worktree lease envelope"), "data", "worktree lease envelope");
+  const worktreeLease = nestedRecord(worktreeAcquireData, "lease", "worktree lease envelope.data");
+  const taskWorktreeDirectory = path.join(consumerDirectory, "task-worktree");
+  const worktreeCreateOutput = runSynod([
+    "worktree", "create", "T-WORKTREE", "--destination", taskWorktreeDirectory,
+    ...exactFence(worktreeLease), "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  if (jsonRecord(worktreeCreateOutput, "worktree create envelope").ok !== true) {
+    throw new Error(`Installed worktree creation failed: ${worktreeCreateOutput}`);
+  }
+  runSynod([
+    "task", "transition", "T-WORKTREE", "ACTIVE", "--revision", "0",
+    "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  writeFileSync(path.join(taskWorktreeDirectory, "package-worktree.txt"), "integrated by installed package\n");
+  const worktreeSealOutput = runSynod([
+    "worktree", "seal", "T-WORKTREE", ...exactFence(worktreeLease),
+    "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  if (jsonRecord(worktreeSealOutput, "worktree seal envelope").ok !== true) {
+    throw new Error(`Installed worktree sealing failed: ${worktreeSealOutput}`);
+  }
+  const worktreeIntegrateOutput = runSynod([
+    "worktree", "integrate", "T-WORKTREE", ...exactFence(worktreeLease),
+    "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  if (
+    jsonRecord(worktreeIntegrateOutput, "worktree integrate envelope").ok !== true
+    || readFileSync(path.join(targetDirectory, "package-worktree.txt"), "utf8") !== "integrated by installed package\n"
+  ) {
+    throw new Error(`Installed worktree integration failed: ${worktreeIntegrateOutput}`);
+  }
+  runSynod([
+    "task", "transition", "T-WORKTREE", "REVIEW", "--revision", "1",
+    "--evidence", "package-smoke:worktree-integrated", "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  run("git", ["-C", taskWorktreeDirectory, "reset", "--hard", "HEAD"]);
+  const worktreeCleanupOutput = runSynod([
+    "worktree", "cleanup", "T-WORKTREE", "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  if (
+    jsonRecord(worktreeCleanupOutput, "worktree cleanup envelope").ok !== true
+    || existsSync(taskWorktreeDirectory)
+    || !existsSync(path.join(targetDirectory, ".synod", "worktree-proposals"))
+  ) {
+    throw new Error(`Installed worktree cleanup failed or removed durable proposals: ${worktreeCleanupOutput}`);
+  }
+
+  addReadyTask(targetDirectory, "T-RECOVER");
+  const recoveryAcquireOutput = runSynod([
+    "lease", "acquire", "T-RECOVER", "--owner-thread", "thread:killed-worker",
+    "--write", "package-recovery.txt", "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  const recoveryAcquireData = nestedRecord(jsonRecord(recoveryAcquireOutput, "recovery lease envelope"), "data", "recovery lease envelope");
+  const recoveryLease = nestedRecord(recoveryAcquireData, "lease", "recovery lease envelope.data");
+  runSynod([
+    "task", "transition", "T-RECOVER", "ACTIVE", "--revision", "0",
+    "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  writeFileSync(path.join(targetDirectory, "package-recovery.txt"), "abandoned worker proposal\n");
+  const endedFence = exactFence(recoveryLease).slice(0, -2);
+  const recoveryRevokeOutput = runSynod([
+    "lease", "revoke", "T-RECOVER", ...endedFence,
+    "--reason", "installed worker was killed", "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  const recoveryRevokeData = nestedRecord(jsonRecord(recoveryRevokeOutput, "recovery revoke envelope"), "data", "recovery revoke envelope");
+  const revokedTask = nestedRecord(recoveryRevokeData, "task", "recovery revoke envelope.data");
+  const revokedRecovery = nestedRecord(revokedTask, "recovery", "recovery revoke envelope.data.task");
+  if (revokedRecovery.status !== "PENDING") throw new Error(`Killed-worker revocation did not enter recovery: ${recoveryRevokeOutput}`);
+  const recoveryOutput = runSynod([
+    "lease", "recover", "T-RECOVER", ...endedFence,
+    "--decision", "reassign", "--owner-thread", "thread:replacement",
+    "--reason", "continue preserved installed proposal", "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  const recoveryData = nestedRecord(jsonRecord(recoveryOutput, "recovery envelope"), "data", "recovery envelope");
+  const replacementLease = nestedRecord(recoveryData, "lease", "recovery envelope.data");
+  const recoveredTask = nestedRecord(recoveryData, "task", "recovery envelope.data");
+  const recoveredRecovery = nestedRecord(recoveredTask, "recovery", "recovery envelope.data.task");
+  const recoveredProposal = nestedRecord(recoveredRecovery, "proposal", "recovery envelope.data.task.recovery");
+  if (
+    replacementLease.generation !== 2
+    || replacementLease.ownerThread !== "thread:replacement"
+    || recoveredRecovery.status !== "REASSIGNED"
+    || typeof recoveredProposal.bundleId !== "string"
+  ) {
+    throw new Error(`Installed killed-worker recovery did not preserve and reassign the proposal: ${recoveryOutput}`);
+  }
   writeFileSync(path.join(targetDirectory, "package-recovery.txt"), "acknowledged dirty bytes\n");
   const checkpointOutput = runSynod(["checkpoint", targetDirectory, "--json"], {
     cwd: consumerDirectory,
@@ -277,11 +579,17 @@ try {
   const handoffCheckpoint = nestedRecord(handoffData, "checkpoint", "handoff envelope.data");
   const handoffDrift = nestedRecord(handoffCheckpoint, "drift", "handoff envelope.data.checkpoint");
   const handoffBundle = nestedRecord(handoffData, "recoveryBundle", "handoff envelope.data");
+  const handoffArtifacts = nestedRecord(handoffData, "artifacts", "handoff envelope.data");
+  const handoffProposals = nestedRecord(handoffArtifacts, "proposals", "handoff envelope.data.artifacts");
+  const handoffWorktrees = nestedRecord(handoffArtifacts, "worktrees", "handoff envelope.data.artifacts");
   if (
     handoffEnvelope.ok !== true
     || handoffDrift.detected !== false
     || handoffBundle.status !== "verified"
     || handoffBundle.bundleId !== exportData.bundleId
+    || typeof handoffProposals.verifiedBundles !== "number"
+    || handoffWorktrees.records !== 1
+    || handoffWorktrees.sealedProposals !== 1
   ) {
     throw new Error(`Installed CLI failed its canonical handoff smoke: ${handoffOutput}`);
   }
@@ -291,7 +599,18 @@ try {
   });
   const statusEnvelope = jsonRecord(statusOutput, "status envelope");
   const statusData = nestedRecord(statusEnvelope, "data", "status envelope");
-  if (statusEnvelope.ok !== true || statusData.healthy !== true || statusData.eventCount !== 2) {
+  const statusArtifacts = nestedRecord(statusData, "artifacts", "status envelope.data");
+  const statusProposals = nestedRecord(statusArtifacts, "proposals", "status envelope.data.artifacts");
+  const statusWorktrees = nestedRecord(statusArtifacts, "worktrees", "status envelope.data.artifacts");
+  if (
+    statusEnvelope.ok !== true
+    || statusData.healthy !== true
+    || typeof statusData.eventCount !== "number"
+    || statusData.eventCount < 2
+    || typeof statusProposals.verifiedBundles !== "number"
+    || statusWorktrees.records !== 1
+    || statusWorktrees.sealedProposals !== 1
+  ) {
     throw new Error(`Installed CLI returned an invalid orchestration status: ${statusOutput}`);
   }
   const explainedStatusOutput = runSynod(["status", targetDirectory, "--explain", "--json"], {
@@ -317,7 +636,12 @@ try {
   const taskData = nestedRecord(taskEnvelope, "data", "task envelope");
   const task = nestedRecord(taskData, "task", "task envelope.data");
   const taskLastEvent = nestedRecord(taskData, "lastEvent", "task envelope.data");
-  if (taskEnvelope.ok !== true || task.id !== "T-001" || taskLastEvent.sequence !== 3) {
+  if (
+    taskEnvelope.ok !== true
+    || task.id !== "T-001"
+    || typeof taskLastEvent.sequence !== "number"
+    || taskLastEvent.sequence < 3
+  ) {
     throw new Error(`Installed CLI failed its orchestration task smoke: ${taskOutput}`);
   }
   const upgradeOutput = runSynod(["upgrade", targetDirectory, "--dry-run", "--json"], {
@@ -341,6 +665,9 @@ try {
     || uninstallData.runtimeAction !== "remove"
     || !Array.isArray(uninstallData.preserved)
     || !uninstallData.preserved.includes("docs/synod/GOAL.md")
+    || !uninstallData.preserved.includes(".synod/task-worktrees.json")
+    || !uninstallData.preserved.includes(".synod/proposals")
+    || !uninstallData.preserved.includes(".synod/worktree-proposals")
   ) {
     throw new Error(`Installed CLI returned an invalid uninstall plan: ${uninstallOutput}`);
   }
@@ -350,6 +677,13 @@ try {
   });
   if (existsSync(path.join(targetDirectory, ".synod", "runtime.json")) || existsSync(path.join(targetDirectory, ".synod", "runtime"))) {
     throw new Error("Uninstall left the project-local Synod runtime behind.");
+  }
+  if (
+    !existsSync(path.join(targetDirectory, ".synod", "task-worktrees.json"))
+    || !existsSync(path.join(targetDirectory, ".synod", "proposals"))
+    || !existsSync(path.join(targetDirectory, ".synod", "worktree-proposals"))
+  ) {
+    throw new Error("Uninstall removed v0.8 durable proposal or worktree records.");
   }
   console.log(`Package smoke test passed for @ivand890/synod@${expectedVersion}.`);
 } finally {

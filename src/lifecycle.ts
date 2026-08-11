@@ -51,10 +51,17 @@ import {
   createOrchestrationSchemaMigrationFiles,
   createOrchestrationStatusProjectionFile,
   orchestrationStatus,
+  validateOrchestrationProposalArtifacts,
   validateOrchestrationReadOnly
 } from "./orchestration.js";
 import { CHECKPOINT_SNAPSHOT_PATH } from "./checkpoint.js";
 import { LEASE_BASELINES_PATH } from "./leases.js";
+import {
+  TASK_WORKTREES_PATH,
+  createTaskWorktreeRegistry,
+  serializeTaskWorktreeRegistry,
+  validateTaskWorktreeArtifacts
+} from "./worktrees.js";
 
 const USER_GUIDANCE_PATHS = new Set([
   "docs/synod/DECISIONS.md",
@@ -363,11 +370,17 @@ export async function initProject(
     ])
   );
   const existingRecordMap = new Map(existingRecords);
-  const legacyRecordsWithoutLedger = [...LEGACY_RECORD_PATHS].every(
+  const legacyRecordsPresent = [...LEGACY_RECORD_PATHS].every(
     relativePath => existingRecordMap.get(relativePath)?.type === "file"
-  ) && existingRecordMap.get(LEASE_BASELINES_PATH)?.type === "missing";
+  );
+  const legacyRecordsWithoutLedger = legacyRecordsPresent
+    && existingRecordMap.get(LEASE_BASELINES_PATH)?.type === "missing";
+  const recognizedAuxiliaryRecords = [LEASE_BASELINES_PATH, TASK_WORKTREES_PATH].every(relativePath =>
+    ["file", "missing"].includes(existingRecordMap.get(relativePath)?.type || "")
+  );
   const adoptExistingRecords = !existingManifest
-    && (existingRecords.every(([, inspected]) => inspected.type === "file") || legacyRecordsWithoutLedger);
+    && legacyRecordsPresent
+    && recognizedAuxiliaryRecords;
   let adoptedSchemaMigrationFiles: Map<string, string> | undefined;
   if (adoptExistingRecords) {
     if (legacyRecordsWithoutLedger) {
@@ -379,6 +392,11 @@ export async function initProject(
       for (const [relativePath, content] of migration.files) templates.files.set(relativePath, content);
     } else if (dryRun) await validateOrchestrationReadOnly({ directory: targetDirectory });
     else await orchestrationStatus({ directory: targetDirectory }, dependencies);
+    if (existingRecordMap.get(TASK_WORKTREES_PATH)?.type === "file") {
+      await validateTaskWorktreeArtifacts({ directory: targetDirectory });
+    } else {
+      templates.files.set(TASK_WORKTREES_PATH, serializeTaskWorktreeRegistry(createTaskWorktreeRegistry()));
+    }
     for (const [relativePath, inspected] of existingRecords) {
       if (inspected.type === "file" && !adoptedSchemaMigrationFiles?.has(relativePath)) {
         templates.files.set(relativePath, inspected.content);
@@ -389,6 +407,7 @@ export async function initProject(
     for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, orchestrationDependencies)) {
       templates.files.set(relativePath, content);
     }
+    templates.files.set(TASK_WORKTREES_PATH, serializeTaskWorktreeRegistry(createTaskWorktreeRegistry()));
   }
   const managedExisting: ManagedManifest | undefined = existingManifest;
   const previous = managedExisting ? manifestFileMap(managedExisting) : new Map<string, ManifestEntry>();
@@ -587,6 +606,9 @@ export async function upgradeProject(
   for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, orchestrationDependencies)) {
     templates.files.set(relativePath, content);
   }
+  const worktreeRegistry = await inspectManagedPath(targetDirectory, TASK_WORKTREES_PATH);
+  if (worktreeRegistry.type === "file") await validateTaskWorktreeArtifacts({ directory: targetDirectory });
+  templates.files.set(TASK_WORKTREES_PATH, serializeTaskWorktreeRegistry(createTaskWorktreeRegistry()));
   if (schemaMigration?.status === "migrated") {
     for (const [relativePath, content] of schemaMigration.files) templates.files.set(relativePath, content);
     if (!schemaMigration.files.has(CHECKPOINT_SNAPSHOT_PATH)) templates.files.delete(CHECKPOINT_SNAPSHOT_PATH);
@@ -868,8 +890,10 @@ export async function checkProject({ directory = "." }: { directory?: string } =
     checks.some(check => check.path === relativePath && check.status === "recorded")
   );
   if (orchestrationRecordsPresent) {
+    let orchestrationValid = false;
     try {
       await orchestrationStatus({ directory: targetDirectory });
+      orchestrationValid = true;
       checks.push({
         path: ".synod/orchestration",
         ownership: "record",
@@ -883,6 +907,49 @@ export async function checkProject({ directory = "." }: { directory?: string } =
         status: "invalid",
         severity: "error",
         code: errorCode(error) || ERROR_CODES.ORCHESTRATION_STATE_INVALID,
+        message: errorMessage(error)
+      });
+    }
+    if (orchestrationValid) {
+      try {
+        const proposals = await validateOrchestrationProposalArtifacts({ directory: targetDirectory });
+        checks.push({
+          path: ".synod/proposals",
+          ownership: "record",
+          status: "valid",
+          severity: "info",
+          message: `${proposals.verifiedBundles} sealed proposal bundle(s) verified.`
+        });
+      } catch (error) {
+        checks.push({
+          path: ".synod/proposals",
+          ownership: "record",
+          status: "invalid",
+          severity: "error",
+          code: errorCode(error) || ERROR_CODES.PROPOSAL_INVALID,
+          message: errorMessage(error)
+        });
+      }
+    }
+  }
+
+  if (checks.some(check => check.path === TASK_WORKTREES_PATH && check.status === "recorded")) {
+    try {
+      const artifacts = await validateTaskWorktreeArtifacts({ directory: targetDirectory });
+      checks.push({
+        path: ".synod/task-worktrees",
+        ownership: "record",
+        status: "valid",
+        severity: "info",
+        message: `${artifacts.records} worktree record(s), ${artifacts.events} event(s), and ${artifacts.sealedProposals} sealed proposal(s) verified.`
+      });
+    } catch (error) {
+      checks.push({
+        path: ".synod/task-worktrees",
+        ownership: "record",
+        status: "invalid",
+        severity: "error",
+        code: errorCode(error) || ERROR_CODES.WORKTREE_INVALID,
         message: errorMessage(error)
       });
     }
@@ -983,6 +1050,12 @@ export async function uninstallProject(
     } else {
       states.push({ path: entry.path, action: "remove" });
       operations.push(operationForDelete(entry.path, inspected));
+    }
+  }
+
+  for (const relativePath of [".synod/proposals", ".synod/worktree-proposals"]) {
+    if (await pathType(resolveProjectPath(targetDirectory, relativePath)) !== "missing") {
+      states.push({ path: relativePath, action: "preserve" });
     }
   }
 
