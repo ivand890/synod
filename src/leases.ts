@@ -94,6 +94,8 @@ export interface CorrectionPolicy {
   overrides: Array<{
     added: number;
     actor: string;
+    approver: string;
+    reference: string;
     reason: string;
     recordedAt: string;
     evidence: string[];
@@ -307,6 +309,11 @@ export function isTaskLease(value: unknown): value is TaskLease {
     && value.status === "ACTIVE";
 }
 
+export function isEndedTaskLease(value: unknown): value is EndedTaskLease {
+  if (!isRecord(value) || !["RELEASED", "EXPIRED", "REVOKED"].includes(String(value.status))) return false;
+  return isTaskLease({ ...value, status: "ACTIVE" });
+}
+
 export function isTaskProposalReference(value: unknown): value is TaskProposalReference {
   return isRecord(value)
     && typeof value.path === "string"
@@ -342,11 +349,16 @@ export function isCorrectionPolicy(value: unknown): value is CorrectionPolicy {
   return isRecord(value)
     && isNonNegativeInteger(value.limit)
     && isNonNegativeInteger(value.used)
+    && value.used <= value.limit
     && Array.isArray(value.overrides)
     && value.overrides.every(item => isRecord(item)
       && isPositiveInteger(item.added)
       && typeof item.actor === "string"
       && item.actor.length > 0
+      && typeof item.approver === "string"
+      && item.approver.length > 0
+      && typeof item.reference === "string"
+      && item.reference.length > 0
       && typeof item.reason === "string"
       && item.reason.length > 0
       && validIsoTimestamp(item.recordedAt)

@@ -84,7 +84,18 @@ export interface LeaseMutationCommandOptions extends LeaseCommonOptions {
   reason?: string;
 }
 
-export type LeaseCommandOptions = LeaseAcquireCommandOptions | LeaseMutationCommandOptions;
+export interface LeaseRecoverCommandOptions extends LeaseCommonOptions {
+  action: "recover";
+  leaseId: string;
+  generation: number;
+  revision: number;
+  expectedHeartbeatAt: string;
+  decision: "resume" | "reassign" | "supersede";
+  ownerThread?: string;
+  reason: string;
+}
+
+export type LeaseCommandOptions = LeaseAcquireCommandOptions | LeaseMutationCommandOptions | LeaseRecoverCommandOptions;
 
 interface TaskCommonOptions {
   id: string;
@@ -100,6 +111,7 @@ export interface TaskAddOptions extends TaskCommonOptions {
   acceptance: string[];
   verification: string[];
   dependsOn: string[];
+  correctionLimit?: number;
 }
 
 export interface TaskTransitionOptions extends TaskCommonOptions {
@@ -110,7 +122,23 @@ export interface TaskTransitionOptions extends TaskCommonOptions {
   evidence: string[];
 }
 
-export type TaskOptions = TaskAddOptions | TaskTransitionOptions;
+export interface TaskOverrideOptions extends TaskCommonOptions {
+  action: "override";
+  additionalRounds: number;
+  approver: string;
+  reference: string;
+  reason: string;
+  evidence: string[];
+}
+
+export interface TaskSplitOptions extends TaskCommonOptions {
+  action: "split";
+  replacements: string[];
+  reason: string;
+  evidence: string[];
+}
+
+export type TaskOptions = TaskAddOptions | TaskTransitionOptions | TaskOverrideOptions | TaskSplitOptions;
 
 function missingValue(option: string): SynodError {
   return new SynodError(ERROR_CODES.MISSING_OPTION_VALUE, `Missing value for ${option}.`, {
@@ -283,7 +311,7 @@ export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOpti
 export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOptions {
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
-  if (!["acquire", "heartbeat", "release", "expire", "revoke"].includes(action)) {
+  if (!["acquire", "heartbeat", "release", "expire", "revoke", "recover"].includes(action)) {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown lease action: ${action}`, { details: { action } });
   }
   const id = args[1];
@@ -301,6 +329,7 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
   let ttlSeconds: number | undefined;
   let heartbeatIntervalSeconds: number | undefined;
   let reason: string | undefined;
+  let decision: "resume" | "reassign" | "supersede" | undefined;
   const read: string[] = [];
   const write: string[] = [];
   const readTree: string[] = [];
@@ -315,7 +344,7 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     }
     const valueOptions = [
       "--cwd", "--actor", "--owner-thread", "--lease-id", "--generation", "--revision", "--expected-heartbeat-at",
-      "--ttl-seconds", "--heartbeat-seconds", "--reason", "--read", "--write", "--read-tree", "--write-tree"
+      "--ttl-seconds", "--heartbeat-seconds", "--reason", "--decision", "--read", "--write", "--read-tree", "--write-tree"
     ];
     if (!valueOptions.includes(arg)) {
       if (arg.startsWith("-")) throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
@@ -328,6 +357,12 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     else if (arg === "--lease-id") leaseId = value;
     else if (arg === "--expected-heartbeat-at") expectedHeartbeatAt = value;
     else if (arg === "--reason") reason = value;
+    else if (arg === "--decision") {
+      if (!["resume", "reassign", "supersede"].includes(value)) {
+        throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease recover decision must be resume, reassign, or supersede.");
+      }
+      decision = value as "resume" | "reassign" | "supersede";
+    }
     else if (arg === "--read") read.push(value);
     else if (arg === "--write") write.push(value);
     else if (arg === "--read-tree") readTree.push(value);
@@ -351,7 +386,7 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     }
   }
   if (action === "acquire") {
-    if (leaseId !== undefined || generation !== undefined || revision !== undefined || expectedHeartbeatAt !== undefined || reason !== undefined) {
+    if (leaseId !== undefined || generation !== undefined || revision !== undefined || expectedHeartbeatAt !== undefined || reason !== undefined || decision !== undefined) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Lease acquire received a mutation-only option.");
     }
     return {
@@ -373,6 +408,9 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     || ttlSeconds !== undefined || heartbeatIntervalSeconds !== undefined) {
     throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Lease ${action} received an acquire-only option.`);
   }
+  if (action !== "recover" && decision !== undefined) {
+    throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Lease ${action} received a recovery-only option.`);
+  }
   if (leaseId === undefined || generation === undefined || revision === undefined || expectedHeartbeatAt === undefined) {
     throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease ${action} requires --lease-id, --generation, --revision, and --expected-heartbeat-at.`);
   }
@@ -381,6 +419,12 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
   }
   if ((action === "expire" || action === "revoke") && reason === undefined) {
     throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease ${action} requires --reason.`);
+  }
+  if (action === "recover") {
+    if (!decision || !reason) throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease recover requires --decision and --reason.");
+    if (decision === "reassign" && !ownerThread) throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease reassign recovery requires --owner-thread.");
+    if (decision === "supersede" && ownerThread) throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Lease supersede recovery does not accept --owner-thread.");
+    return { action, id, directory, json, actor, leaseId, generation, revision, expectedHeartbeatAt, decision, reason, ...(ownerThread ? { ownerThread } : {}) };
   }
   return {
     action: action as LeaseMutationCommandOptions["action"],
@@ -400,7 +444,7 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
 export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
-  if (action !== "add" && action !== "transition") {
+  if (!["add", "transition", "override", "split"].includes(action)) {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown task action: ${action}`, { details: { action } });
   }
   const id = args[1];
@@ -416,11 +460,16 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   let executor: string | undefined;
   let reason: string | undefined;
   let revision: number | undefined;
+  let correctionLimit: number | undefined;
+  let additionalRounds: number | undefined;
+  let approver: string | undefined;
+  let reference: string | undefined;
   const acceptance: string[] = [];
   const verification: string[] = [];
   const dependsOn: string[] = [];
   const evidence: string[] = [];
-  const start = action === "add" ? 2 : 3;
+  const replacements: string[] = [];
+  const start = action === "transition" ? 3 : 2;
 
   for (let index = start; index < args.length; index += 1) {
     const arg = args[index];
@@ -431,7 +480,8 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
     }
     const valueOptions = [
       "--cwd", "--objective", "--executor", "--actor", "--reason",
-      "--acceptance", "--verification", "--depends-on", "--evidence", "--revision"
+      "--acceptance", "--verification", "--depends-on", "--evidence", "--revision",
+      "--correction-limit", "--additional-rounds", "--approver", "--reference", "--replacement"
     ];
     if (valueOptions.includes(arg)) {
       const value = optionValue(args, index, arg);
@@ -444,6 +494,11 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
       else if (arg === "--verification") verification.push(value);
       else if (arg === "--depends-on") dependsOn.push(value);
       else if (arg === "--evidence") evidence.push(value);
+      else if (arg === "--replacement") replacements.push(value);
+      else if (arg === "--approver") approver = value;
+      else if (arg === "--reference") reference = value;
+      else if (arg === "--correction-limit") correctionLimit = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+      else if (arg === "--additional-rounds") additionalRounds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
       else revision = /^\d+$/.test(value) ? Number(value) : Number.NaN;
       index += 1;
     } else if (arg.startsWith("-")) {
@@ -454,14 +509,38 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   }
 
   if (action === "add") {
-    if (revision !== undefined || evidence.length > 0 || reason !== undefined) {
+    if (revision !== undefined || evidence.length > 0 || reason !== undefined || additionalRounds !== undefined
+      || approver !== undefined || reference !== undefined || replacements.length > 0) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task add received a transition-only option.");
     }
-    return { action, id, directory, json, actor, objective, executor, acceptance, verification, dependsOn };
+    if (correctionLimit !== undefined && Number.isNaN(correctionLimit)) throw new SynodError(ERROR_CODES.TASK_INVALID, "Task add requires an integer --correction-limit.");
+    return { action, id, directory, json, actor, objective, executor, acceptance, verification, dependsOn, ...(correctionLimit === undefined ? {} : { correctionLimit }) };
   }
-  if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0 || dependsOn.length > 0) {
+  if (action === "override") {
+    if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
+      || dependsOn.length > 0 || revision !== undefined || correctionLimit !== undefined || replacements.length > 0) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task override received an unrelated task option.");
+    }
+    if (!additionalRounds || Number.isNaN(additionalRounds) || !approver || !reference || !reason || evidence.length === 0) {
+      throw new SynodError(ERROR_CODES.TASK_INVALID, "Task override requires --additional-rounds, --approver, --reference, --reason, and --evidence.");
+    }
+    return { action, id, directory, json, actor, additionalRounds, approver, reference, reason, evidence };
+  }
+  if (action === "split") {
+    if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
+      || dependsOn.length > 0 || revision !== undefined || correctionLimit !== undefined || additionalRounds !== undefined
+      || approver !== undefined || reference !== undefined) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task split received an unrelated task option.");
+    }
+    if (replacements.length < 2 || !reason || evidence.length === 0) {
+      throw new SynodError(ERROR_CODES.TASK_INVALID, "Task split requires at least two --replacement values, --reason, and --evidence.");
+    }
+    return { action, id, directory, json, actor, replacements, reason, evidence };
+  }
+  if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0 || dependsOn.length > 0
+    || correctionLimit !== undefined || additionalRounds !== undefined || approver !== undefined || reference !== undefined || replacements.length > 0) {
     throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task transition received a task-definition option.");
   }
   if (!to) throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, "Task transition is missing a target state.");
-  return { action, id, to, directory, json, actor, reason, revision, evidence };
+  return { action: "transition", id, to, directory, json, actor, reason, revision, evidence };
 }

@@ -18,8 +18,11 @@ import {
   heartbeatTaskLease,
   orchestrationStatus,
   recordCheckpoint,
+  recoverTaskLease,
   releaseTaskLease,
   revokeTaskLease,
+  overrideCorrectionPolicy,
+  splitTask,
   transitionTask
 } from "./orchestration.js";
 import type { OrchestrationDependencies } from "./orchestration.js";
@@ -43,13 +46,16 @@ Usage:
   synod bundle export <destination> [--cwd <directory>] [--include-untracked] [--json]
   synod bundle verify <bundle> [--json]
   synod bundle restore <bundle> --cwd <directory> [--json]
-  synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--cwd <directory>] [--json]
+  synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--correction-limit <n>] [--cwd <directory>] [--json]
   synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
+  synod task override <task-id> --additional-rounds <n> --approver <id> --reference <ref> --reason <text> --evidence <ref> [--cwd <directory>] [--json]
+  synod task split <task-id> --replacement <task-id> --replacement <task-id> --reason <text> --evidence <ref> [--cwd <directory>] [--json]
   synod lease acquire <task-id> --owner-thread <thread-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
   synod lease heartbeat <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
   synod lease release <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
   synod lease expire <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --reason <text> [--cwd <directory>] [--json]
   synod lease revoke <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --reason <text> [--cwd <directory>] [--json]
+  synod lease recover <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --decision <resume|reassign|supersede> --reason <text> [--owner-thread <thread-id>] [--cwd <directory>] [--json]
   synod doctor [directory] [--json]
   synod uninstall [directory] [--dry-run] [--force] [--json]
   synod profiles [--json]
@@ -343,7 +349,7 @@ export async function run(
         const data = { task: result.task, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
         if (options.json) output.log(JSON.stringify(successEnvelope("task", { action: "add", ...data }), null, 2));
         else output.log(`Added ${result.task.id} in ${result.task.state} at revision ${result.task.revision}.`);
-      } else {
+      } else if (options.action === "transition") {
         const result = await transitionTask(options, dependencies);
         const data = { task: result.task, evidence: result.evidence, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
         if (options.json) output.log(JSON.stringify(successEnvelope("task", { action: "transition", ...data }), null, 2));
@@ -351,6 +357,16 @@ export async function run(
           output.log(`Transitioned ${result.task.id} to ${result.task.state} at revision ${result.task.revision}.`);
           for (const item of result.evidence) output.log(`Recorded evidence ${item.id}: ${item.kind} @ revision ${item.revision}.`);
         }
+      } else if (options.action === "override") {
+        const result = await overrideCorrectionPolicy(options, dependencies);
+        const data = { task: result.task, override: result.override, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
+        if (options.json) output.log(JSON.stringify(successEnvelope("task", { action: "override", ...data }), null, 2));
+        else output.log(`Added ${result.override.added} correction round(s) to ${result.task.id}; limit ${result.task.correctionPolicy.limit}.`);
+      } else {
+        const result = await splitTask(options, dependencies);
+        const data = { task: result.task, replacements: result.replacements, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
+        if (options.json) output.log(JSON.stringify(successEnvelope("task", { action: "split", ...data }), null, 2));
+        else output.log(`Split ${result.task.id} into ${result.replacements.map(item => item.id).join(", ")}.`);
       }
       return 0;
     }
@@ -366,7 +382,9 @@ export async function run(
             ? await releaseTaskLease(options, dependencies)
             : options.action === "expire"
               ? await expireTaskLease(options, dependencies)
-              : await revokeTaskLease(options, dependencies);
+              : options.action === "revoke"
+                ? await revokeTaskLease(options, dependencies)
+                : await recoverTaskLease(options, dependencies);
       const data = {
         action: options.action,
         task: result.task,

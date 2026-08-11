@@ -14,7 +14,9 @@ import {
   ORCHESTRATION_STATUS_PATH,
   acquireTaskLease,
   addTask,
+  readOrchestration,
   recordCheckpoint,
+  revokeTaskLease,
   transitionTask
 } from "../src/orchestration.js";
 import { CHECKPOINT_SNAPSHOT_PATH } from "../src/checkpoint.js";
@@ -113,6 +115,18 @@ test("handoff derives focus, current evidence, blockers, gates, and legal transi
   await add(directory, "T-BLOCKED");
   await activate(directory, "T-BLOCKED");
   await transitionTask({ directory, id: "T-BLOCKED", to: "BLOCKED", revision: 0, reason: "Awaiting authorization" });
+  await add(directory, "T-RECOVERY");
+  await activate(directory, "T-RECOVERY");
+  const recoveryLease = (await readOrchestration(directory)).state.tasks["T-RECOVERY"]!.lease!;
+  await revokeTaskLease({
+    directory,
+    id: "T-RECOVERY",
+    leaseId: recoveryLease.id,
+    generation: recoveryLease.generation,
+    revision: 0,
+    expectedHeartbeatAt: recoveryLease.heartbeatAt,
+    reason: "worker unavailable"
+  });
   await add(directory, "T-DEPENDENT", ["T-ACTIVE"]);
 
   const canonicalPaths = [
@@ -127,11 +141,12 @@ test("handoff derives focus, current evidence, blockers, gates, and legal transi
 
   assert.equal(handoff.checkpoint.drift.detected, false);
   assert.equal(handoff.recoveryBundle.status, "not-supplied");
-  assert.deepEqual(handoff.focusTaskIds, ["T-ACTIVE", "T-CORRECTION", "T-REVIEW", "T-ACCEPTED", "T-VERIFIED", "T-BLOCKED"]);
+  assert.deepEqual(handoff.focusTaskIds, ["T-ACTIVE", "T-CORRECTION", "T-REVIEW", "T-ACCEPTED", "T-VERIFIED", "T-BLOCKED", "T-RECOVERY"]);
   assert.deepEqual(byId.get("T-CORRECTION")?.evidence.delivery, []);
   assert.deepEqual(byId.get("T-CORRECTION")?.evidence.correction.map(item => item.reference), ["correction:T-CORRECTION:r1"]);
   assert.deepEqual(byId.get("T-CORRECTION")?.evidence.acceptance, []);
   assert.equal(byId.get("T-CORRECTION")?.acceptance.unresolved, true);
+  assert.deepEqual(byId.get("T-CORRECTION")?.correctionPolicy, { limit: 2, used: 1, overrides: [] });
   assert.deepEqual(byId.get("T-REVIEW")?.evidence.acceptance, []);
   assert.deepEqual(byId.get("T-REVIEW")?.evidence.delivery.map(item => item.reference), ["delivery:T-REVIEW:r2"]);
   assert.equal(byId.get("T-REVIEW")?.acceptance.unresolved, true);
@@ -140,6 +155,8 @@ test("handoff derives focus, current evidence, blockers, gates, and legal transi
   assert.deepEqual(byId.get("T-VERIFIED")?.evidence.verification.map(item => item.reference), ["verification:T-VERIFIED:r1"]);
   assert.deepEqual(byId.get("T-BLOCKED")?.legalNextTransitions, ["ACTIVE", "SUPERSEDED"]);
   assert.equal(byId.get("T-BLOCKED")?.blocker, "Awaiting authorization");
+  assert.equal(byId.get("T-RECOVERY")?.recovery?.status, "PENDING");
+  assert.equal(byId.get("T-RECOVERY")?.recovery?.endedLease.ownerThread, "test:T-RECOVERY");
   assert.deepEqual(byId.get("T-DEPENDENT")?.incompleteDependencies, ["T-ACTIVE"]);
   assert.deepEqual(byId.get("T-DEPENDENT")?.legalNextTransitions, ["BLOCKED", "SUPERSEDED"]);
   assert.match(formatHandoff(handoff), /Synod canonical handoff/);
@@ -148,6 +165,7 @@ test("handoff derives focus, current evidence, blockers, gates, and legal transi
   assert.match(formatHandoff(handoff), /Verification commands: verify T-VERIFIED/);
   assert.match(formatHandoff(handoff), /Correction evidence: E-\d{6}=correction:T-CORRECTION:r1/);
   assert.match(formatHandoff(handoff), /Sealed proposal: sha256:[0-9a-f]{64}/);
+  assert.match(formatHandoff(handoff), /Abandoned-owner recovery: PENDING; prior owner test:T-RECOVERY generation 1; proposal not sealed; choices resume, reassign, supersede/);
   assert.match(formatHandoff(handoff), /Recovery bundle: not supplied/);
 
   const after = await Promise.all(canonicalPaths.map(relativePath => readFile(path.join(directory, relativePath))));
