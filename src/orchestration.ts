@@ -2400,10 +2400,21 @@ function proposalReservesPaths(task: OrchestrationTask): boolean {
     && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.blockedFrom);
 }
 
+function proposalIsForeignToLease(
+  task: OrchestrationTask,
+  baselineLastEventSequence: number
+): boolean {
+  if (!task.proposal) return false;
+  if (proposalReservesPaths(task)) return true;
+  return ["DONE", "SUPERSEDED"].includes(task.state)
+    && task.proposal.sealedAfterEvent.sequence >= baselineLastEventSequence;
+}
+
 function classifyLeaseDelta(
   state: OrchestrationState,
   task: OrchestrationTask,
   lease: Pick<TaskLease, "id" | "generation" | "scopes">,
+  baselineLastEventSequence: number,
   baseline: CheckpointSnapshot,
   current: CheckpointSnapshot
 ): ClassifiedLeaseDelta {
@@ -2423,7 +2434,7 @@ function classifyLeaseDelta(
       : []
   );
   const sealedForeignPaths = new Set(taskList(state).flatMap(other =>
-    other.id !== task.id && proposalReservesPaths(other) && other.proposal
+    other.id !== task.id && proposalIsForeignToLease(other, baselineLastEventSequence) && other.proposal
       ? other.proposal.ownedPaths.map(candidate => candidate.normalize("NFC").toLowerCase())
       : []
   ));
@@ -2505,7 +2516,14 @@ async function sealTaskProposal(
 ): Promise<{ proposal: TaskProposalReference; foreign: ClassifiedLeaseDelta["foreign"] }> {
   await validateLeaseScopeFilesystemPaths(targetDirectory, lease.scopes);
   const baseline = leaseBaselineFor(task, lease, context.leaseBaselines);
-  const classified = classifyLeaseDelta(state, task, lease, baseline.snapshot, context.snapshot);
+  const classified = classifyLeaseDelta(
+    state,
+    task,
+    lease,
+    lease.baseline.lastEvent.sequence,
+    baseline.snapshot,
+    context.snapshot
+  );
   rejectUnacceptableLeaseDrift(task, classified);
   const snapshot = proposalSnapshot(context.snapshot, classified.owned, baseline.capturedAt);
   const ownedPaths = [...new Set(classified.owned.flatMap(deltaPaths))].sort(compareCheckpointPaths);
@@ -2577,6 +2595,8 @@ async function sealTaskProposal(
       snapshotHash: snapshot.contentHash,
       sealedWorktreeFingerprint: context.snapshot.worktreeFingerprint,
       sealedAt: context.timestamp,
+      leaseBaselineEvent: lease.baseline.lastEvent,
+      sealedAfterEvent: state.lastEvent,
       status: "SEALED"
     },
     foreign: classified.foreign
@@ -2609,7 +2629,7 @@ async function verifyTaskProposalForAcceptance(
     id: proposal.leaseId,
     generation: proposal.generation,
     scopes: proposal.scopes
-  }, baseline.snapshot, context.snapshot);
+  }, proposal.leaseBaselineEvent.sequence, baseline.snapshot, context.snapshot);
   rejectUnacceptableLeaseDrift(task, classified);
   const ownedPaths = [...new Set(classified.owned.flatMap(deltaPaths))].sort(compareCheckpointPaths);
   const snapshot = proposalSnapshot(context.snapshot, classified.owned, baseline.capturedAt);

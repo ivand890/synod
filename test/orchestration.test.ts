@@ -394,6 +394,38 @@ test("terminal proposals do not reserve paths from later task deliveries", async
   assert.deepEqual(delivered.task.proposal?.excludedForeignPaths, []);
 });
 
+test("terminal proposals remain attributable to leases with older baselines", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-A", objective: "Concurrent task A" });
+  await addDefaultTask(directory, { id: "T-B", objective: "Concurrent task B" });
+  await transitionTask({ directory, id: "T-A", to: "READY", revision: 0 });
+  await transitionTask({ directory, id: "T-B", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-A", ownerThread: "test:a", write: ["src/a.ts"] });
+  await transitionTask({ directory, id: "T-A", to: "ACTIVE", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-B", ownerThread: "test:b", write: ["src/b.ts"] });
+  await transitionTask({ directory, id: "T-B", to: "ACTIVE", revision: 0 });
+
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/b.ts"), "b\n");
+  await transitionTask({ directory, id: "T-B", to: "REVIEW", revision: 1, evidence: ["delivery:b"] });
+  await transitionTask({ directory, id: "T-B", to: "ACCEPTED", revision: 1, evidence: ["acceptance:b"] });
+  await transitionTask({ directory, id: "T-B", to: "VERIFIED", revision: 1, evidence: ["verification:b"] });
+  await transitionTask({ directory, id: "T-B", to: "DONE", revision: 1 });
+
+  await writeFile(path.join(directory, "src/a.ts"), "a\n");
+  const delivered = await transitionTask({
+    directory,
+    id: "T-A",
+    to: "REVIEW",
+    revision: 1,
+    evidence: ["delivery:a"]
+  });
+
+  assert.deepEqual(delivered.task.proposal?.ownedPaths, ["src/a.ts"]);
+  assert.deepEqual(delivered.task.proposal?.excludedForeignPaths, ["src/b.ts"]);
+});
+
 test("rename delivery requires ownership of both source and destination", async () => {
   const directory = await temporaryProject();
   await mkdir(path.join(directory, "src"), { recursive: true });

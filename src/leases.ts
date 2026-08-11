@@ -75,6 +75,16 @@ export interface TaskProposalReference {
   snapshotHash: string;
   sealedWorktreeFingerprint: string;
   sealedAt: string;
+  leaseBaselineEvent: {
+    sequence: number;
+    id: string;
+    hash: string;
+  };
+  sealedAfterEvent: {
+    sequence: number;
+    id: string;
+    hash: string;
+  };
   status: "SEALED";
 }
 
@@ -316,6 +326,15 @@ export function isTaskProposalReference(value: unknown): value is TaskProposalRe
     && isHash(value.snapshotHash)
     && isHash(value.sealedWorktreeFingerprint)
     && validIsoTimestamp(value.sealedAt)
+    && isRecord(value.leaseBaselineEvent)
+    && isNonNegativeInteger(value.leaseBaselineEvent.sequence)
+    && typeof value.leaseBaselineEvent.id === "string"
+    && typeof value.leaseBaselineEvent.hash === "string"
+    && isRecord(value.sealedAfterEvent)
+    && isNonNegativeInteger(value.sealedAfterEvent.sequence)
+    && typeof value.sealedAfterEvent.id === "string"
+    && typeof value.sealedAfterEvent.hash === "string"
+    && value.sealedAfterEvent.sequence >= value.leaseBaselineEvent.sequence
     && value.status === "SEALED";
 }
 
