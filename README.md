@@ -2,6 +2,12 @@
 
 Synod installs a persistent, reviewed advisor loop for Codex projects. The selected model profile assigns supervision, atomic implementation, exploration, review, verification, and mechanical work while keeping the primary agent responsible for integration and final evidence.
 
+## Interactive cycle map
+
+Open [`docs/synod/synod-cycle.html`](docs/synod/synod-cycle.html) in a browser to play through a complete Synod cycle. The visualizer follows the repository's real concepts — task state transitions, role-specialized forks, writer leases, scoped proposals, correction rounds, acceptance, verification, checkpoints, and handoffs — and includes a toggle for the bounded correction path plus explicit recovery/worktree branches.
+
+The token bars are an educational scale for showing how a fresh agent receives a bounded context packet and how evidence accumulates. They are not a runtime token counter; the actual context window depends on the Codex surface and selected model profile.
+
 ## Install
 
 The default and supported bootstrap path is `pnpm dlx`:
