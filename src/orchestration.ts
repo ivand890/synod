@@ -2065,7 +2065,7 @@ async function commitMutation<Result extends Record<string, unknown>>(
   targetDirectory: string,
   type: string,
   metadata: EventMetadata,
-  reducer: (state: OrchestrationState, context: MutationContext) => MutationResult<Result>,
+  reducer: (state: OrchestrationState, context: MutationContext) => MutationResult<Result> | Promise<MutationResult<Result>>,
   dependencies: OrchestrationDependencies = {}
 ): Promise<{ state: OrchestrationState; event: OrchestrationEvent } & Result> {
   const release = await acquireLock(targetDirectory);
@@ -2076,7 +2076,7 @@ async function commitMutation<Result extends Record<string, unknown>>(
     const captured = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
     const checkpoint = captured.checkpoint;
     const draft = structuredClone(current);
-    const reducerResult = reducer(draft, {
+    const reducerResult = await reducer(draft, {
       timestamp,
       checkpoint,
       snapshot: captured.snapshot,
@@ -2299,6 +2299,19 @@ function retainedLeaseBaselines(
   return retained.baselines.length === leaseBaselines.baselines.length ? undefined : retained;
 }
 
+async function validateLeaseScopeFilesystemPaths(targetDirectory: string, scopes: TaskLease["scopes"]): Promise<void> {
+  for (const scope of scopes) {
+    const absolutePath = resolveProjectPath(targetDirectory, scope.path);
+    const unsafe = await unsafeAncestor(targetDirectory, absolutePath);
+    const type = await pathType(absolutePath);
+    if (unsafe || type === "symlink") {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease scope traverses a symbolic link or non-directory ancestor: ${scope.path}`, {
+        details: { path: scope.path, ...(unsafe ? { unsafeAncestor: unsafe } : { type }) }
+      });
+    }
+  }
+}
+
 function requireLeaseIdentity(
   task: OrchestrationTask,
   {
@@ -2387,7 +2400,8 @@ export async function acquireTaskLease({
   }
   const scopes = normalizeLeaseScopes({ read, write });
   const targetDirectory = path.resolve(directory);
-  return commitMutation(targetDirectory, "lease.acquired", { actor, taskId }, (state, context) => {
+  return commitMutation(targetDirectory, "lease.acquired", { actor, taskId }, async (state, context) => {
+    await validateLeaseScopeFilesystemPaths(targetDirectory, scopes);
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
     const eligible = task.state === "READY"

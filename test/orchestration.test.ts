@@ -457,6 +457,28 @@ test("overlapping writer acquisition races leave exactly one canonical owner", a
   );
 });
 
+test("writer acquisition rejects scopes reached through symlink aliases", async () => {
+  const directory = await temporaryProject();
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await mkdir(path.join(directory, "src"));
+  await symlink("src", path.join(directory, "alias"), "dir");
+
+  await assert.rejects(
+    acquireTaskLease({
+      directory,
+      id: "T-001",
+      ownerThread: "thread:alias",
+      write: ["alias/worker.ts"]
+    }),
+    error => error instanceof SynodError
+      && error.code === ERROR_CODES.LEASE_INVALID
+      && isRecord(error.details)
+      && error.details.unsafeAncestor === "alias"
+  );
+  assert.equal((await readOrchestration(directory)).state.tasks["T-001"]?.lease, undefined);
+});
+
 test("expiry and revocation block active work while fencing stale owners", async () => {
   const directory = await temporaryProject();
   await addDefaultTask(directory);

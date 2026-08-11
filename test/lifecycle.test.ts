@@ -560,6 +560,14 @@ test("upgrade preserves the schema-1 event prefix and fences migrated in-flight 
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   await unlink(ledgerPath);
 
+  await writeFile(ledgerPath, "user-owned lease notes\n", "utf8");
+  const unmanagedLedger = await upgradeProject({ directory, profile: "portable", dryRun: true }, {
+    clock: () => "2026-08-10T13:00:00.000Z"
+  });
+  assert.ok(unmanagedLedger.conflicts.includes(".synod/lease-baselines.json"));
+  assert.equal(await readFile(ledgerPath, "utf8"), "user-owned lease notes\n");
+  await unlink(ledgerPath);
+
   const beforeDryRun = await Promise.all([
     readFile(statePath, "utf8"),
     readFile(eventsPath, "utf8"),

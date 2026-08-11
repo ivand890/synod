@@ -641,7 +641,14 @@ export async function upgradeProject(
       state = { path: relativePath, conflict: true };
     } else if (generatedRecordFiles?.has(relativePath)) {
       ownership = "record";
-      if (inspected.type === "file" && normalizeText(inspected.content) === normalizeText(templateContent)) {
+      if (
+        !old
+        && inspected.type === "file"
+        && normalizeText(inspected.content) !== normalizeText(templateContent)
+        && !force
+      ) {
+        state = { path: relativePath, conflict: true };
+      } else if (inspected.type === "file" && normalizeText(inspected.content) === normalizeText(templateContent)) {
         state = { path: relativePath, action: "unchanged" };
       } else {
         state = { path: relativePath, action: inspected.type === "missing" ? "create" : "update" };
