@@ -109,9 +109,14 @@ function respondingChild(options?: { exitOnTerm?: boolean; exitOnKill?: boolean 
 
 test("spawns, initializes, probes, and resolves App Server responses", async () => {
   const child = respondingChild();
-  const calls: Array<{ command: string; args: string[]; options: { stdio: ["pipe", "pipe", "pipe"] } }> = [];
+  const calls: Array<{
+    command: string;
+    args: string[];
+    options: { stdio: ["pipe", "pipe", "pipe"]; cwd?: string };
+  }> = [];
   const client = new CodexAppServerClient({
     codexBin: "custom-codex",
+    cwd: "/tmp/project",
     spawnProcess(command, args, options) {
       calls.push({ command, args, options });
       return child;
@@ -128,7 +133,7 @@ test("spawns, initializes, probes, and resolves App Server responses", async () 
   assert.deepEqual(calls, [{
     command: "custom-codex",
     args: ["app-server"],
-    options: { stdio: ["pipe", "pipe", "pipe"] }
+    options: { stdio: ["pipe", "pipe", "pipe"], cwd: "/tmp/project" }
   }]);
   assert.deepEqual(response, { value: 42 });
   assert.deepEqual(models.map(model => model.id), ["gpt-test", "gpt-second"]);
@@ -266,9 +271,13 @@ test("delivers server notifications and connection failures to bounded subscribe
       ? { type: event.type, method: event.method }
       : { type: event.type, code: event.error.code });
   });
+  const unsubscribeThrowing = client.subscribeEvents(() => {
+    throw new Error("listener failed");
+  });
 
   child.notify("thread/status/changed", { threadId: "thread:test", status: { type: "idle" } });
   await new Promise(resolve => setImmediate(resolve));
+  unsubscribeThrowing();
   child.exit(17, null);
   await new Promise(resolve => setImmediate(resolve));
   unsubscribe();
@@ -278,6 +287,7 @@ test("delivers server notifications and connection failures to bounded subscribe
     { type: "notification", method: "thread/status/changed" },
     { type: "failure", code: ERROR_CODES.APP_SERVER_EXITED }
   ]);
+  assert.ok(client.getWarnings().some(item => item.code === WARNING_CODES.APP_SERVER_EVENT_LISTENER_FAILED));
 });
 
 test("cleanup falls back from bounded SIGTERM to SIGKILL", async () => {

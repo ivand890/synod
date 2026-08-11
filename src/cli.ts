@@ -119,7 +119,7 @@ export interface CliDependencies extends LifecycleDependencies, OrchestrationDep
   clientFactory?: (options?: { codexBin: string }) => UsageClient;
   doctorClientFactory?: NonNullable<DoctorDependencies["clientFactory"]>;
   doctorRuntimeResolver?: NonNullable<DoctorDependencies["runtimeResolver"]>;
-  waitClientFactory?: () => WaitClient;
+  waitClientFactory?: (options?: { cwd?: string }) => WaitClient;
   waitAdapterFactory?: () => ThreadStatusAdapter;
 }
 

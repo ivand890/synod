@@ -104,8 +104,11 @@ test("the App Server adapter preserves a notification that races thread/read", a
     getDiagnostics: () => ({ fake: true, closed })
   };
 
-  const report = await waitForThreads({ threadIds: ["thread:a"], timeoutMs: 100 }, {
-    clientFactory: () => client
+  const report = await waitForThreads({ threadIds: ["thread:a"], cwd: "/tmp/project", timeoutMs: 100 }, {
+    clientFactory: options => {
+      assert.deepEqual(options, { cwd: "/tmp/project" });
+      return client;
+    }
   });
 
   assert.equal(report.mode, "notification");
@@ -122,6 +125,29 @@ test("a notification transport failure rejects a blocked wait and cleans up", as
   await assert.rejects(
     waitForThreads({ threadIds: ["thread:a"], timeoutMs: 100 }, { adapterFactory: () => adapter }),
     /transport lost/
+  );
+  assert.equal(adapter.unsubscribed, 1);
+  assert.equal(adapter.closed, 1);
+});
+
+test("cleanup failure does not replace the original wait failure", async () => {
+  const adapter = new FakeAdapter({ notification: true, reads: [{ statuses: [active("thread:a")] }] });
+  adapter.subscribe = (listener, onFailure) => {
+    adapter.listener = listener;
+    adapter.failure = onFailure;
+    return () => {
+      adapter.unsubscribed += 1;
+      throw new Error("unsubscribe failed");
+    };
+  };
+  adapter.onRead = current => setImmediate(() => current.failure?.(new Error("transport lost")));
+  adapter.close = async () => { adapter.closed += 1; throw new Error("close failed"); };
+
+  await assert.rejects(
+    waitForThreads({ threadIds: ["thread:a"], timeoutMs: 100 }, { adapterFactory: () => adapter }),
+    error => error instanceof Error
+      && error.message === "transport lost"
+      && Array.isArray((error as Error & { warnings?: unknown[] }).warnings)
   );
   assert.equal(adapter.unsubscribed, 1);
   assert.equal(adapter.closed, 1);
@@ -181,6 +207,36 @@ test("the overall deadline bounds an initial status read", async () => {
   assert.equal(closed, 1);
 });
 
+test("cleanup itself has an independent bound", async () => {
+  const adapter = new FakeAdapter({ reads: [{ statuses: [idle("thread:a")] }] });
+  adapter.close = () => new Promise(() => {});
+
+  await assert.rejects(
+    waitForThreads({ threadIds: ["thread:a"], timeoutMs: 100 }, {
+      adapterFactory: () => adapter,
+      cleanupTimeoutMs: 5
+    }),
+    error => error instanceof Error && error.message.includes("cleanup did not finish")
+  );
+});
+
+test("an abort during a blocked notification wait stops the wait", async () => {
+  const controller = new AbortController();
+  const adapter = new FakeAdapter({ notification: true, reads: [{ statuses: [active("thread:a")] }] });
+  adapter.onRead = () => setImmediate(() => controller.abort());
+
+  const report = await waitForThreads({
+    threadIds: ["thread:a"],
+    timeoutMs: 1_000,
+    signal: controller.signal
+  }, { adapterFactory: () => adapter });
+
+  assert.equal(report.aborted, true);
+  assert.equal(report.incomplete, true);
+  assert.equal(adapter.unsubscribed, 1);
+  assert.equal(adapter.closed, 1);
+});
+
 test("timeout, abort, and approval-needed exits clean up the adapter", async () => {
   const timeoutAdapter = new FakeAdapter({ notification: true, reads: [{ statuses: [active("thread:a")] }] });
   const timedOut = await waitForThreads({ threadIds: ["thread:a"], timeoutMs: 5 }, { adapterFactory: () => timeoutAdapter });
@@ -204,6 +260,17 @@ test("timeout, abort, and approval-needed exits clean up the adapter", async () 
   }] });
   const approval = await waitForThreads({ threadIds: ["thread:a"], timeoutMs: 100 }, { adapterFactory: () => approvalAdapter });
   assert.equal(approval.approvalNeeded, true);
+  assert.equal(approval.userInputNeeded, false);
   assert.equal(approval.incomplete, true);
   assert.equal(approval.timedOut, false);
+
+  const inputAdapter = new FakeAdapter({ notification: true, reads: [{
+    statuses: [{ threadId: "thread:a", status: { type: "active", activeFlags: ["waitingOnUserInput"] } }]
+  }] });
+  const input = await waitForThreads({ threadIds: ["thread:a"], timeoutMs: 100 }, {
+    adapterFactory: () => inputAdapter
+  });
+  assert.equal(input.approvalNeeded, false);
+  assert.equal(input.userInputNeeded, true);
+  assert.equal(input.incomplete, true);
 });

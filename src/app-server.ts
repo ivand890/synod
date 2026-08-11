@@ -33,7 +33,7 @@ export interface AppServerChild {
 export type SpawnAppServer = (
   command: string,
   args: string[],
-  options: { stdio: ["pipe", "pipe", "pipe"] }
+  options: { stdio: ["pipe", "pipe", "pipe"]; cwd?: string }
 ) => AppServerChild;
 
 export interface AppServerCleanup {
@@ -131,6 +131,7 @@ export class CodexAppServerClient {
   private readonly requestTimeoutMs: number;
   private readonly shutdownTimeoutMs: number;
   private readonly forceKillTimeoutMs: number;
+  private readonly cwd: string | undefined;
   private readonly spawnProcess: SpawnAppServer;
   private nextId: number;
   private readonly pending: Map<number, PendingRequest>;
@@ -142,15 +143,18 @@ export class CodexAppServerClient {
   private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | undefined;
   private fatalError: SynodError | undefined;
   private readonly eventListeners: Set<(event: AppServerEvent) => void>;
+  private eventListenerFailureWarned: boolean;
 
   constructor({
     codexBin = process.env.SYNOD_CODEX_BIN || "codex",
+    cwd,
     requestTimeoutMs = DEFAULT_TIMEOUT_MS,
     shutdownTimeoutMs = DEFAULT_SHUTDOWN_TIMEOUT_MS,
     forceKillTimeoutMs = DEFAULT_FORCE_KILL_TIMEOUT_MS,
     spawnProcess = (command, args, options) => spawn(command, args, options)
   }: {
     codexBin?: string;
+    cwd?: string;
     requestTimeoutMs?: number;
     shutdownTimeoutMs?: number;
     forceKillTimeoutMs?: number;
@@ -160,12 +164,14 @@ export class CodexAppServerClient {
     this.requestTimeoutMs = requestTimeoutMs;
     this.shutdownTimeoutMs = shutdownTimeoutMs;
     this.forceKillTimeoutMs = forceKillTimeoutMs;
+    this.cwd = cwd;
     this.spawnProcess = spawnProcess;
     this.nextId = 1;
     this.pending = new Map();
     this.stderr = "";
     this.warnings = [];
     this.eventListeners = new Set();
+    this.eventListenerFailureWarned = false;
     this.diagnostics = {
       codexExecutable: this.codexBin,
       codexHome: undefined,
@@ -190,7 +196,8 @@ export class CodexAppServerClient {
 
     try {
       this.child = this.spawnProcess(this.codexBin, ["app-server"], {
-        stdio: ["pipe", "pipe", "pipe"]
+        stdio: ["pipe", "pipe", "pipe"],
+        ...(this.cwd ? { cwd: this.cwd } : {})
       });
     } catch (error) {
       throw new SynodError(
@@ -212,6 +219,7 @@ export class CodexAppServerClient {
 
     this.exitInfo = undefined;
     this.fatalError = undefined;
+    this.eventListenerFailureWarned = false;
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: Buffer | string) => {
       this.stderr = `${this.stderr}${chunk}`.slice(-4_096);
@@ -416,15 +424,26 @@ export class CodexAppServerClient {
   }
 
   emitEvent(event: AppServerEvent): void {
-    for (const listener of this.eventListeners) {
-      try { listener(event); } catch {}
+    for (const listener of this.eventListeners) this.emitToListener(listener, event);
+  }
+
+  private emitToListener(listener: (event: AppServerEvent) => void, event: AppServerEvent): void {
+    try {
+      listener(event);
+    } catch (error) {
+      if (this.eventListenerFailureWarned) return;
+      this.eventListenerFailureWarned = true;
+      this.warnings.push(warning(
+        WARNING_CODES.APP_SERVER_EVENT_LISTENER_FAILED,
+        `An App Server event listener threw: ${errorMessage(error)}`
+      ));
     }
   }
 
   subscribeEvents(listener: (event: AppServerEvent) => void): () => void {
     this.eventListeners.add(listener);
     if (this.fatalError) queueMicrotask(() => {
-      if (this.eventListeners.has(listener)) listener({ type: "failure", error: this.fatalError! });
+      if (this.eventListeners.has(listener)) this.emitToListener(listener, { type: "failure", error: this.fatalError! });
     });
     return () => this.eventListeners.delete(listener);
   }

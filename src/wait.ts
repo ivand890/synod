@@ -1,9 +1,10 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { CodexAppServerClient } from "./app-server.js";
 import type { AppServerDiagnostics, AppServerEvent } from "./app-server.js";
+import { WARNING_CODES, warning } from "./contracts.js";
 import type { Warning } from "./contracts.js";
-import { ERROR_CODES, SynodError } from "./errors.js";
-import { isRecord } from "./validation.js";
+import { ERROR_CODES, SynodError, asSynodError } from "./errors.js";
+import { errorMessage, isRecord } from "./validation.js";
 
 export type ThreadStatus =
   | { type: "notLoaded" }
@@ -32,6 +33,7 @@ export interface ThreadStatusAdapter {
 
 export interface WaitForThreadsOptions {
   threadIds: string[];
+  cwd?: string;
   timeoutMs?: number;
   pollIntervalMs?: number;
   signal?: AbortSignal;
@@ -47,6 +49,7 @@ export interface WaitReport {
   aborted: boolean;
   incomplete: boolean;
   approvalNeeded: boolean;
+  userInputNeeded: boolean;
   statuses: ObservedThreadStatus[];
   warnings: Warning[];
   diagnostics: AppServerDiagnostics | Record<string, unknown>;
@@ -65,13 +68,15 @@ export interface WaitClient {
 
 export interface WaitDependencies {
   adapterFactory?: () => ThreadStatusAdapter;
-  clientFactory?: () => WaitClient;
+  clientFactory?: (options?: { cwd?: string }) => WaitClient;
   clock?: () => number;
+  cleanupTimeoutMs?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const MAX_POLL_INTERVAL_MS = 5_000;
+const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000;
 const ACTIVE_FLAGS = new Set(["waitingOnApproval", "waitingOnUserInput"]);
 
 export function parseThreadStatus(value: unknown): ThreadStatus | undefined {
@@ -132,12 +137,29 @@ export function appServerThreadStatusAdapter(client: WaitClient): ThreadStatusAd
   };
 }
 
-function completion(statuses: ObservedThreadStatus[]): { done: boolean; approvalNeeded: boolean; incomplete: boolean } {
+function completion(statuses: ObservedThreadStatus[]): {
+  done: boolean;
+  approvalNeeded: boolean;
+  userInputNeeded: boolean;
+  incomplete: boolean;
+} {
   const approvalNeeded = statuses.some(item => item.status.type === "active"
-    && item.status.activeFlags.some(flag => flag === "waitingOnApproval" || flag === "waitingOnUserInput"));
+    && item.status.activeFlags.includes("waitingOnApproval"));
+  const userInputNeeded = statuses.some(item => item.status.type === "active"
+    && item.status.activeFlags.includes("waitingOnUserInput"));
   const terminal = statuses.every(item => item.status.type === "idle" || item.status.type === "systemError");
   const systemError = statuses.some(item => item.status.type === "systemError");
-  return { done: approvalNeeded || terminal, approvalNeeded, incomplete: approvalNeeded || systemError || !terminal };
+  const attentionNeeded = approvalNeeded || userInputNeeded;
+  return {
+    done: attentionNeeded || terminal,
+    approvalNeeded,
+    userInputNeeded,
+    incomplete: attentionNeeded || systemError || !terminal
+  };
+}
+
+function projectStatuses(ids: string[], byId: Map<string, ThreadStatus>): ObservedThreadStatus[] {
+  return ids.map(threadId => ({ threadId, status: byId.get(threadId) || { type: "notLoaded" as const } }));
 }
 
 function boundedOperation<T>(
@@ -283,17 +305,23 @@ function waitForCursorSignal(
 
 export async function waitForThreads({
   threadIds,
+  cwd,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   signal
 }: WaitForThreadsOptions, dependencies: WaitDependencies = {}): Promise<WaitReport> {
+  const cleanupTimeoutMs = dependencies.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS;
   const ids = [...new Set(threadIds.map(value => String(value).trim()).filter(Boolean))];
   if (ids.length === 0 || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0
-    || !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs <= 0 || pollIntervalMs > MAX_POLL_INTERVAL_MS) {
+    || !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs <= 0 || pollIntervalMs > MAX_POLL_INTERVAL_MS
+    || !Number.isSafeInteger(cleanupTimeoutMs) || cleanupTimeoutMs <= 0) {
     throw new SynodError(ERROR_CODES.WAIT_INVALID, "Wait requires thread IDs, a positive timeout, and a poll interval of at most 5000ms.");
   }
   const adapter = dependencies.adapterFactory?.()
-    || appServerThreadStatusAdapter(dependencies.clientFactory?.() || new CodexAppServerClient());
+    || appServerThreadStatusAdapter(
+      dependencies.clientFactory?.(cwd ? { cwd } : undefined)
+      || new CodexAppServerClient(cwd ? { cwd } : {})
+    );
   const now = dependencies.clock || (() => Date.now());
   const startedAt = now();
   const deadline = startedAt + timeoutMs;
@@ -308,6 +336,8 @@ export async function waitForThreads({
   let notificationWake: (() => void) | undefined;
   const byId = new Map<string, ThreadStatus>();
   let report: WaitReport | undefined;
+  let failure: ReturnType<typeof asSynodError> | undefined;
+  const cleanupWarnings: Warning[] = [];
 
   try {
     const startOutcome = await boundedOperation(() => adapter.start(), deadline - now(), signal);
@@ -344,7 +374,7 @@ export async function waitForThreads({
         if (notificationFailure) throw notificationFailure;
 
         while (true) {
-          const statuses = ids.map(threadId => ({ threadId, status: byId.get(threadId) || { type: "notLoaded" as const } }));
+          const statuses = projectStatuses(ids, byId);
           if (completion(statuses).done) break;
           const remaining = deadline - now();
           if (remaining <= 0) { timedOut = true; break; }
@@ -393,7 +423,7 @@ export async function waitForThreads({
       }
     }
 
-    const statuses = ids.map(threadId => ({ threadId, status: byId.get(threadId) || { type: "notLoaded" as const } }));
+    const statuses = projectStatuses(ids, byId);
     const final = completion(statuses);
     report = {
       mode,
@@ -405,18 +435,61 @@ export async function waitForThreads({
       aborted,
       incomplete: timedOut || aborted || final.incomplete,
       approvalNeeded: final.approvalNeeded,
+      userInputNeeded: final.userInputNeeded,
       statuses,
       warnings: [],
       diagnostics: {}
     };
+  } catch (error) {
+    failure = asSynodError(error);
   } finally {
-    unsubscribe();
-    await adapter.close();
+    try {
+      unsubscribe();
+    } catch (error) {
+      const cleanupFailure = new SynodError(
+        ERROR_CODES.WAIT_CLEANUP_FAILED,
+        `Wait listener cleanup failed: ${errorMessage(error)}`,
+        { cause: error }
+      );
+      cleanupWarnings.push(warning(WARNING_CODES.WAIT_CLEANUP_FAILED, cleanupFailure.message));
+      failure ||= cleanupFailure;
+    }
+    try {
+      const closeOutcome = await boundedOperation(() => adapter.close(), cleanupTimeoutMs);
+      if (closeOutcome.outcome === "timeout") {
+        const cleanupFailure = new SynodError(
+          ERROR_CODES.WAIT_CLEANUP_FAILED,
+          `Wait cleanup did not finish within ${cleanupTimeoutMs}ms.`,
+          { details: { cleanupTimeoutMs } }
+        );
+        cleanupWarnings.push(warning(
+          WARNING_CODES.WAIT_CLEANUP_FAILED,
+          cleanupFailure.message,
+          cleanupFailure.details
+        ));
+        failure ||= cleanupFailure;
+      }
+    } catch (error) {
+      const cleanupFailure = new SynodError(
+        ERROR_CODES.WAIT_CLEANUP_FAILED,
+        `Wait cleanup failed: ${errorMessage(error)}`,
+        { cause: error }
+      );
+      cleanupWarnings.push(warning(WARNING_CODES.WAIT_CLEANUP_FAILED, cleanupFailure.message));
+      failure ||= cleanupFailure;
+    }
+  }
+  const warnings = [...(adapter.getWarnings?.() || []), ...cleanupWarnings];
+  const diagnostics = adapter.getDiagnostics?.() || {};
+  if (failure) {
+    failure.warnings = warnings;
+    failure.diagnostics = diagnostics;
+    throw failure;
   }
   return {
     ...report!,
-    warnings: adapter.getWarnings?.() || [],
-    diagnostics: adapter.getDiagnostics?.() || {}
+    warnings,
+    diagnostics
   };
 }
 
@@ -424,7 +497,7 @@ export function formatWaitReport(report: WaitReport): string {
   const lines = [
     `Synod wait: ${report.incomplete ? "attention required" : "complete"}`,
     `Mode: ${report.mode}; wakes ${report.wakeCount}; fallback polls ${report.fallbackPollCount}; elapsed ${report.elapsedMs}ms`,
-    `Timed out: ${report.timedOut ? "yes" : "no"}; aborted: ${report.aborted ? "yes" : "no"}; approval needed: ${report.approvalNeeded ? "yes" : "no"}`
+    `Timed out: ${report.timedOut ? "yes" : "no"}; aborted: ${report.aborted ? "yes" : "no"}; approval needed: ${report.approvalNeeded ? "yes" : "no"}; user input needed: ${report.userInputNeeded ? "yes" : "no"}`
   ];
   for (const item of report.statuses) {
     const flags = item.status.type === "active" && item.status.activeFlags.length > 0

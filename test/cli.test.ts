@@ -586,6 +586,35 @@ test("wait command exposes bounded mode and final thread status through JSON", a
   assert.equal(envelope.diagnostics.closed, 1);
 });
 
+test("wait command propagates cwd and returns failure for an incomplete result", async () => {
+  const { messages, output } = capturedOutput();
+  const status = await run([
+    "wait",
+    "--thread", "thread:one",
+    "--cwd", "/tmp/project",
+    "--json"
+  ], output, {
+    waitClientFactory: options => {
+      assert.deepEqual(options, { cwd: "/tmp/project" });
+      return {
+        async start() {},
+        async request() {
+          return { thread: { id: "thread:one", status: { type: "systemError" } } };
+        },
+        async close() {},
+        supportsThreadStatusNotifications: () => false
+      };
+    }
+  });
+  const envelope = JSON.parse(takeMessage(messages));
+
+  assert.equal(status, 1);
+  assert.equal(envelope.command, "wait");
+  assert.equal(envelope.data.incomplete, true);
+  assert.equal(envelope.data.approvalNeeded, false);
+  assert.equal(envelope.data.userInputNeeded, false);
+});
+
 test("status explain returns the path delta inside checkpoint-drift JSON", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-delta-json-test-"));
   const { messages, output } = capturedOutput();
