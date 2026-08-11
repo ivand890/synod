@@ -1051,6 +1051,19 @@ test("simultaneous abandoned-owner recovery has one canonical winner", async () 
     expectedHeartbeatAt: acquired.lease.heartbeatAt,
     reason: "worker disappeared"
   });
+  await addDefaultTask(directory, { id: "T-OVERLAP", objective: "Attempt overlapping ownership" });
+  await transitionTask({ directory, id: "T-OVERLAP", to: "READY", revision: 0 });
+  const beforeOverlap = await readOrchestration(directory);
+  await assert.rejects(
+    acquireTaskLease({
+      directory,
+      id: "T-OVERLAP",
+      ownerThread: "thread:overlap",
+      write: ["src/work.ts"]
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_CONFLICT
+  );
+  assert.equal((await readOrchestration(directory)).state.lastEvent.sequence, beforeOverlap.state.lastEvent.sequence);
   await addDefaultTask(directory, { id: "T-UNRELATED", objective: "Acquire an unrelated lease" });
   await transitionTask({ directory, id: "T-UNRELATED", to: "READY", revision: 0 });
   await acquireTaskLease({

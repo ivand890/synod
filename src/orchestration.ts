@@ -3162,12 +3162,15 @@ export async function acquireTaskLease({
       const leaseCollisions = other.lease
         ? scopes.filter(scope => other.lease?.scopes.some(existing => leaseScopesOverlap(scope, existing)))
         : [];
+      const recoveryCollisions = other.id !== taskId && other.recovery?.status === "PENDING"
+        ? scopes.filter(scope => other.recovery?.endedLease.scopes.some(existing => leaseScopesOverlap(scope, existing)))
+        : [];
       const proposalCollisions = other.id !== taskId && proposalReservesPaths(other) && other.proposal
         ? scopes.filter(scope => scope.access === "write" && other.proposal?.ownedPaths.some(candidate =>
           leaseScopeCoversPath(scope, candidate)
         ))
         : [];
-      const collisions = [...leaseCollisions, ...proposalCollisions];
+      const collisions = [...leaseCollisions, ...recoveryCollisions, ...proposalCollisions];
       if (collisions.length > 0) {
         throw new SynodError(ERROR_CODES.LEASE_CONFLICT, `Task ${taskId} write scope overlaps task ${other.id}.`, {
           details: { taskId, conflictingTaskId: other.id, paths: collisions.map(scope => scope.path) }
@@ -3473,6 +3476,26 @@ export async function recoverTaskLease({
       throw new SynodError(ERROR_CODES.LEASE_INVALID, "Reassignment requires a different --owner-thread.", {
         details: { taskId, priorOwnerThread: ended.ownerThread }
       });
+    }
+    for (const other of taskList(state)) {
+      if (other.id === taskId) continue;
+      const leaseCollisions = other.lease
+        ? ended.scopes.filter(scope => other.lease?.scopes.some(existing => leaseScopesOverlap(scope, existing)))
+        : [];
+      const recoveryCollisions = other.recovery?.status === "PENDING"
+        ? ended.scopes.filter(scope => other.recovery?.endedLease.scopes.some(existing => leaseScopesOverlap(scope, existing)))
+        : [];
+      const proposalCollisions = proposalReservesPaths(other) && other.proposal
+        ? ended.scopes.filter(scope => scope.access === "write" && other.proposal?.ownedPaths.some(candidate =>
+          leaseScopeCoversPath(scope, candidate)
+        ))
+        : [];
+      const collisions = [...leaseCollisions, ...recoveryCollisions, ...proposalCollisions];
+      if (collisions.length > 0) {
+        throw new SynodError(ERROR_CODES.LEASE_CONFLICT, `Task ${taskId} recovery scope overlaps task ${other.id}.`, {
+          details: { taskId, conflictingTaskId: other.id, paths: [...new Set(collisions.map(scope => scope.path))] }
+        });
+      }
     }
     const sealed = await sealTaskProposal(targetDirectory, state, task, ended, task.revision + 1, context, dependencies);
     recovery.proposal = sealed.proposal;
