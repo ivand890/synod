@@ -512,6 +512,10 @@ async function inspectRegisteredWorktree(
       if (head !== record.baseHead) reasons.push("live HEAD moved from the recorded base");
       if (branch !== null) reasons.push("live worktree is attached to a branch");
       if (record.worktreeIdentity && !sameIdentity(record.worktreeIdentity, currentIdentity)) reasons.push("filesystem identity changed");
+      if (record.creation.status === "INTENT"
+        && (await gitRunner(record.worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).length > 0) {
+        reasons.push("interrupted creation worktree is not clean");
+      }
     } catch (error) {
       reasons.push(`worktree inspection failed: ${errorMessage(error)}`);
     }
@@ -540,6 +544,15 @@ async function completeRecord(
       reasons: status.reasons
     });
   }
+  await hook?.("before-complete");
+  await assertControlUnchanged(control, gitRunner);
+  const finalStatus = await inspectRegisteredWorktree(control, record, gitRunner);
+  if (finalStatus.reconciliation !== "complete") {
+    reconciliationRequired("Task worktree changed at the creation completion boundary.", {
+      recordId,
+      reasons: finalStatus.reasons
+    });
+  }
   const snapshot = await captureGitCheckpointSnapshot(record.worktreePath);
   if (!snapshot.checkpoint.available || snapshot.checkpoint.head !== record.baseHead || !snapshot.checkpoint.worktree.clean) {
     reconciliationRequired("Created task worktree does not match its exact clean base.", {
@@ -548,7 +561,6 @@ async function completeRecord(
       clean: snapshot.checkpoint.worktree.clean
     });
   }
-  await hook?.("before-complete");
   record.worktreeIdentity = await identity(record.worktreePath);
   record.gitDirectory = await realpath((await gitRunner(record.worktreePath, [
     "rev-parse", "--path-format=absolute", "--absolute-git-dir"

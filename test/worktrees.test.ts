@@ -176,6 +176,22 @@ test("recognizes an exact Git registration after interruption and completes the 
   assert.equal(resumed.record.creation.status, "COMPLETE");
 });
 
+test("rechecks cleanliness at the completion boundary and preserves an intent on drift", async () => {
+  const { control, destination, options } = await fixture();
+  await assert.rejects(
+    createTaskWorktree(options, {
+      async worktreeHook(stage) {
+        if (stage === "before-complete") await writeFile(path.join(destination, "source.txt"), "raced\n");
+      }
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_RECONCILIATION_REQUIRED
+  );
+  const interrupted = await taskWorktreeStatus({ directory: control, taskId: "T-001" });
+  assert.equal(interrupted.record.creation.status, "INTENT");
+  assert.equal(interrupted.reconciliation, "manual_reconciliation");
+  assert.ok(interrupted.reasons.includes("interrupted creation worktree is not clean"));
+});
+
 test("requires manual reconciliation after a registered worktree changes", async () => {
   const { control, destination, options } = await fixture();
   await createTaskWorktree(options);
