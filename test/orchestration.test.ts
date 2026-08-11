@@ -290,14 +290,23 @@ test("default correction limits reject a third round until an approved bounded o
 test("an exhausted task can split only into explicit unaccepted replacement tasks", async () => {
   const directory = await temporaryProject();
   await initializeGitHead(directory);
-  await addDefaultTask(directory, { correctionLimit: 0 });
+  await addDefaultTask(directory, { id: "T-BASE", objective: "Upstream prerequisite" });
+  await addDefaultTask(directory, { correctionLimit: 0, dependsOn: ["T-BASE"] });
   await addDefaultTask(directory, { id: "T-DEPENDENT", objective: "Dependent continuation", dependsOn: ["T-001"] });
   await addDefaultTask(directory, { id: "T-LEFT", objective: "Left replacement" });
   await addDefaultTask(directory, { id: "T-RIGHT", objective: "Right replacement" });
+  await transitionTask({ directory, id: "T-BASE", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory, "T-BASE");
+  await transitionTask({ directory, id: "T-BASE", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/t-base.ts"), "upstream done\n");
+  await transitionTask({ directory, id: "T-BASE", to: "REVIEW", revision: 1, evidence: ["delivery:base"] });
+  await transitionTask({ directory, id: "T-BASE", to: "ACCEPTED", revision: 1, evidence: ["review:base"] });
+  await transitionTask({ directory, id: "T-BASE", to: "VERIFIED", revision: 1, evidence: ["test:base"] });
+  await transitionTask({ directory, id: "T-BASE", to: "DONE", revision: 1 });
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
   await acquireDefaultLease(directory);
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
-  await mkdir(path.join(directory, "src"), { recursive: true });
   await writeFile(path.join(directory, "src/t-001.ts"), "needs split\n");
   await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery:split"] });
 
@@ -313,6 +322,10 @@ test("an exhausted task can split only into explicit unaccepted replacement task
   assert.deepEqual(split.replacements.map(task => [task.id, task.state, task.acceptance.status, task.splitFrom]), [
     ["T-LEFT", "PLANNED", "pending", "T-001"],
     ["T-RIGHT", "PLANNED", "pending", "T-001"]
+  ]);
+  assert.deepEqual(split.replacements.map(task => [task.id, task.dependsOn]), [
+    ["T-LEFT", ["T-BASE"]],
+    ["T-RIGHT", ["T-BASE"]]
   ]);
   const persisted = await readOrchestration(directory);
   assert.deepEqual(persisted.state.tasks["T-DEPENDENT"]?.dependsOn, ["T-LEFT", "T-RIGHT"]);

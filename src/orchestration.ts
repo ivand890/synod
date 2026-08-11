@@ -2599,13 +2599,21 @@ export async function splitTask({
         });
       }
     }
+    const inheritedDependencies = task.dependsOn.filter(dependency => !replacementIds.includes(dependency));
+    const replacementDependencies = new Map<string, string[]>(replacementIds.map(replacementId => [
+      replacementId,
+      [...new Set([...state.tasks[replacementId]!.dependsOn, ...inheritedDependencies])]
+    ]));
     const dependentIds = state.taskOrder.filter(id => id !== taskId && state.tasks[id]?.dependsOn.includes(taskId));
     const rewrittenDependencies = new Map<string, string[]>(dependentIds.map(dependentId => {
-      const dependent = state.tasks[dependentId]!;
-      const dependencies = dependent.dependsOn.flatMap(dependency => dependency === taskId ? replacementIds : [dependency]);
+      const dependencies = (replacementDependencies.get(dependentId) || state.tasks[dependentId]!.dependsOn)
+        .flatMap(dependency => dependency === taskId ? replacementIds : [dependency]);
       return [dependentId, [...new Set(dependencies)]];
     }));
-    const dependencyMap = new Map(state.taskOrder.map(id => [id, rewrittenDependencies.get(id) || state.tasks[id]!.dependsOn]));
+    const dependencyMap = new Map(state.taskOrder.map(id => [
+      id,
+      rewrittenDependencies.get(id) || replacementDependencies.get(id) || state.tasks[id]!.dependsOn
+    ]));
     const visiting = new Set<string>();
     const visited = new Set<string>();
     const hasCycle = (id: string): boolean => {
@@ -2631,6 +2639,7 @@ export async function splitTask({
     delete task.blockedFrom;
     for (const replacementId of replacementIds) {
       const replacement = state.tasks[replacementId]!;
+      replacement.dependsOn = rewrittenDependencies.get(replacementId) || replacementDependencies.get(replacementId)!;
       replacement.splitFrom = taskId;
       replacement.updatedAt = context.timestamp;
     }
@@ -2646,6 +2655,10 @@ export async function splitTask({
         revision: task.revision,
         payload: {
           replacements: replacementIds,
+          replacementDependencies: replacementIds.map(replacementId => ({
+            id: replacementId,
+            dependsOn: state.tasks[replacementId]!.dependsOn
+          })),
           dependents: dependentIds.map(dependentId => ({ id: dependentId, dependsOn: state.tasks[dependentId]!.dependsOn })),
           reason: explanation,
           evidence: evidenceReferences
