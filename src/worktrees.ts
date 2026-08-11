@@ -97,6 +97,19 @@ export interface TaskWorktreeRegistry {
   schemaVersion: typeof TASK_WORKTREES_SCHEMA_VERSION;
   records: TaskWorktreeRecord[];
   events: TaskWorktreeEvent[];
+  sealedProposals: SealedTaskWorktreeProposal[];
+}
+
+export interface SealedTaskWorktreeProposal {
+  recordId: string;
+  taskId: string;
+  leaseId: string;
+  generation: number;
+  taskRevision: number;
+  baseHead: string;
+  path: string;
+  bundleId: string;
+  fingerprint: string;
 }
 
 export type WorktreeReconciliation = "complete" | "absent_resumable" | "manual_reconciliation";
@@ -370,11 +383,57 @@ export function validateTaskWorktreeRegistry(value: unknown): TaskWorktreeRegist
       invalid("Task worktree record does not match its latest event snapshot.");
     }
   }
-  return { schemaVersion: TASK_WORKTREES_SCHEMA_VERSION, records, events };
+  const rawSealedProposals = value.sealedProposals === undefined
+    ? records.filter(record => record.proposal?.status === "SEALED").map(record => ({
+      recordId: record.id,
+      taskId: record.taskId,
+      leaseId: record.leaseId,
+      generation: record.generation,
+      taskRevision: record.taskRevision,
+      baseHead: record.baseHead,
+      path: record.proposal!.path,
+      bundleId: record.proposal!.bundleId!,
+      fingerprint: record.proposal!.fingerprint!
+    }))
+    : value.sealedProposals;
+  if (!Array.isArray(rawSealedProposals)) invalid("Task worktree sealed proposal index is invalid.");
+  const sealedProposals = rawSealedProposals.map(item => {
+    if (!isRecord(item)
+      || !isUuid(item.recordId)
+      || typeof item.taskId !== "string" || !item.taskId
+      || !isUuid(item.leaseId)
+      || !Number.isSafeInteger(item.generation) || Number(item.generation) <= 0
+      || !Number.isSafeInteger(item.taskRevision) || Number(item.taskRevision) < 0
+      || typeof item.baseHead !== "string" || !/^[0-9a-f]{40,64}$/.test(item.baseHead)
+      || item.path !== `.synod/worktree-proposals/${item.recordId}`
+      || !isHash(item.bundleId)
+      || !isHash(item.fingerprint)) {
+      invalid("Task worktree sealed proposal index contains an invalid entry.");
+    }
+    return item as unknown as SealedTaskWorktreeProposal;
+  });
+  if (new Set(sealedProposals.map(item => item.recordId)).size !== sealedProposals.length) {
+    invalid("Task worktree sealed proposal index IDs must be unique.");
+  }
+  for (const record of records.filter(item => item.proposal?.status === "SEALED")) {
+    const indexed = sealedProposals.find(item => item.recordId === record.id);
+    if (!indexed
+      || indexed.taskId !== record.taskId
+      || indexed.leaseId !== record.leaseId
+      || indexed.generation !== record.generation
+      || indexed.taskRevision !== record.taskRevision
+      || indexed.baseHead !== record.baseHead
+      || indexed.path !== record.proposal!.path
+      || indexed.bundleId !== record.proposal!.bundleId
+      || indexed.fingerprint !== record.proposal!.fingerprint) {
+      invalid("A sealed task worktree proposal does not match its durable index entry.", { recordId: record.id });
+    }
+  }
+  return { schemaVersion: TASK_WORKTREES_SCHEMA_VERSION, records, events, sealedProposals };
 }
 
 function emptyRegistry(): TaskWorktreeRegistry {
-  return { schemaVersion: TASK_WORKTREES_SCHEMA_VERSION, records: [], events: [] };
+  return { schemaVersion: TASK_WORKTREES_SCHEMA_VERSION, records: [], events: [], sealedProposals: [] };
 }
 
 export function createTaskWorktreeRegistry(): TaskWorktreeRegistry {
@@ -524,37 +583,36 @@ export async function validateTaskWorktreeArtifacts({
   if (loaded.expected.type === "missing" && required) {
     invalid(`Task worktree registry is missing: ${TASK_WORKTREES_PATH}`);
   }
-  let sealedProposals = 0;
+  for (const indexed of loaded.registry.sealedProposals) {
+    const verified = await verifyRecoveryBundle({
+      bundle: resolveProjectPath(controlRoot, indexed.path)
+    });
+    const proposal = verified.manifest.proposal;
+    if (verified.bundleId !== indexed.bundleId
+      || verified.manifest.source.head !== indexed.baseHead
+      || verified.manifest.source.branch !== null
+      || verified.manifest.checkpoint.fingerprint !== indexed.fingerprint
+      || !proposal
+      || proposal.taskId !== indexed.taskId
+      || proposal.leaseId !== indexed.leaseId
+      || proposal.generation !== indexed.generation
+      || proposal.baseRevision !== indexed.taskRevision
+      || proposal.revision !== indexed.taskRevision + 1) {
+      invalid("Task worktree proposal artifact does not match its durable index entry.", { recordId: indexed.recordId });
+    }
+  }
   for (const record of loaded.registry.records) {
     if (record.integration.status === "COMPLETE"
       && record.integration.fingerprint !== record.proposal?.fingerprint) {
       invalid("Completed task worktree integration does not match its sealed proposal.", { recordId: record.id });
     }
-    if (record.proposal?.status !== "SEALED") continue;
-    const verified = await verifyRecoveryBundle({
-      bundle: resolveProjectPath(controlRoot, record.proposal.path)
-    });
-    const proposal = verified.manifest.proposal;
-    if (verified.bundleId !== record.proposal.bundleId
-      || verified.manifest.source.head !== record.baseHead
-      || verified.manifest.source.branch !== null
-      || verified.manifest.checkpoint.fingerprint !== record.proposal.fingerprint
-      || !proposal
-      || proposal.taskId !== record.taskId
-      || proposal.leaseId !== record.leaseId
-      || proposal.generation !== record.generation
-      || proposal.baseRevision !== record.taskRevision
-      || proposal.revision !== record.taskRevision + 1) {
-      invalid("Task worktree proposal artifact does not match its registry record.", { recordId: record.id });
-    }
-    sealedProposals += 1;
   }
   return {
     path: TASK_WORKTREES_PATH,
     schemaVersion: TASK_WORKTREES_SCHEMA_VERSION,
     records: loaded.registry.records.length,
     events: loaded.registry.events.length,
-    sealedProposals
+    sealedProposals: loaded.registry.sealedProposals.length
   };
 }
 
@@ -1102,6 +1160,17 @@ export async function sealTaskWorktreeProposal(
     };
     refreshedRecord.lastCapturedFingerprint = boundary.checkpoint.worktree.fingerprint;
     refreshedRecord.updatedAt = timestamp;
+    refreshed.registry.sealedProposals.push({
+      recordId: refreshedRecord.id,
+      taskId: refreshedRecord.taskId,
+      leaseId: refreshedRecord.leaseId,
+      generation: refreshedRecord.generation,
+      taskRevision: refreshedRecord.taskRevision,
+      baseHead: refreshedRecord.baseHead,
+      path: destination.relative,
+      bundleId: verified.bundleId,
+      fingerprint: verified.manifest.checkpoint.fingerprint
+    });
     appendEvent(refreshed.registry, refreshedRecord, "worktree.proposal.sealed", timestamp, {
       path: destination.relative,
       bundleId: verified.bundleId,
