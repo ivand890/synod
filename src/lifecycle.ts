@@ -46,15 +46,18 @@ import {
   ORCHESTRATION_STATUS_PATH,
   createCheckpointSnapshotAdoptionFiles,
   createInitialOrchestrationFiles,
+  createOrchestrationSchemaMigrationFiles,
   orchestrationStatus,
   validateOrchestrationReadOnly
 } from "./orchestration.js";
 import { CHECKPOINT_SNAPSHOT_PATH } from "./checkpoint.js";
+import { LEASE_BASELINES_PATH } from "./leases.js";
 
 const ORCHESTRATION_RECORD_PATHS = [
   ORCHESTRATION_STATE_PATH,
   ORCHESTRATION_EVENTS_PATH,
   CHECKPOINT_SNAPSHOT_PATH,
+  LEASE_BASELINES_PATH,
   ORCHESTRATION_STATUS_PATH
 ];
 
@@ -557,14 +560,20 @@ export async function upgradeProject(
   const templates = await loadTemplateSet(packageVersion, profile);
   const previous = manifestFileMap(installed);
   const legacyOrchestrationPaths = [ORCHESTRATION_STATE_PATH, ORCHESTRATION_EVENTS_PATH, ORCHESTRATION_STATUS_PATH];
-  const checkpointAdoption = legacyOrchestrationPaths.every(relativePath => previous.get(relativePath)?.ownership === "record")
+  const hasOrchestrationRecords = legacyOrchestrationPaths.every(relativePath => previous.get(relativePath)?.ownership === "record");
+  const schemaMigration = hasOrchestrationRecords
+    ? await createOrchestrationSchemaMigrationFiles(targetDirectory, dependencies)
+    : undefined;
+  const checkpointAdoption = hasOrchestrationRecords && schemaMigration?.status !== "migrated"
     ? await createCheckpointSnapshotAdoptionFiles(targetDirectory, dependencies)
     : undefined;
   const orchestrationDependencies = { ...dependencies, checkpointOverlay: templates.files };
   for (const [relativePath, content] of await createInitialOrchestrationFiles(targetDirectory, orchestrationDependencies)) {
     templates.files.set(relativePath, content);
   }
-  if (checkpointAdoption?.status === "adopted") {
+  if (schemaMigration?.status === "migrated") {
+    for (const [relativePath, content] of schemaMigration.files) templates.files.set(relativePath, content);
+  } else if (checkpointAdoption?.status === "adopted") {
     for (const [relativePath, content] of checkpointAdoption.files) templates.files.set(relativePath, content);
   } else if (checkpointAdoption?.status === "unavailable") {
     templates.files.delete(CHECKPOINT_SNAPSHOT_PATH);
@@ -609,7 +618,10 @@ export async function upgradeProject(
 
     if (inspected.type === "unsafe" || (inspected.type !== "missing" && inspected.type !== "file")) {
       state = { path: relativePath, conflict: true };
-    } else if (checkpointAdoption?.status === "adopted" && checkpointAdoption.files.has(relativePath)) {
+    } else if (
+      (schemaMigration?.status === "migrated" && schemaMigration.files.has(relativePath))
+      || (checkpointAdoption?.status === "adopted" && checkpointAdoption.files.has(relativePath))
+    ) {
       ownership = "record";
       if (inspected.type === "file" && normalizeText(inspected.content) === normalizeText(templateContent)) {
         state = { path: relativePath, action: "unchanged" };
@@ -670,7 +682,8 @@ export async function upgradeProject(
       continue;
     }
     const installedHash = ownership === "record"
-      ? checkpointAdoption?.status === "adopted" && checkpointAdoption.files.has(relativePath)
+      ? (schemaMigration?.status === "migrated" && schemaMigration.files.has(relativePath))
+        || (checkpointAdoption?.status === "adopted" && checkpointAdoption.files.has(relativePath))
         ? contentHash(templateContent)
         : old?.contentHash || inspectionHash(inspected) || contentHash(templateContent)
       : ownership === "user"

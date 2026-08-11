@@ -10,18 +10,24 @@ import { promisify } from "node:util";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
 import { CHECKPOINT_SNAPSHOT_PATH } from "../src/checkpoint.js";
 import { contentHash } from "../src/filesystem.js";
+import { LEASE_BASELINES_PATH } from "../src/leases.js";
 import { initProject } from "../src/lifecycle.js";
 import {
   ORCHESTRATION_EVENTS_PATH,
   ORCHESTRATION_STATE_PATH,
   ORCHESTRATION_STATUS_PATH,
   TASK_STATES,
+  acquireTaskLease,
   addTask,
   formatOrchestrationStatus,
+  expireTaskLease,
+  heartbeatTaskLease,
   orchestrationStatus,
   readOrchestration,
   recordCheckpoint,
+  releaseTaskLease,
   renderStatusMarkdown,
+  revokeTaskLease,
   transitionTask
 } from "../src/orchestration.js";
 import type { AddTaskOptions } from "../src/orchestration.js";
@@ -69,6 +75,15 @@ async function addDefaultTask(directory: string, extra: Partial<AddTaskOptions> 
   });
 }
 
+async function acquireDefaultLease(directory: string, id = "T-001") {
+  return acquireTaskLease({
+    directory,
+    id,
+    ownerThread: `test:${id}`,
+    write: [`src/${id.toLowerCase()}.ts`]
+  });
+}
+
 test.afterEach(async () => {
   for (const directory of temporaryDirectories) {
     await rm(directory, { recursive: true, force: true });
@@ -81,7 +96,7 @@ test("initializes canonical state, a hash-chained log, and a Markdown projection
   const { state, events } = await readOrchestration(directory);
   const markdown = await readFile(path.join(directory, ORCHESTRATION_STATUS_PATH), "utf8");
 
-  assert.equal(state.schemaVersion, 1);
+  assert.equal(state.schemaVersion, 2);
   assert.equal(state.lastEvent.sequence, 1);
   assert.equal(events.length, 1);
   const initialEvent = events[0];
@@ -98,6 +113,7 @@ test("enforces the complete revision, acceptance, verification, and completion p
   const directory = await temporaryProject();
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
   await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["commit:abc123"] });
   await transitionTask({ directory, id: "T-001", to: "ACCEPTED", revision: 1, evidence: ["review:approved"] });
@@ -120,7 +136,7 @@ test("enforces the complete revision, acceptance, verification, and completion p
     ["acceptance", 1],
     ["verification", 1]
   ]);
-  assert.equal(events.length, 8);
+  assert.equal(events.length, 9);
   for (const [index, event] of events.entries()) {
     assert.equal(event.sequence, index + 1);
     if (index > 0) assert.equal(event.previousHash, events[index - 1]?.eventHash);
@@ -131,6 +147,7 @@ test("rejected transitions do not mutate canonical state or append the log", asy
   const directory = await temporaryProject();
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
   const stateBefore = await readFile(path.join(directory, ORCHESTRATION_STATE_PATH), "utf8");
   const eventsBefore = await readFile(path.join(directory, ORCHESTRATION_EVENTS_PATH), "utf8");
@@ -152,9 +169,11 @@ test("a correction round invalidates prior acceptance and advances the next deli
   const directory = await temporaryProject();
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
   await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery:r1"] });
   await transitionTask({ directory, id: "T-001", to: "ACCEPTED", revision: 1, evidence: ["acceptance:r1"] });
+  await acquireDefaultLease(directory);
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 1, evidence: ["correction:requested"] });
   const corrected = await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 2, evidence: ["delivery:r2"] });
 
@@ -198,6 +217,7 @@ test("blocked tasks can resume only their recorded prior state", async () => {
   const directory = await temporaryProject();
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
   const blocked = await transitionTask({
     directory,
@@ -218,6 +238,214 @@ test("blocked tasks can resume only their recorded prior state", async () => {
   const resumed = await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
   assert.equal(resumed.task.state, "ACTIVE");
   assert.equal(resumed.task.blockedFrom, undefined);
+});
+
+test("writer leases persist fenced generations, heartbeat deadlines, and immutable baselines", async () => {
+  const directory = await temporaryProject();
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  const acquired = await acquireTaskLease({
+    directory,
+    id: "T-001",
+    ownerThread: "thread:one",
+    read: ["README.md"],
+    write: ["src/orchestration.ts"],
+    ttlSeconds: 120,
+    heartbeatIntervalSeconds: 30
+  }, { clock: () => "2026-08-10T12:00:00.000Z" });
+
+  assert.equal(acquired.lease.generation, 1);
+  assert.equal(acquired.lease.expiresAt, "2026-08-10T12:02:00.000Z");
+  const ledgerContent = await readFile(path.join(directory, LEASE_BASELINES_PATH), "utf8");
+  const canonical = await readOrchestration(directory);
+  assert.equal(canonical.leaseBaselines.baselines.length, 1);
+  assert.equal(canonical.state.leaseBaselines.contentHash, contentHash(ledgerContent));
+  assert.equal(canonical.leaseBaselines.baselines[0]?.leaseId, acquired.lease.id);
+
+  const heartbeat = await heartbeatTaskLease({
+    directory,
+    id: "T-001",
+    leaseId: acquired.lease.id,
+    generation: 1,
+    revision: 0,
+    expectedHeartbeatAt: "2026-08-10T12:00:00.000Z",
+    ownerThread: "thread:one"
+  }, { clock: () => "2026-08-10T12:00:20.000Z" });
+  assert.equal(heartbeat.lease.expiresAt, "2026-08-10T12:02:20.000Z");
+
+  const beforeRejectedHeartbeat = await Promise.all([
+    readFile(path.join(directory, ORCHESTRATION_STATE_PATH), "utf8"),
+    readFile(path.join(directory, ORCHESTRATION_EVENTS_PATH), "utf8")
+  ]);
+  await assert.rejects(
+    heartbeatTaskLease({
+      directory,
+      id: "T-001",
+      leaseId: acquired.lease.id,
+      generation: 1,
+      revision: 0,
+      expectedHeartbeatAt: "2026-08-10T12:00:20.000Z",
+      ownerThread: "thread:one"
+    }, { clock: () => "2026-08-10T12:00:10.000Z" }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_STALE
+  );
+  assert.deepEqual(await Promise.all([
+    readFile(path.join(directory, ORCHESTRATION_STATE_PATH), "utf8"),
+    readFile(path.join(directory, ORCHESTRATION_EVENTS_PATH), "utf8")
+  ]), beforeRejectedHeartbeat);
+
+  await releaseTaskLease({
+    directory,
+    id: "T-001",
+    leaseId: acquired.lease.id,
+    generation: 1,
+    revision: 0,
+    expectedHeartbeatAt: "2026-08-10T12:00:20.000Z",
+    ownerThread: "thread:one"
+  }, { clock: () => "2026-08-10T12:00:21.000Z" });
+  const reacquired = await acquireTaskLease({
+    directory,
+    id: "T-001",
+    ownerThread: "thread:two",
+    write: ["src/orchestration.ts"]
+  }, { clock: () => "2026-08-10T12:00:22.000Z" });
+  assert.equal(reacquired.lease.generation, 2);
+  await assert.rejects(
+    heartbeatTaskLease({
+      directory,
+      id: "T-001",
+      leaseId: acquired.lease.id,
+      generation: 1,
+      revision: 0,
+      expectedHeartbeatAt: "2026-08-10T12:00:20.000Z",
+      ownerThread: "thread:one"
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_STALE
+  );
+});
+
+test("lease baseline tampering fails closed before canonical state is exposed", async () => {
+  const directory = await temporaryProject();
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
+  const ledgerPath = path.join(directory, LEASE_BASELINES_PATH);
+  const ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+  ledger.baselines[0].taskRevision = 99;
+  await writeFile(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`, "utf8");
+
+  await assert.rejects(
+    readOrchestration(directory),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_BASELINE_INVALID
+  );
+});
+
+test("pending mutation recovery completes an interrupted lease-baseline replacement", async () => {
+  const directory = await temporaryProject();
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  const checkpointBefore = (await readOrchestration(directory)).state.checkpoint;
+  let injected = false;
+  const acquired = await acquireTaskLease({
+    directory,
+    id: "T-001",
+    ownerThread: "thread:recovery",
+    write: ["src/recovery.ts"]
+  }, {
+    transactionHook(operation) {
+      if (!injected && operation.path === LEASE_BASELINES_PATH) {
+        injected = true;
+        throw new Error("interrupt baseline replacement");
+      }
+    }
+  });
+
+  assert.equal(acquired.lease.generation, 1);
+  const canonical = await readOrchestration(directory);
+  assert.deepEqual(canonical.state.checkpoint, checkpointBefore);
+  assert.equal(canonical.state.tasks["T-001"]?.acceptance.status, "pending");
+  assert.equal(canonical.leaseBaselines.baselines[0]?.leaseId, acquired.lease.id);
+  await assert.rejects(readFile(path.join(directory, ".synod/pending-mutation.json"), "utf8"), { code: "ENOENT" });
+});
+
+test("overlapping writer acquisition races leave exactly one canonical owner", async () => {
+  const directory = await temporaryProject();
+  await addDefaultTask(directory, { id: "T-A" });
+  await addDefaultTask(directory, { id: "T-B" });
+  await transitionTask({ directory, id: "T-A", to: "READY", revision: 0 });
+  await transitionTask({ directory, id: "T-B", to: "READY", revision: 0 });
+
+  const attempts = await Promise.allSettled([
+    acquireTaskLease({ directory, id: "T-A", ownerThread: "thread:a", write: ["src/shared.ts"] }),
+    acquireTaskLease({ directory, id: "T-B", ownerThread: "thread:b", write: ["src/shared.ts"] })
+  ]);
+  assert.equal(attempts.filter(result => result.status === "fulfilled").length, 1);
+  assert.equal(attempts.filter(result => result.status === "rejected").length, 1);
+
+  const { state } = await readOrchestration(directory);
+  assert.equal([state.tasks["T-A"]?.lease, state.tasks["T-B"]?.lease].filter(Boolean).length, 1);
+  const loser = state.tasks["T-A"]?.lease ? "T-B" : "T-A";
+  await assert.rejects(
+    acquireTaskLease({ directory, id: loser, ownerThread: "thread:retry", write: ["src/shared.ts"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_CONFLICT
+  );
+});
+
+test("expiry and revocation block active work while fencing stale owners", async () => {
+  const directory = await temporaryProject();
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  const first = await acquireTaskLease({
+    directory,
+    id: "T-001",
+    ownerThread: "thread:one",
+    write: ["src/work.ts"],
+    ttlSeconds: 30,
+    heartbeatIntervalSeconds: 10
+  }, { clock: () => "2026-08-10T12:00:00.000Z" });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 }, { clock: () => "2026-08-10T12:00:01.000Z" });
+  await assert.rejects(
+    expireTaskLease({ directory, id: "T-001", leaseId: first.lease.id, generation: 1, revision: 0, expectedHeartbeatAt: "2026-08-10T12:00:00.000Z", reason: "timeout" }, {
+      clock: () => "2026-08-10T12:00:29.000Z"
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_NOT_EXPIRED
+  );
+  const observed = await orchestrationStatus({ directory }, { clock: () => "2026-08-10T12:00:30.000Z" });
+  assert.deepEqual(observed.leaseExpiryCandidates.map(candidate => candidate.taskId), ["T-001"]);
+  assert.equal((await readOrchestration(directory)).state.tasks["T-001"]?.lease?.status, "ACTIVE");
+  const expired = await expireTaskLease({ directory, id: "T-001", leaseId: first.lease.id, generation: 1, revision: 0, expectedHeartbeatAt: "2026-08-10T12:00:00.000Z", reason: "heartbeat timeout" }, {
+    clock: () => "2026-08-10T12:00:30.000Z"
+  });
+  assert.equal(expired.task.state, "BLOCKED");
+  assert.equal(expired.task.blockedFrom, "ACTIVE");
+  assert.match(expired.task.blocker ?? "", /heartbeat timeout/);
+
+  const second = await acquireTaskLease({ directory, id: "T-001", ownerThread: "thread:two", write: ["src/work.ts"] }, {
+    clock: () => "2026-08-10T12:00:32.000Z"
+  });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 }, { clock: () => "2026-08-10T12:00:33.000Z" });
+  const revoked = await revokeTaskLease({
+    directory,
+    id: "T-001",
+    leaseId: second.lease.id,
+    generation: second.lease.generation,
+    revision: 0,
+    expectedHeartbeatAt: "2026-08-10T12:00:32.000Z",
+    reason: "supervisor reassignment"
+  }, { clock: () => "2026-08-10T12:00:34.000Z" });
+  assert.equal(revoked.task.state, "BLOCKED");
+  await assert.rejects(
+    heartbeatTaskLease({
+      directory,
+      id: "T-001",
+      leaseId: second.lease.id,
+      generation: second.lease.generation,
+      revision: 0,
+      expectedHeartbeatAt: "2026-08-10T12:00:32.000Z",
+      ownerThread: "thread:two"
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_NOT_FOUND
+  );
 });
 
 test("status detects content-sensitive checkpoint drift and checkpoint reconciles it", async () => {
@@ -632,14 +860,14 @@ test("stale orchestration locks are reclaimed while live locks fail closed", asy
   })}\n`;
   await writeFile(lockPath, staleLock, "utf8");
 
-  assert.equal((await readOrchestration(directory)).state.schemaVersion, 1);
+  assert.equal((await readOrchestration(directory)).state.schemaVersion, 2);
   await assert.rejects(readFile(lockPath, "utf8"), { code: "ENOENT" });
 
   await writeFile(lockPath, staleLock, "utf8");
   const claimId = createHash("sha256").update(staleLock, "utf8").digest("hex");
   const claimPath = path.join(directory, `.synod/orchestration-reclaim-${claimId}.lock`);
   await link(lockPath, claimPath);
-  assert.equal((await readOrchestration(directory)).state.schemaVersion, 1);
+  assert.equal((await readOrchestration(directory)).state.schemaVersion, 2);
   await assert.rejects(readFile(claimPath, "utf8"), { code: "ENOENT" });
 
   const liveLock = `${JSON.stringify({
@@ -663,7 +891,7 @@ test("an interrupted unpublished lock candidate never blocks orchestration", asy
   const candidatePath = path.join(directory, ".synod/orchestration-candidate-interrupted.lock");
   await writeFile(candidatePath, "{", "utf8");
 
-  assert.equal((await readOrchestration(directory)).state.schemaVersion, 1);
+  assert.equal((await readOrchestration(directory)).state.schemaVersion, 2);
   assert.equal(await readFile(candidatePath, "utf8"), "{");
 });
 
@@ -744,7 +972,7 @@ test("recovery replaces a matching partial event suffix from the pending mutatio
   const pendingLine = nextEvents.subarray(previousEvents.length, nextEvents.length - 1);
   const event = JSON.parse(pendingLine.toString("utf8"));
   const pending = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     event,
     state: JSON.parse(nextStateContent),
     status: nextStatus,

@@ -96,6 +96,7 @@ test("prints version and help", () => {
   assert.match(help.stdout, /synod handoff/);
   assert.match(help.stdout, /--explain/);
   assert.match(help.stdout, /synod task add/);
+  assert.match(help.stdout, /synod lease acquire/);
   assert.match(help.stdout, /synod bundle export/);
 });
 
@@ -343,6 +344,60 @@ test("task and status commands expose canonical orchestration through schema-1 e
     const handoffTextCode = await run(["handoff", "--cwd", directory], output);
     assert.equal(handoffTextCode, 0);
     assert.match(takeMessage(messages), /T-001: PLANNED r0/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("lease commands expose durable owner, generation, and heartbeat state through JSON", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-lease-json-test-"));
+  const { messages, output } = capturedOutput();
+
+  try {
+    await run(["init", directory], output);
+    messages.length = 0;
+    await run([
+      "task", "add", "T-LEASE",
+      "--objective", "Exercise writer leases",
+      "--executor", "synod_implementer",
+      "--acceptance", "The lease is fenced",
+      "--verification", "pnpm test",
+      "--cwd", directory
+    ], output);
+    messages.length = 0;
+    await run(["task", "transition", "T-LEASE", "READY", "--revision", "0", "--cwd", directory], output);
+    messages.length = 0;
+
+    const acquireCode = await run([
+      "lease", "acquire", "T-LEASE",
+      "--owner-thread", "thread:cli",
+      "--write", "src/lease.ts",
+      "--ttl-seconds", "120",
+      "--heartbeat-seconds", "30",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const acquired = JSON.parse(takeMessage(messages));
+    assert.equal(acquireCode, 0);
+    assert.equal(acquired.command, "lease");
+    assert.equal(acquired.data.action, "acquire");
+    assert.equal(acquired.data.lease.ownerThread, "thread:cli");
+    assert.equal(acquired.data.lease.generation, 1);
+
+    const heartbeatCode = await run([
+      "lease", "heartbeat", "T-LEASE",
+      "--lease-id", acquired.data.lease.id,
+      "--generation", "1",
+      "--revision", "0",
+      "--expected-heartbeat-at", acquired.data.lease.heartbeatAt,
+      "--owner-thread", "thread:cli",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const heartbeat = JSON.parse(takeMessage(messages));
+    assert.equal(heartbeatCode, 0);
+    assert.equal(heartbeat.data.action, "heartbeat");
+    assert.equal(heartbeat.data.lease.generation, 1);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

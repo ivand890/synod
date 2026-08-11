@@ -56,6 +56,34 @@ export interface BundleRestoreCommandOptions {
 
 export type BundleCommandOptions = BundleExportCommandOptions | BundleVerifyCommandOptions | BundleRestoreCommandOptions;
 
+interface LeaseCommonOptions {
+  id: string;
+  directory: string;
+  json: boolean;
+  actor: string;
+}
+
+export interface LeaseAcquireCommandOptions extends LeaseCommonOptions {
+  action: "acquire";
+  ownerThread?: string;
+  read: string[];
+  write: string[];
+  ttlSeconds?: number;
+  heartbeatIntervalSeconds?: number;
+}
+
+export interface LeaseMutationCommandOptions extends LeaseCommonOptions {
+  action: "heartbeat" | "release" | "expire" | "revoke";
+  leaseId?: string;
+  generation?: number;
+  revision?: number;
+  expectedHeartbeatAt?: string;
+  ownerThread?: string;
+  reason?: string;
+}
+
+export type LeaseCommandOptions = LeaseAcquireCommandOptions | LeaseMutationCommandOptions;
+
 interface TaskCommonOptions {
   id: string;
   directory: string;
@@ -248,6 +276,104 @@ export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOpti
     return { action, bundle: positional, directory, json };
   }
   return { action, bundle: positional, json };
+}
+
+export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOptions {
+  const action = args[0];
+  if (!action || action === "-h" || action === "--help") return { help: true };
+  if (!["acquire", "heartbeat", "release", "expire", "revoke"].includes(action)) {
+    throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown lease action: ${action}`, { details: { action } });
+  }
+  const id = args[1];
+  if (!id || id.startsWith("-")) {
+    throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Lease ${action} is missing its task ID.`);
+  }
+  let directory = ".";
+  let json = false;
+  let actor = "supervisor";
+  let ownerThread: string | undefined;
+  let leaseId: string | undefined;
+  let generation: number | undefined;
+  let revision: number | undefined;
+  let expectedHeartbeatAt: string | undefined;
+  let ttlSeconds: number | undefined;
+  let heartbeatIntervalSeconds: number | undefined;
+  let reason: string | undefined;
+  const read: string[] = [];
+  const write: string[] = [];
+  for (let index = 2; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) continue;
+    if (arg === "-h" || arg === "--help") return { help: true };
+    if (arg === "--json") {
+      json = true;
+      continue;
+    }
+    const valueOptions = [
+      "--cwd", "--actor", "--owner-thread", "--lease-id", "--generation", "--revision", "--expected-heartbeat-at",
+      "--ttl-seconds", "--heartbeat-seconds", "--reason", "--read", "--write"
+    ];
+    if (!valueOptions.includes(arg)) {
+      if (arg.startsWith("-")) throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
+      throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
+    }
+    const value = optionValue(args, index, arg);
+    if (arg === "--cwd") directory = value;
+    else if (arg === "--actor") actor = value;
+    else if (arg === "--owner-thread") ownerThread = value;
+    else if (arg === "--lease-id") leaseId = value;
+    else if (arg === "--expected-heartbeat-at") expectedHeartbeatAt = value;
+    else if (arg === "--reason") reason = value;
+    else if (arg === "--read") read.push(value);
+    else if (arg === "--write") write.push(value);
+    else if (arg === "--generation") generation = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    else if (arg === "--revision") revision = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    else if (arg === "--ttl-seconds") ttlSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    else heartbeatIntervalSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    index += 1;
+  }
+  if (action === "acquire") {
+    if (leaseId !== undefined || generation !== undefined || revision !== undefined || expectedHeartbeatAt !== undefined || reason !== undefined) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Lease acquire received a mutation-only option.");
+    }
+    return {
+      action,
+      id,
+      directory,
+      json,
+      actor,
+      read,
+      write,
+      ...(ownerThread === undefined ? {} : { ownerThread }),
+      ...(ttlSeconds === undefined ? {} : { ttlSeconds }),
+      ...(heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds })
+    };
+  }
+  if (read.length > 0 || write.length > 0 || ttlSeconds !== undefined || heartbeatIntervalSeconds !== undefined) {
+    throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Lease ${action} received an acquire-only option.`);
+  }
+  if (leaseId === undefined || generation === undefined || revision === undefined || expectedHeartbeatAt === undefined) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease ${action} requires --lease-id, --generation, --revision, and --expected-heartbeat-at.`);
+  }
+  if ((action === "heartbeat" || action === "release") && ownerThread === undefined) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease ${action} requires --owner-thread.`);
+  }
+  if ((action === "expire" || action === "revoke") && reason === undefined) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease ${action} requires --reason.`);
+  }
+  return {
+    action: action as LeaseMutationCommandOptions["action"],
+    id,
+    directory,
+    json,
+    actor,
+    ...(ownerThread === undefined ? {} : { ownerThread }),
+    ...(leaseId === undefined ? {} : { leaseId }),
+    ...(generation === undefined ? {} : { generation }),
+    ...(revision === undefined ? {} : { revision }),
+    ...(expectedHeartbeatAt === undefined ? {} : { expectedHeartbeatAt }),
+    ...(reason === undefined ? {} : { reason })
+  };
 }
 
 export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {

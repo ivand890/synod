@@ -12,7 +12,14 @@ import { checkProject, initProject, uninstallProject, upgradeProject } from "../
 import { migrateManifest } from "../src/migrations/index.js";
 import { LEGACY_V1_HASHES } from "../src/migrations/legacy-v1-hashes.js";
 import { packageName, packageVersion } from "../src/package.js";
-import { orchestrationStatus, renderStatusMarkdown } from "../src/orchestration.js";
+import {
+  acquireTaskLease,
+  addTask,
+  orchestrationStatus,
+  readOrchestration,
+  renderStatusMarkdown,
+  transitionTask
+} from "../src/orchestration.js";
 import { isRecord } from "../src/validation.js";
 
 const temporaryDirectories = new Set<string>();
@@ -411,6 +418,7 @@ test("schema 2 upgrade creates canonical orchestration records through migration
   await rm(path.join(directory, ".synod/state.json"));
   await rm(path.join(directory, ".synod/events.jsonl"));
   await rm(path.join(directory, ".synod/checkpoint.json"));
+  await rm(path.join(directory, ".synod/lease-baselines.json"));
   await rm(path.join(directory, "docs/synod/STATUS.md"));
 
   const result = await upgradeProject({ directory });
@@ -421,8 +429,140 @@ test("schema 2 upgrade creates canonical orchestration records through migration
   assert.equal(upgraded.schemaVersion, 3);
   assert.ok(upgraded.migrations.some((item: { from?: unknown; to?: unknown }) => item.from === 2 && item.to === 3));
   assert.equal(upgraded.files.find((entry: { path?: unknown }) => entry.path === ".synod/state.json")?.ownership, "record");
-  assert.equal(state.schemaVersion, 1);
+  assert.equal(state.schemaVersion, 2);
   assert.equal(state.lastEvent.sequence, 1);
+});
+
+test("upgrade preserves the schema-1 event prefix and fences migrated in-flight tasks", async () => {
+  const directory = await temporaryProject();
+  const manifestPath = path.join(directory, ".synod/manifest.json");
+  const statePath = path.join(directory, ".synod/state.json");
+  const eventsPath = path.join(directory, ".synod/events.jsonl");
+  const statusPath = path.join(directory, "docs/synod/STATUS.md");
+  const ledgerPath = path.join(directory, ".synod/lease-baselines.json");
+  await initProject({ directory, profile: "portable" });
+  await addTask({
+    directory,
+    id: "T-MIGRATE",
+    objective: "Preserve in-flight work",
+    executor: "synod_implementer",
+    acceptance: ["The old log remains immutable"],
+    verification: ["pnpm test"]
+  });
+  await transitionTask({ directory, id: "T-MIGRATE", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-MIGRATE", ownerThread: "legacy-thread", write: ["src/migrate.ts"] });
+  await transitionTask({ directory, id: "T-MIGRATE", to: "ACTIVE", revision: 0 });
+
+  const stripCore = (source: Record<string, unknown>) => {
+    const core = structuredClone(source) as Record<string, any>;
+    core.schemaVersion = 1;
+    delete core.leaseBaselines;
+    delete core.lastEvent;
+    for (const task of Object.values(core.tasks ?? {}) as Array<Record<string, unknown>>) {
+      delete task.correctionPolicy;
+      delete task.leaseGeneration;
+      delete task.lease;
+      delete task.preLease;
+    }
+    return core;
+  };
+  const currentEvents = (await readFile(eventsPath, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  let previousHash: string | null = null;
+  const legacyEvents = currentEvents.map(source => {
+    const event = structuredClone(source) as Record<string, any>;
+    event.schemaVersion = 1;
+    event.previousHash = previousHash;
+    event.state = stripCore(event.state);
+    const unsigned = Object.fromEntries(Object.entries(event).filter(([key]) => key !== "eventHash"));
+    event.eventHash = `sha256:${createHash("sha256").update(stableCheckpointStringify(unsigned), "utf8").digest("hex")}`;
+    previousHash = event.eventHash;
+    return event;
+  });
+  const currentState = JSON.parse(await readFile(statePath, "utf8"));
+  const legacyState = {
+    ...stripCore(currentState),
+    lastEvent: {
+      sequence: legacyEvents.length,
+      id: legacyEvents.at(-1)?.id,
+      hash: legacyEvents.at(-1)?.eventHash
+    }
+  };
+  const legacyEventContent = `${legacyEvents.map(event => JSON.stringify(event)).join("\n")}\n`;
+  await writeFile(statePath, `${JSON.stringify(legacyState, null, 2)}\n`, "utf8");
+  await writeFile(eventsPath, legacyEventContent, "utf8");
+  await writeFile(statusPath, "# Legacy Synod status\n", "utf8");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.files = manifest.files.filter((entry: { path?: unknown }) => entry.path !== ".synod/lease-baselines.json");
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await unlink(ledgerPath);
+
+  const beforeDryRun = await Promise.all([
+    readFile(statePath, "utf8"),
+    readFile(eventsPath, "utf8"),
+    readFile(manifestPath, "utf8")
+  ]);
+  const dryRun = await upgradeProject({ directory, profile: "portable", dryRun: true }, {
+    clock: () => "2026-08-10T13:00:00.000Z"
+  });
+  assert.ok(dryRun.updated.includes(".synod/state.json"));
+  assert.ok(dryRun.created.includes(".synod/lease-baselines.json"));
+  assert.deepEqual(await Promise.all([
+    readFile(statePath, "utf8"),
+    readFile(eventsPath, "utf8"),
+    readFile(manifestPath, "utf8")
+  ]), beforeDryRun);
+
+  await assert.rejects(
+    upgradeProject({ directory, profile: "portable" }, {
+      clock: () => "2026-08-10T13:00:00.000Z",
+      transactionHook(operation) {
+        if (operation.path === ".synod/state.json") throw new Error("interrupt schema migration");
+      }
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.TRANSACTION_FAILED
+  );
+  assert.deepEqual(await Promise.all([
+    readFile(statePath, "utf8"),
+    readFile(eventsPath, "utf8"),
+    readFile(manifestPath, "utf8")
+  ]), beforeDryRun);
+
+  const upgraded = await upgradeProject({ directory, profile: "portable" }, {
+    clock: () => "2026-08-10T13:00:00.000Z"
+  });
+  assert.deepEqual(upgraded.conflicts, []);
+  const upgradedEventContent = await readFile(eventsPath, "utf8");
+  assert.ok(upgradedEventContent.startsWith(legacyEventContent));
+  const canonical = await readOrchestration(directory);
+  assert.equal(canonical.state.schemaVersion, 2);
+  assert.equal(canonical.events.at(-1)?.type, "orchestration.migrated");
+  assert.equal(canonical.state.tasks["T-MIGRATE"]?.preLease, true);
+  await assert.rejects(
+    transitionTask({ directory, id: "T-MIGRATE", to: "REVIEW", revision: 1, evidence: ["legacy delivery"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_REQUIRED
+  );
+  const acquired = await acquireTaskLease({
+    directory,
+    id: "T-MIGRATE",
+    ownerThread: "migrated-thread",
+    write: ["src/migrate.ts"]
+  });
+  assert.equal(acquired.task.preLease, undefined);
+  assert.equal(acquired.lease.generation, 1);
+
+  const postAcquireEvents = (await readFile(eventsPath, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  const duplicateBoundary = postAcquireEvents.at(-1);
+  duplicateBoundary.type = "orchestration.migrated";
+  const duplicateUnsigned = Object.fromEntries(Object.entries(duplicateBoundary).filter(([key]) => key !== "eventHash"));
+  duplicateBoundary.eventHash = `sha256:${createHash("sha256").update(stableCheckpointStringify(duplicateUnsigned), "utf8").digest("hex")}`;
+  const duplicateState = JSON.parse(await readFile(statePath, "utf8"));
+  duplicateState.lastEvent.hash = duplicateBoundary.eventHash;
+  await writeFile(eventsPath, `${postAcquireEvents.map(event => JSON.stringify(event)).join("\n")}\n`, "utf8");
+  await writeFile(statePath, `${JSON.stringify(duplicateState, null, 2)}\n`, "utf8");
+  await assert.rejects(
+    readOrchestration(directory),
+    error => error instanceof SynodError && error.code === ERROR_CODES.EVENT_LOG_INVALID
+  );
 });
 
 test("upgrade atomically adopts a matching legacy checkpoint snapshot", async () => {

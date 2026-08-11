@@ -4,6 +4,7 @@ import { ERROR_CODES, SynodError } from "./errors.js";
 import { inspectPath, unsafeAncestor } from "./filesystem.js";
 import { parseVersion } from "./compatibility.js";
 import { errorMessage, isRecord, parseJson } from "./validation.js";
+import { LEASE_BASELINES_PATH } from "./leases.js";
 
 export const MANIFEST_PATH = ".synod/manifest.json";
 export const MANIFEST_SCHEMA_VERSION = 3;
@@ -45,6 +46,7 @@ const recordPaths = new Set([
   ".synod/state.json",
   ".synod/events.jsonl",
   ".synod/checkpoint.json",
+  LEASE_BASELINES_PATH,
   "docs/synod/STATUS.md"
 ]);
 

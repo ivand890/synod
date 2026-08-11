@@ -1,0 +1,47 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { ERROR_CODES, SynodError } from "../src/errors.js";
+import {
+  leaseScopesOverlap,
+  normalizeLeaseScopePath,
+  normalizeLeaseScopes
+} from "../src/leases.js";
+
+test("lease scope normalization rejects administrative and non-portable aliases", () => {
+  for (const candidate of [
+    "",
+    ".",
+    "../outside.ts",
+    "/absolute.ts",
+    ".git/index",
+    ".synod/state.json",
+    "src\\windows.ts",
+    "src/../outside.ts"
+  ]) {
+    assert.throws(
+      () => normalizeLeaseScopePath(candidate),
+      error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_INVALID
+    );
+  }
+});
+
+test("lease scopes are deterministic and require at least one writer", () => {
+  assert.deepEqual(normalizeLeaseScopes({
+    read: ["README.md", "README.md"],
+    write: ["src/task.ts", "src/task.ts"]
+  }), [
+    { path: "README.md", access: "read", kind: "file" },
+    { path: "src/task.ts", access: "write", kind: "file" }
+  ]);
+  assert.throws(
+    () => normalizeLeaseScopes({ read: ["README.md"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_INVALID
+  );
+});
+
+test("tree collisions are component-aware while readers may overlap writers", () => {
+  const tree = { path: "src/a", access: "write" as const, kind: "tree" as const };
+  assert.equal(leaseScopesOverlap(tree, { path: "src/a/file.ts", access: "write", kind: "file" }), true);
+  assert.equal(leaseScopesOverlap(tree, { path: "src/ab/file.ts", access: "write", kind: "file" }), false);
+  assert.equal(leaseScopesOverlap(tree, { path: "src/a/file.ts", access: "read", kind: "file" }), false);
+});

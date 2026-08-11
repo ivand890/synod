@@ -254,6 +254,33 @@ test("project-scoped commands without directory arguments still delegate locally
   assert.deepEqual(delegated, { version: packageVersion, args: ["profiles", "--json"] });
 });
 
+test("lease commands select the pinned runtime from their explicit project", async () => {
+  const callerDirectory = await temporaryProject();
+  const projectDirectory = await temporaryProject();
+  await installLocalRuntime(projectDirectory, { runPnpm: fakePnpmInstall });
+  let delegated;
+
+  const args = [
+    "lease", "acquire", "T-001",
+    "--owner-thread", "thread:runtime",
+    "--write", "src/task.ts",
+    "--cwd", projectDirectory,
+    "--json"
+  ];
+  const result = await prepareLocalRuntime(args, {
+    cwd: callerDirectory,
+    currentRuntime: async () => false,
+    executor(localRuntime, delegatedArgs) {
+      delegated = { version: localRuntime.descriptor.runtimeVersion, args: delegatedArgs };
+      return 0;
+    }
+  });
+
+  assert.equal(result.action, "delegate");
+  assert.equal(result.targetDirectory, projectDirectory);
+  assert.deepEqual(delegated, { version: packageVersion, args });
+});
+
 test("a positional checkpoint directory selects that project's pinned runtime", async () => {
   const callerDirectory = await temporaryProject();
   const projectDirectory = await temporaryProject();
