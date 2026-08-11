@@ -2585,6 +2585,11 @@ export async function splitTask({
         details: { taskId, state: task.state, used: task.correctionPolicy.used, limit: task.correctionPolicy.limit }
       });
     }
+    if (task.recovery?.status === "PENDING") {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} requires an explicit abandoned-owner recovery decision before it can split.`, {
+        details: { taskId, leaseId: task.recovery.endedLease.id, generation: task.recovery.endedLease.generation }
+      });
+    }
     for (const replacementId of replacementIds) {
       const replacement = state.tasks[replacementId];
       if (!replacement || replacement.state !== "PLANNED" || replacement.splitFrom) {
@@ -2592,6 +2597,29 @@ export async function splitTask({
           details: { taskId, replacementId, state: replacement?.state }
         });
       }
+    }
+    const dependentIds = state.taskOrder.filter(id => id !== taskId && state.tasks[id]?.dependsOn.includes(taskId));
+    const rewrittenDependencies = new Map<string, string[]>(dependentIds.map(dependentId => {
+      const dependent = state.tasks[dependentId]!;
+      const dependencies = dependent.dependsOn.flatMap(dependency => dependency === taskId ? replacementIds : [dependency]);
+      return [dependentId, [...new Set(dependencies)]];
+    }));
+    const dependencyMap = new Map(state.taskOrder.map(id => [id, rewrittenDependencies.get(id) || state.tasks[id]!.dependsOn]));
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+    const hasCycle = (id: string): boolean => {
+      if (visiting.has(id)) return true;
+      if (visited.has(id)) return false;
+      visiting.add(id);
+      if ((dependencyMap.get(id) || []).some(hasCycle)) return true;
+      visiting.delete(id);
+      visited.add(id);
+      return false;
+    };
+    if (state.taskOrder.some(hasCycle)) {
+      throw new SynodError(ERROR_CODES.TASK_INVALID, `Splitting task ${taskId} would create a dependency cycle.`, {
+        details: { taskId, replacements: replacementIds, dependents: dependentIds }
+      });
     }
     const fromState = task.state;
     task.state = "SUPERSEDED";
@@ -2605,12 +2633,22 @@ export async function splitTask({
       replacement.splitFrom = taskId;
       replacement.updatedAt = context.timestamp;
     }
+    for (const [dependentId, dependencies] of rewrittenDependencies) {
+      const dependent = state.tasks[dependentId]!;
+      dependent.dependsOn = dependencies;
+      dependent.updatedAt = context.timestamp;
+    }
     return {
       metadata: {
         fromState,
         toState: "SUPERSEDED",
         revision: task.revision,
-        payload: { replacements: replacementIds, reason: explanation, evidence: evidenceReferences }
+        payload: {
+          replacements: replacementIds,
+          dependents: dependentIds.map(dependentId => ({ id: dependentId, dependsOn: state.tasks[dependentId]!.dependsOn })),
+          reason: explanation,
+          evidence: evidenceReferences
+        }
       },
       result: { task, replacements: replacementIds.map(replacementId => state.tasks[replacementId]!) }
     };
@@ -3625,6 +3663,11 @@ export async function transitionTask({
   return commitMutation(targetDirectory, "task.transitioned", { actor, taskId }, async (state, context) => {
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    if (task.recovery?.status === "PENDING") {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} requires an explicit abandoned-owner recovery decision before any transition.`, {
+        details: { taskId, leaseId: task.recovery.endedLease.id, generation: task.recovery.endedLease.generation }
+      });
+    }
     if (!TRANSITIONS[task.state].has(targetState)) {
       throw new SynodError(ERROR_CODES.TRANSITION_INVALID, `Task ${taskId} cannot transition from ${task.state} to ${targetState}.`, {
         details: { taskId, fromState: task.state, targetState, allowed: [...TRANSITIONS[task.state]] }

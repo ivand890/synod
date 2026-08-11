@@ -291,6 +291,7 @@ test("an exhausted task can split only into explicit unaccepted replacement task
   const directory = await temporaryProject();
   await initializeGitHead(directory);
   await addDefaultTask(directory, { correctionLimit: 0 });
+  await addDefaultTask(directory, { id: "T-DEPENDENT", objective: "Dependent continuation", dependsOn: ["T-001"] });
   await addDefaultTask(directory, { id: "T-LEFT", objective: "Left replacement" });
   await addDefaultTask(directory, { id: "T-RIGHT", objective: "Right replacement" });
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
@@ -313,7 +314,38 @@ test("an exhausted task can split only into explicit unaccepted replacement task
     ["T-LEFT", "PLANNED", "pending", "T-001"],
     ["T-RIGHT", "PLANNED", "pending", "T-001"]
   ]);
-  assert.equal((await readOrchestration(directory)).events.at(-1)?.type, "task.split");
+  const persisted = await readOrchestration(directory);
+  assert.deepEqual(persisted.state.tasks["T-DEPENDENT"]?.dependsOn, ["T-LEFT", "T-RIGHT"]);
+  assert.equal(persisted.events.at(-1)?.type, "task.split");
+  assert.deepEqual(persisted.events.at(-1)?.payload.dependents, [{
+    id: "T-DEPENDENT",
+    dependsOn: ["T-LEFT", "T-RIGHT"]
+  }]);
+});
+
+test("task split rejects rewiring that would create a dependency cycle", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { correctionLimit: 0 });
+  await addDefaultTask(directory, { id: "T-DEPENDENT", objective: "Dependent continuation", dependsOn: ["T-001"] });
+  await addDefaultTask(directory, { id: "T-LEFT", objective: "Cyclic replacement", dependsOn: ["T-DEPENDENT"] });
+  await addDefaultTask(directory, { id: "T-RIGHT", objective: "Right replacement" });
+  const before = await readOrchestration(directory);
+
+  await assert.rejects(
+    splitTask({
+      directory,
+      id: "T-001",
+      replacements: ["T-LEFT", "T-RIGHT"],
+      reason: "unsafe split",
+      evidence: ["review:split"]
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.TASK_INVALID
+  );
+  const after = await readOrchestration(directory);
+  assert.equal(after.state.lastEvent.sequence, before.state.lastEvent.sequence);
+  assert.equal(after.state.tasks["T-001"]?.state, "PLANNED");
+  assert.deepEqual(after.state.tasks["T-DEPENDENT"]?.dependsOn, ["T-001"]);
 });
 
 test("delivery seals only owned paths and acceptance tolerates disjoint authorized work", async () => {
@@ -1020,6 +1052,11 @@ test("simultaneous abandoned-owner recovery has one canonical winner", async () 
     reason: "worker disappeared"
   });
   const before = await readOrchestration(directory);
+  await assert.rejects(
+    transitionTask({ directory, id: "T-001", to: "SUPERSEDED", revision: 0, reason: "bypass recovery" }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_STALE
+  );
+  assert.equal((await readOrchestration(directory)).state.lastEvent.sequence, before.state.lastEvent.sequence);
   const options = {
     directory,
     id: "T-001",
