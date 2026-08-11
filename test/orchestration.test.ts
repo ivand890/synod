@@ -1051,6 +1051,14 @@ test("simultaneous abandoned-owner recovery has one canonical winner", async () 
     expectedHeartbeatAt: acquired.lease.heartbeatAt,
     reason: "worker disappeared"
   });
+  await addDefaultTask(directory, { id: "T-UNRELATED", objective: "Acquire an unrelated lease" });
+  await transitionTask({ directory, id: "T-UNRELATED", to: "READY", revision: 0 });
+  await acquireTaskLease({
+    directory,
+    id: "T-UNRELATED",
+    ownerThread: "thread:unrelated",
+    write: ["src/unrelated.ts"]
+  });
   const before = await readOrchestration(directory);
   await assert.rejects(
     transitionTask({ directory, id: "T-001", to: "SUPERSEDED", revision: 0, reason: "bypass recovery" }),

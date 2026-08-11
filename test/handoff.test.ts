@@ -157,6 +157,7 @@ test("handoff derives focus, current evidence, blockers, gates, and legal transi
   assert.equal(byId.get("T-BLOCKED")?.blocker, "Awaiting authorization");
   assert.equal(byId.get("T-RECOVERY")?.recovery?.status, "PENDING");
   assert.equal(byId.get("T-RECOVERY")?.recovery?.endedLease.ownerThread, "test:T-RECOVERY");
+  assert.deepEqual(byId.get("T-RECOVERY")?.legalNextTransitions, []);
   assert.deepEqual(byId.get("T-DEPENDENT")?.incompleteDependencies, ["T-ACTIVE"]);
   assert.deepEqual(byId.get("T-DEPENDENT")?.legalNextTransitions, ["BLOCKED", "SUPERSEDED"]);
   assert.match(formatHandoff(handoff), /Synod canonical handoff/);

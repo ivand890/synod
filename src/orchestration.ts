@@ -369,6 +369,7 @@ export function legalTaskTransitions(
   task: OrchestrationTask,
   tasks: Readonly<Record<string, OrchestrationTask>>
 ): TaskState[] {
+  if (task.recovery?.status === "PENDING") return [];
   let allowed = [...TRANSITIONS[task.state]];
   if (task.state === "BLOCKED") {
     allowed = allowed.filter(target => target === "SUPERSEDED" || target === task.blockedFrom);
@@ -3242,7 +3243,10 @@ export async function acquireTaskLease({
       baselines: [...context.leaseBaselines.baselines, baseline]
     }), taskList(state).flatMap(currentTask => [
       ...(currentTask.lease ? [currentTask.lease] : []),
-      ...(currentTask.proposal ? [{ id: currentTask.proposal.leaseId, generation: currentTask.proposal.generation }] : [])
+      ...(currentTask.proposal ? [{ id: currentTask.proposal.leaseId, generation: currentTask.proposal.generation }] : []),
+      ...(currentTask.recovery?.status === "PENDING"
+        ? [{ id: currentTask.recovery.endedLease.id, generation: currentTask.recovery.endedLease.generation }]
+        : [])
     ]));
     return {
       leaseBaselines,

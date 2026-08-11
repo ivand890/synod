@@ -2,10 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
 import {
+  isCorrectionPolicy,
   leaseScopesOverlap,
   normalizeLeaseScopePath,
   normalizeLeaseScopes
 } from "../src/leases.js";
+
+test("historical over-limit correction policies remain readable", () => {
+  assert.equal(isCorrectionPolicy({ limit: 2, used: 3, overrides: [] }), true);
+});
 
 test("lease scope normalization rejects administrative and non-portable aliases", () => {
   for (const candidate of [

@@ -349,7 +349,6 @@ export function isCorrectionPolicy(value: unknown): value is CorrectionPolicy {
   return isRecord(value)
     && isNonNegativeInteger(value.limit)
     && isNonNegativeInteger(value.used)
-    && value.used <= value.limit
     && Array.isArray(value.overrides)
     && value.overrides.every(item => isRecord(item)
       && isPositiveInteger(item.added)
