@@ -229,6 +229,19 @@ test("rechecks lease expiry at the completion boundary", async () => {
   assert.equal(interrupted.reconciliation, "complete");
 });
 
+test("rechecks lease expiry before returning an existing completed worktree", async () => {
+  const { control, lease, options } = await fixture();
+  await createTaskWorktree(options);
+  const beforeExpiry = new Date(Date.parse(lease.expiresAt) - 1);
+  const expired = new Date(lease.expiresAt);
+  let calls = 0;
+  await assert.rejects(
+    createTaskWorktree(options, { clock: () => (++calls >= 2 ? expired : beforeExpiry) }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_CONFLICT
+  );
+  assert.equal((await taskWorktreeStatus({ directory: control, taskId: "T-001" })).record.creation.status, "COMPLETE");
+});
+
 test("seals and transactionally integrates a scoped proposal while preserving attributed drift", async () => {
   const { control, destination, options } = await fixture();
   await createTaskWorktree(options);
@@ -366,6 +379,21 @@ test("integration rechecks checkout contents at the completion boundary", async 
   );
   const status = await taskWorktreeStatus({ directory: control, taskId: "T-001" });
   assert.equal(status.record.integration.status, "INTENT");
+});
+
+test("completed integration retries revalidate the sealed proposal and control checkout", async () => {
+  const { control, destination, options } = await fixture();
+  await createTaskWorktree(options);
+  await activate(control);
+  await mkdir(path.join(destination, "src"));
+  await writeFile(path.join(destination, "src/t-001.ts"), "proposal\n");
+  await sealTaskWorktreeProposal(options);
+  await integrateTaskWorktreeProposal(options);
+  await writeFile(path.join(control, "src/t-001.ts"), "changed after integration\n");
+  await assert.rejects(
+    integrateTaskWorktreeProposal(options),
+    error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_RECONCILIATION_REQUIRED
+  );
 });
 
 test("cleanup is explicit, non-force, interruption-safe, and unblocks a new generation", async () => {

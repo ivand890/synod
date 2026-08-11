@@ -797,6 +797,12 @@ export async function createTaskWorktree(
       const status = await inspectRegisteredWorktree(control, existing, gitRunner);
       if (existing.creation.status === "COMPLETE") {
         if (status.reconciliation !== "complete") reconciliationRequired("Registered task worktree identity changed.", status);
+        const inspectedAt = now();
+        if (Date.parse(lease.expiresAt) <= inspectedAt.getTime()) {
+          conflict(`Task ${taskId} writer lease expired while revalidating its task worktree.`, {
+            expiresAt: lease.expiresAt
+          });
+        }
         return status;
       }
       if (status.reconciliation === "manual_reconciliation") reconciliationRequired("Interrupted creation requires manual reconciliation.", status);
@@ -1128,7 +1134,6 @@ export async function integrateTaskWorktreeProposal(
     if (record.proposal?.status !== "SEALED" || !record.proposal.bundleId || !record.proposal.fingerprint) {
       conflict("Task worktree integration requires a sealed proposal.", { recordId: record.id });
     }
-    if (record.integration.status === "COMPLETE") return structuredClone(record);
     const bundle = resolveProjectPath(control.controlRoot, record.proposal.path);
     const verified = await verifyRecoveryBundle({ bundle });
     if (verified.bundleId !== record.proposal.bundleId
@@ -1144,6 +1149,28 @@ export async function integrateTaskWorktreeProposal(
     if (source.checkpoint.head !== record.baseHead
       || source.checkpoint.worktree.fingerprint !== record.proposal.fingerprint) {
       reconciliationRequired("Task worktree changed after its proposal was sealed.", { recordId: record.id });
+    }
+    if (record.integration.status === "COMPLETE") {
+      const completedControl = await captureGitCheckpointSnapshot(control.controlRoot);
+      if (record.integration.fingerprint !== record.proposal.fingerprint
+        || completedControl.checkpoint.head !== record.baseHead
+        || completedControl.checkpoint.branch !== record.sourceBranch
+        || completedControl.checkpoint.worktree.fingerprint !== record.integration.overallFingerprint) {
+        reconciliationRequired("Completed task worktree integration no longer matches its sealed proposal or control checkout.", {
+          recordId: record.id,
+          expectedHead: record.baseHead,
+          actualHead: completedControl.checkpoint.head,
+          expectedFingerprint: record.integration.overallFingerprint,
+          actualFingerprint: completedControl.checkpoint.worktree.fingerprint
+        });
+      }
+      const inspectedAt = now();
+      if (Date.parse(lease.expiresAt) <= inspectedAt.getTime()) {
+        conflict(`Task ${taskId} writer lease expired while revalidating its integrated proposal.`, {
+          expiresAt: lease.expiresAt
+        });
+      }
+      return structuredClone(record);
     }
     const initialControl = await captureGitCheckpointSnapshot(control.controlRoot);
     validateIntegrationAttribution(
