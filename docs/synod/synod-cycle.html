@@ -1,0 +1,2528 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#081019" />
+    <meta
+      name="description"
+      content="Diagrama interactivo del ciclo completo de Synod: agentes, contexto, leases, propuestas, revisión y checkpoint."
+    />
+    <title>Synod · ciclo completo</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #071019;
+        --bg-soft: #0b1722;
+        --panel: rgba(13, 27, 39, 0.86);
+        --panel-strong: #0e2030;
+        --panel-hover: #122a3d;
+        --line: rgba(180, 219, 234, 0.14);
+        --line-strong: rgba(180, 219, 234, 0.28);
+        --text: #e8f1f4;
+        --muted: #91a7b3;
+        --faint: #5e7785;
+        --cyan: #5de4f1;
+        --cyan-soft: rgba(93, 228, 241, 0.14);
+        --blue: #87a6ff;
+        --blue-soft: rgba(135, 166, 255, 0.13);
+        --green: #85e5b3;
+        --green-soft: rgba(133, 229, 179, 0.13);
+        --amber: #f4c979;
+        --amber-soft: rgba(244, 201, 121, 0.14);
+        --pink: #f49cc5;
+        --pink-soft: rgba(244, 156, 197, 0.13);
+        --red: #ff8f8f;
+        --red-soft: rgba(255, 143, 143, 0.13);
+        --radius: 18px;
+        --radius-small: 12px;
+        --shadow: 0 20px 70px rgba(0, 0, 0, 0.26);
+        --mono: "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, monospace;
+        --sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        background: var(--bg);
+        scroll-behavior: smooth;
+      }
+
+      body {
+        min-width: 320px;
+        margin: 0;
+        background:
+          radial-gradient(circle at 6% 0%, rgba(93, 228, 241, 0.13), transparent 31rem),
+          radial-gradient(circle at 100% 18%, rgba(135, 166, 255, 0.1), transparent 29rem),
+          linear-gradient(180deg, #071019 0%, #08131e 56%, #071019 100%);
+        color: var(--text);
+        font-family: var(--sans);
+        line-height: 1.45;
+      }
+
+      button,
+      select {
+        color: inherit;
+        font: inherit;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      button:focus-visible,
+      select:focus-visible {
+        outline: 2px solid var(--cyan);
+        outline-offset: 3px;
+      }
+
+      code,
+      .mono {
+        font-family: var(--mono);
+      }
+
+      .app-shell {
+        width: min(1500px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 42px 0 70px;
+      }
+
+      .hero {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 30px;
+        margin-bottom: 25px;
+      }
+
+      .eyebrow,
+      .kicker {
+        color: var(--cyan);
+        font-family: var(--mono);
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+
+      .hero h1 {
+        max-width: 760px;
+        margin: 10px 0 12px;
+        font-size: clamp(2.35rem, 5vw, 4.9rem);
+        font-weight: 630;
+        letter-spacing: -0.065em;
+        line-height: 0.98;
+      }
+
+      .hero p {
+        max-width: 710px;
+        margin: 0;
+        color: var(--muted);
+        font-size: clamp(0.98rem, 1.35vw, 1.14rem);
+      }
+
+      .hero-meta {
+        display: grid;
+        min-width: 220px;
+        gap: 12px;
+        padding-bottom: 4px;
+      }
+
+      .hero-meta-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        border-bottom: 1px solid var(--line);
+        padding-bottom: 9px;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+
+      .hero-meta-item strong {
+        color: var(--text);
+        font-family: var(--mono);
+        font-size: 0.72rem;
+        font-weight: 600;
+      }
+
+      .controlbar {
+        position: sticky;
+        z-index: 10;
+        top: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        margin-bottom: 18px;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius);
+        padding: 11px 13px;
+        background: rgba(9, 22, 33, 0.88);
+        box-shadow: 0 15px 35px rgba(0, 0, 0, 0.17);
+        backdrop-filter: blur(18px);
+      }
+
+      .transport,
+      .mode-controls,
+      .control-group {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .transport button,
+      .mode-controls button,
+      .select-wrap select {
+        min-height: 36px;
+        border: 1px solid var(--line-strong);
+        border-radius: 10px;
+        padding: 0 12px;
+        background: rgba(17, 38, 54, 0.78);
+        color: var(--text);
+        font-size: 0.77rem;
+        transition: 160ms ease;
+      }
+
+      .transport button:hover,
+      .mode-controls button:hover,
+      .select-wrap select:hover {
+        border-color: rgba(93, 228, 241, 0.58);
+        background: var(--panel-hover);
+      }
+
+      .transport .play-button {
+        border-color: rgba(93, 228, 241, 0.62);
+        background: var(--cyan-soft);
+        color: var(--cyan);
+        font-weight: 700;
+      }
+
+      .transport .icon-button {
+        width: 38px;
+        padding: 0;
+        font-size: 1rem;
+      }
+
+      .control-label {
+        color: var(--faint);
+        font-family: var(--mono);
+        font-size: 0.64rem;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      .select-wrap {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+      }
+
+      .select-wrap select {
+        min-width: 130px;
+        padding-right: 26px;
+      }
+
+      .mode-controls .correction-toggle {
+        border-color: rgba(244, 201, 121, 0.4);
+        color: var(--amber);
+      }
+
+      .mode-controls .correction-toggle.active {
+        background: var(--amber-soft);
+        box-shadow: inset 0 0 0 1px rgba(244, 201, 121, 0.18);
+      }
+
+      .step-counter {
+        min-width: 84px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 0.7rem;
+        text-align: right;
+      }
+
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: linear-gradient(145deg, rgba(14, 32, 48, 0.91), rgba(9, 23, 35, 0.89));
+        box-shadow: var(--shadow);
+      }
+
+      .top-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.75fr) minmax(305px, 0.75fr);
+        gap: 18px;
+      }
+
+      .diagram-panel {
+        min-width: 0;
+        overflow: hidden;
+      }
+
+      .panel-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 24px;
+        padding: 24px 24px 16px;
+      }
+
+      .panel-head h2,
+      .section-heading h2 {
+        margin: 6px 0 5px;
+        font-size: 1.1rem;
+        font-weight: 620;
+        letter-spacing: -0.025em;
+      }
+
+      .panel-head p,
+      .section-heading p {
+        max-width: 720px;
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+
+      .live-indicator {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 7px 9px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 0.62rem;
+        white-space: nowrap;
+      }
+
+      .live-indicator::before {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: 0 0 0 5px rgba(133, 229, 179, 0.1), 0 0 13px var(--green);
+        content: "";
+      }
+
+      .stage-rail {
+        display: flex;
+        gap: 7px;
+        overflow-x: auto;
+        padding: 0 24px 17px;
+        scrollbar-width: thin;
+        scrollbar-color: var(--line-strong) transparent;
+      }
+
+      .stage-rail button {
+        flex: 0 0 auto;
+        min-width: 86px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 8px 10px;
+        background: rgba(9, 22, 33, 0.64);
+        color: var(--muted);
+        font-size: 0.66rem;
+        text-align: left;
+        transition: 160ms ease;
+      }
+
+      .stage-rail button span {
+        display: block;
+        margin-bottom: 3px;
+        color: var(--faint);
+        font-family: var(--mono);
+        font-size: 0.58rem;
+      }
+
+      .stage-rail button:hover {
+        border-color: var(--line-strong);
+        color: var(--text);
+      }
+
+      .stage-rail button.active {
+        border-color: rgba(93, 228, 241, 0.58);
+        background: var(--cyan-soft);
+        color: var(--text);
+      }
+
+      .stage-rail button.active span {
+        color: var(--cyan);
+      }
+
+      .canvas {
+        position: relative;
+        min-height: 470px;
+        margin: 0 13px;
+        overflow: hidden;
+        border: 1px solid rgba(180, 219, 234, 0.1);
+        border-radius: 15px;
+        background:
+          linear-gradient(rgba(93, 228, 241, 0.035) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(93, 228, 241, 0.035) 1px, transparent 1px),
+          radial-gradient(circle at 50% 48%, rgba(93, 228, 241, 0.07), transparent 20rem),
+          #091824;
+        background-size: 34px 34px, 34px 34px, auto, auto;
+      }
+
+      .canvas::before,
+      .canvas::after {
+        position: absolute;
+        z-index: 1;
+        color: rgba(145, 167, 179, 0.45);
+        font-family: var(--mono);
+        font-size: 0.59rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        pointer-events: none;
+      }
+
+      .canvas::before {
+        top: 13px;
+        left: 15px;
+        content: "CONTROL PLANE";
+      }
+
+      .canvas::after {
+        right: 15px;
+        bottom: 13px;
+        content: "DATA + EVIDENCE PLANE";
+      }
+
+      .routes {
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
+
+      .route {
+        fill: none;
+        stroke: rgba(145, 167, 179, 0.22);
+        stroke-width: 2;
+        stroke-dasharray: 6 9;
+        transition: 260ms ease;
+      }
+
+      .route.active {
+        stroke: var(--cyan);
+        stroke-width: 3;
+        stroke-dasharray: 9 7;
+        filter: drop-shadow(0 0 7px rgba(93, 228, 241, 0.52));
+        animation: route-flow 1.5s linear infinite;
+      }
+
+      .route.branch {
+        stroke: rgba(244, 201, 121, 0.32);
+        stroke-dasharray: 3 10;
+      }
+
+      .route.branch.active {
+        stroke: var(--amber);
+        filter: drop-shadow(0 0 7px rgba(244, 201, 121, 0.45));
+      }
+
+      .packet {
+        fill: var(--cyan);
+        filter: drop-shadow(0 0 7px var(--cyan));
+        opacity: 0;
+        transition: 250ms ease;
+      }
+
+      .canvas.playing .packet {
+        opacity: 1;
+        animation: packet-pulse 1.05s ease-in-out infinite;
+      }
+
+      .node {
+        position: absolute;
+        z-index: 2;
+        border: 1px solid var(--line-strong);
+        border-radius: 14px;
+        padding: 13px 14px;
+        background: rgba(12, 30, 45, 0.94);
+        box-shadow: 0 15px 30px rgba(0, 0, 0, 0.2);
+        transition: 260ms ease;
+      }
+
+      .node::after {
+        position: absolute;
+        top: 11px;
+        right: 11px;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--faint);
+        content: "";
+      }
+
+      .node.active {
+        border-color: rgba(93, 228, 241, 0.74);
+        background: linear-gradient(145deg, rgba(21, 51, 67, 0.98), rgba(11, 31, 45, 0.98));
+        box-shadow: 0 0 0 1px rgba(93, 228, 241, 0.12), 0 17px 42px rgba(0, 0, 0, 0.35), 0 0 30px rgba(93, 228, 241, 0.1);
+        transform: translateY(-3px);
+      }
+
+      .node.active::after {
+        background: var(--cyan);
+        box-shadow: 0 0 12px var(--cyan);
+      }
+
+      .node.source {
+        top: 48px;
+        left: 4%;
+        width: 20%;
+      }
+
+      .node.supervisor {
+        top: 34px;
+        left: 34%;
+        width: 32%;
+      }
+
+      .node.state-store {
+        top: 48px;
+        right: 4%;
+        width: 22%;
+      }
+
+      .node.agent-cluster {
+        top: 204px;
+        left: 24%;
+        width: 42%;
+      }
+
+      .node.worktree {
+        top: 292px;
+        left: 4%;
+        width: 23%;
+      }
+
+      .node.proposal {
+        top: 292px;
+        right: 4%;
+        width: 23%;
+      }
+
+      .node.checkpoint {
+        top: 380px;
+        left: 34%;
+        width: 32%;
+      }
+
+      .node-top {
+        display: flex;
+        align-items: flex-start;
+        gap: 9px;
+        padding-right: 12px;
+      }
+
+      .node-icon {
+        display: grid;
+        flex: 0 0 auto;
+        place-items: center;
+        width: 26px;
+        height: 26px;
+        border: 1px solid currentColor;
+        border-radius: 8px;
+        color: var(--cyan);
+        font-family: var(--mono);
+        font-size: 0.65rem;
+        font-weight: 700;
+      }
+
+      .node.state-store .node-icon,
+      .node.checkpoint .node-icon {
+        color: var(--green);
+      }
+
+      .node.worktree .node-icon,
+      .node.proposal .node-icon {
+        color: var(--amber);
+      }
+
+      .node h3 {
+        margin: 0;
+        font-size: 0.82rem;
+        font-weight: 650;
+        letter-spacing: -0.02em;
+      }
+
+      .node p {
+        margin: 3px 0 0;
+        color: var(--muted);
+        font-size: 0.65rem;
+        line-height: 1.35;
+      }
+
+      .node-code {
+        display: block;
+        margin-top: 10px;
+        overflow: hidden;
+        color: var(--faint);
+        font-family: var(--mono);
+        font-size: 0.59rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .agent-mini-list {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 5px;
+        margin-top: 11px;
+      }
+
+      .agent-mini {
+        border: 1px solid rgba(180, 219, 234, 0.12);
+        border-radius: 7px;
+        padding: 5px 6px;
+        background: rgba(8, 20, 30, 0.62);
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 0.54rem;
+        transition: 160ms ease;
+      }
+
+      .agent-mini.active {
+        border-color: rgba(93, 228, 241, 0.5);
+        background: var(--cyan-soft);
+        color: var(--cyan);
+      }
+
+      .node-state {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        margin-top: 10px;
+        border-radius: 999px;
+        padding: 4px 7px;
+        background: var(--green-soft);
+        color: var(--green);
+        font-family: var(--mono);
+        font-size: 0.57rem;
+      }
+
+      .node-state::before {
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: currentColor;
+        content: "";
+      }
+
+      .node.worktree .node-state,
+      .node.proposal .node-state {
+        background: var(--amber-soft);
+        color: var(--amber);
+      }
+
+      .route-caption {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+        min-height: 54px;
+        padding: 12px 24px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.73rem;
+      }
+
+      .route-caption strong {
+        color: var(--text);
+        font-weight: 600;
+      }
+
+      .route-caption .mono {
+        color: var(--cyan);
+        font-size: 0.64rem;
+      }
+
+      .side-stack {
+        display: grid;
+        align-content: start;
+        gap: 18px;
+        min-width: 0;
+      }
+
+      .context-panel,
+      .event-panel {
+        padding: 21px;
+      }
+
+      .context-panel {
+        min-height: 300px;
+      }
+
+      .section-heading {
+        margin-bottom: 17px;
+      }
+
+      .section-heading.tight {
+        margin-bottom: 12px;
+      }
+
+      .section-heading h2 {
+        font-size: 0.97rem;
+      }
+
+      .context-note {
+        margin: -5px 0 16px;
+        color: var(--faint);
+        font-size: 0.66rem;
+      }
+
+      .context-total {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 15px;
+        margin-bottom: 9px;
+      }
+
+      .context-total strong {
+        font-family: var(--mono);
+        font-size: 1.5rem;
+        font-weight: 550;
+        letter-spacing: -0.06em;
+      }
+
+      .context-total strong span {
+        color: var(--faint);
+        font-size: 0.72rem;
+        letter-spacing: 0;
+      }
+
+      .context-total small {
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 0.62rem;
+      }
+
+      .context-bar {
+        display: flex;
+        height: 16px;
+        overflow: hidden;
+        border: 1px solid rgba(180, 219, 234, 0.16);
+        border-radius: 6px;
+        background: rgba(6, 16, 25, 0.78);
+      }
+
+      .context-segment {
+        min-width: 2px;
+        height: 100%;
+        transition: width 420ms cubic-bezier(0.22, 0.8, 0.28, 1);
+      }
+
+      .context-segment.durable {
+        background: var(--green);
+      }
+
+      .context-segment.contract {
+        background: var(--cyan);
+      }
+
+      .context-segment.thread {
+        background: var(--blue);
+      }
+
+      .context-segment.evidence {
+        background: var(--amber);
+      }
+
+      .context-segment.policy {
+        background: var(--pink);
+      }
+
+      .context-legend {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px 10px;
+        margin: 14px 0 20px;
+      }
+
+      .legend-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+        color: var(--muted);
+        font-size: 0.62rem;
+      }
+
+      .legend-item i {
+        flex: 0 0 auto;
+        width: 7px;
+        height: 7px;
+        border-radius: 2px;
+      }
+
+      .legend-item i.durable {
+        background: var(--green);
+      }
+
+      .legend-item i.contract {
+        background: var(--cyan);
+      }
+
+      .legend-item i.thread {
+        background: var(--blue);
+      }
+
+      .legend-item i.evidence {
+        background: var(--amber);
+      }
+
+      .legend-item i.policy {
+        background: var(--pink);
+      }
+
+      .thread-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .thread-row {
+        display: grid;
+        grid-template-columns: 78px minmax(0, 1fr) 47px;
+        align-items: center;
+        gap: 8px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 0.59rem;
+      }
+
+      .thread-row.active {
+        color: var(--text);
+      }
+
+      .thread-track {
+        height: 6px;
+        overflow: hidden;
+        border-radius: 99px;
+        background: rgba(180, 219, 234, 0.1);
+      }
+
+      .thread-fill {
+        height: 100%;
+        border-radius: inherit;
+        background: var(--blue);
+        transition: width 420ms cubic-bezier(0.22, 0.8, 0.28, 1);
+      }
+
+      .thread-row.active .thread-fill {
+        background: var(--cyan);
+        box-shadow: 0 0 9px rgba(93, 228, 241, 0.52);
+      }
+
+      .thread-row strong {
+        color: inherit;
+        font-weight: 500;
+        text-align: right;
+      }
+
+      .event-panel {
+        min-height: 300px;
+      }
+
+      .event-tag-row,
+      .status-row,
+      .detail-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+      }
+
+      .event-tag,
+      .status-pill,
+      .detail-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 5px 8px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 0.59rem;
+      }
+
+      .event-tag.canonical,
+      .status-pill.green,
+      .detail-tag.green {
+        border-color: rgba(133, 229, 179, 0.3);
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .event-tag.runtime,
+      .detail-tag.blue {
+        border-color: rgba(135, 166, 255, 0.3);
+        background: var(--blue-soft);
+        color: var(--blue);
+      }
+
+      .event-tag.branch,
+      .detail-tag.amber {
+        border-color: rgba(244, 201, 121, 0.3);
+        background: var(--amber-soft);
+        color: var(--amber);
+      }
+
+      .event-panel h3 {
+        margin: 18px 0 7px;
+        font-size: 1.22rem;
+        font-weight: 620;
+        letter-spacing: -0.04em;
+      }
+
+      .event-panel > p {
+        margin: 0 0 17px;
+        color: var(--muted);
+        font-size: 0.77rem;
+      }
+
+      .event-command {
+        margin: 0 0 15px;
+        border-left: 2px solid var(--cyan);
+        padding-left: 11px;
+        color: var(--cyan);
+        font-family: var(--mono);
+        font-size: 0.63rem;
+        line-height: 1.5;
+      }
+
+      .record-list {
+        display: grid;
+        gap: 7px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .record-list li {
+        display: flex;
+        align-items: baseline;
+        gap: 7px;
+        color: var(--muted);
+        font-size: 0.66rem;
+      }
+
+      .record-list li::before {
+        flex: 0 0 auto;
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: var(--green);
+        content: "";
+      }
+
+      .record-list code {
+        color: var(--text);
+        font-size: 0.61rem;
+      }
+
+      .lower-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.12fr) minmax(0, 0.88fr) minmax(0, 0.9fr);
+        gap: 18px;
+        margin-top: 18px;
+      }
+
+      .detail-panel,
+      .agent-panel,
+      .safety-panel,
+      .timeline-panel {
+        padding: 21px;
+      }
+
+      .detail-title {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+
+      .detail-title h2 {
+        margin: 0;
+        font-size: 1.22rem;
+        font-weight: 620;
+        letter-spacing: -0.045em;
+      }
+
+      .detail-title span {
+        color: var(--faint);
+        font-family: var(--mono);
+        font-size: 0.61rem;
+      }
+
+      .detail-summary {
+        margin: 15px 0 18px;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+
+      .detail-columns {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 15px;
+        margin-top: 19px;
+      }
+
+      .detail-block h3 {
+        margin: 0 0 8px;
+        color: var(--faint);
+        font-family: var(--mono);
+        font-size: 0.61rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .detail-block ul {
+        display: grid;
+        gap: 6px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .detail-block li {
+        color: var(--muted);
+        font-size: 0.68rem;
+      }
+
+      .detail-block li::before {
+        margin-right: 6px;
+        color: var(--cyan);
+        content: "→";
+      }
+
+      .record-highlight {
+        display: grid;
+        gap: 5px;
+        margin-top: 20px;
+        border: 1px solid rgba(93, 228, 241, 0.2);
+        border-radius: 11px;
+        padding: 11px 12px;
+        background: rgba(93, 228, 241, 0.06);
+      }
+
+      .record-highlight span {
+        color: var(--faint);
+        font-family: var(--mono);
+        font-size: 0.59rem;
+        text-transform: uppercase;
+      }
+
+      .record-highlight code {
+        color: var(--cyan);
+        font-size: 0.64rem;
+        overflow-wrap: anywhere;
+      }
+
+      .agent-roster {
+        display: grid;
+        gap: 8px;
+      }
+
+      .agent-card {
+        display: grid;
+        grid-template-columns: 29px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 9px;
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        padding: 9px;
+        background: rgba(8, 20, 30, 0.48);
+        text-align: left;
+        transition: 160ms ease;
+      }
+
+      .agent-card:hover,
+      .agent-card.selected {
+        border-color: rgba(93, 228, 241, 0.46);
+        background: var(--cyan-soft);
+      }
+
+      .agent-avatar {
+        display: grid;
+        place-items: center;
+        width: 29px;
+        height: 29px;
+        border-radius: 9px;
+        background: var(--blue-soft);
+        color: var(--blue);
+        font-family: var(--mono);
+        font-size: 0.63rem;
+        font-weight: 700;
+      }
+
+      .agent-card[data-agent="supervisor"] .agent-avatar {
+        background: var(--cyan-soft);
+        color: var(--cyan);
+      }
+
+      .agent-card[data-agent="implementer"] .agent-avatar {
+        background: var(--amber-soft);
+        color: var(--amber);
+      }
+
+      .agent-card[data-agent="reviewer"] .agent-avatar,
+      .agent-card[data-agent="verifier"] .agent-avatar {
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .agent-name {
+        display: block;
+        color: var(--text);
+        font-size: 0.7rem;
+        font-weight: 600;
+      }
+
+      .agent-role {
+        display: block;
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 0.61rem;
+      }
+
+      .agent-model {
+        color: var(--faint);
+        font-family: var(--mono);
+        font-size: 0.55rem;
+        text-align: right;
+      }
+
+      .agent-model strong {
+        display: block;
+        color: var(--muted);
+        font-weight: 500;
+      }
+
+      .agent-sandbox {
+        margin-top: 2px;
+      }
+
+      .agent-callout {
+        min-height: 62px;
+        margin-top: 13px;
+        border-left: 2px solid var(--cyan);
+        padding: 3px 0 3px 11px;
+        color: var(--muted);
+        font-size: 0.68rem;
+      }
+
+      .agent-callout strong {
+        display: block;
+        margin-bottom: 3px;
+        color: var(--text);
+        font-size: 0.72rem;
+      }
+
+      .safety-list {
+        display: grid;
+        gap: 9px;
+      }
+
+      .safety-button {
+        display: grid;
+        grid-template-columns: 29px minmax(0, 1fr);
+        gap: 9px;
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        padding: 10px;
+        background: rgba(8, 20, 30, 0.48);
+        text-align: left;
+        transition: 160ms ease;
+      }
+
+      .safety-button:hover,
+      .safety-button.active {
+        border-color: rgba(244, 201, 121, 0.5);
+        background: var(--amber-soft);
+      }
+
+      .safety-icon {
+        display: grid;
+        place-items: center;
+        width: 29px;
+        height: 29px;
+        border-radius: 9px;
+        background: var(--amber-soft);
+        color: var(--amber);
+        font-family: var(--mono);
+        font-size: 0.68rem;
+        font-weight: 700;
+      }
+
+      .safety-button strong {
+        display: block;
+        color: var(--text);
+        font-size: 0.7rem;
+        font-weight: 600;
+      }
+
+      .safety-button span {
+        display: block;
+        margin-top: 3px;
+        color: var(--muted);
+        font-size: 0.61rem;
+      }
+
+      .safety-output {
+        min-height: 101px;
+        margin-top: 14px;
+        border: 1px solid rgba(244, 201, 121, 0.2);
+        border-radius: 11px;
+        padding: 11px 12px;
+        background: rgba(244, 201, 121, 0.05);
+      }
+
+      .safety-output strong {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--amber);
+        font-size: 0.7rem;
+      }
+
+      .safety-output p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.66rem;
+      }
+
+      .timeline-panel {
+        margin-top: 18px;
+      }
+
+      .timeline-header {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 18px;
+        margin-bottom: 20px;
+      }
+
+      .timeline-header small {
+        max-width: 360px;
+        color: var(--faint);
+        font-size: 0.64rem;
+        text-align: right;
+      }
+
+      .timeline {
+        position: relative;
+        display: grid;
+        grid-template-columns: repeat(var(--timeline-columns, 10), minmax(110px, 1fr));
+        gap: 0;
+        overflow-x: auto;
+        padding-bottom: 5px;
+      }
+
+      .timeline::before {
+        position: absolute;
+        top: 12px;
+        right: 0;
+        left: 0;
+        height: 1px;
+        background: linear-gradient(90deg, rgba(93, 228, 241, 0.48), rgba(133, 229, 179, 0.32), rgba(244, 201, 121, 0.46));
+        content: "";
+      }
+
+      .timeline-step {
+        position: relative;
+        min-width: 110px;
+        padding: 28px 10px 0 0;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        text-align: left;
+      }
+
+      .timeline-step::before {
+        position: absolute;
+        top: 6px;
+        left: 0;
+        width: 13px;
+        height: 13px;
+        border: 3px solid var(--bg-soft);
+        border-radius: 50%;
+        background: var(--faint);
+        box-shadow: 0 0 0 1px var(--line-strong);
+        content: "";
+        transition: 160ms ease;
+      }
+
+      .timeline-step:hover,
+      .timeline-step.active {
+        color: var(--text);
+      }
+
+      .timeline-step.active::before {
+        background: var(--cyan);
+        box-shadow: 0 0 0 1px var(--cyan), 0 0 15px rgba(93, 228, 241, 0.7);
+      }
+
+      .timeline-step span {
+        display: block;
+        margin-bottom: 4px;
+        color: var(--faint);
+        font-family: var(--mono);
+        font-size: 0.57rem;
+      }
+
+      .timeline-step.active span {
+        color: var(--cyan);
+      }
+
+      .timeline-step strong {
+        display: block;
+        margin-bottom: 4px;
+        font-size: 0.67rem;
+        font-weight: 600;
+      }
+
+      .timeline-step small {
+        display: block;
+        color: inherit;
+        font-size: 0.59rem;
+        line-height: 1.35;
+      }
+
+      .legend-footer {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 13px 20px;
+        margin-top: 25px;
+        border-top: 1px solid var(--line);
+        padding-top: 18px;
+        color: var(--faint);
+        font-size: 0.64rem;
+      }
+
+      .legend-footer span {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .legend-footer i {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--cyan);
+      }
+
+      .legend-footer i.green {
+        background: var(--green);
+      }
+
+      .legend-footer i.amber {
+        background: var(--amber);
+      }
+
+      .legend-footer i.red {
+        background: var(--red);
+      }
+
+      .disclaimer {
+        max-width: 760px;
+        margin: 19px 0 0;
+        color: var(--faint);
+        font-size: 0.65rem;
+      }
+
+      @keyframes route-flow {
+        to {
+          stroke-dashoffset: -32;
+        }
+      }
+
+      @keyframes packet-pulse {
+        0%,
+        100% {
+          transform: scale(0.82);
+          opacity: 0.55;
+        }
+        50% {
+          transform: scale(1.15);
+          opacity: 1;
+        }
+      }
+
+      @media (max-width: 1180px) {
+        .top-grid {
+          grid-template-columns: minmax(0, 1.45fr) minmax(290px, 0.75fr);
+        }
+
+        .lower-grid {
+          grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        }
+
+        .safety-panel {
+          grid-column: span 2;
+        }
+      }
+
+      @media (max-width: 880px) {
+        .app-shell {
+          width: min(100% - 24px, 720px);
+          padding-top: 26px;
+        }
+
+        .hero {
+          display: block;
+        }
+
+        .hero-meta {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          margin-top: 22px;
+        }
+
+        .hero-meta-item {
+          display: grid;
+          justify-content: start;
+          gap: 3px;
+        }
+
+        .controlbar {
+          position: static;
+          align-items: flex-start;
+          flex-direction: column;
+        }
+
+        .mode-controls {
+          width: 100%;
+          justify-content: space-between;
+          flex-wrap: wrap;
+        }
+
+        .top-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .side-stack {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .lower-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .safety-panel {
+          grid-column: auto;
+        }
+      }
+
+      @media (max-width: 650px) {
+        .app-shell {
+          width: min(100% - 16px, 560px);
+          padding-bottom: 36px;
+        }
+
+        .hero h1 {
+          font-size: 2.55rem;
+        }
+
+        .hero-meta,
+        .side-stack {
+          grid-template-columns: 1fr;
+        }
+
+        .panel-head {
+          display: block;
+          padding: 19px 17px 14px;
+        }
+
+        .live-indicator {
+          display: inline-flex;
+          margin-top: 14px;
+        }
+
+        .stage-rail {
+          padding-right: 17px;
+          padding-left: 17px;
+        }
+
+        .canvas {
+          min-height: 650px;
+          margin: 0 8px;
+        }
+
+        .canvas::before {
+          top: 11px;
+          left: 11px;
+        }
+
+        .canvas::after {
+          right: 11px;
+          bottom: 11px;
+        }
+
+        .routes {
+          display: none;
+        }
+
+        .node.source {
+          top: 39px;
+          left: 5%;
+          width: 42%;
+        }
+
+        .node.supervisor {
+          top: 39px;
+          right: 5%;
+          left: auto;
+          width: 42%;
+        }
+
+        .node.state-store {
+          top: 161px;
+          right: 5%;
+          left: 5%;
+          width: auto;
+        }
+
+        .node.agent-cluster {
+          top: 274px;
+          right: 5%;
+          left: 5%;
+          width: auto;
+        }
+
+        .node.worktree {
+          top: 414px;
+          left: 5%;
+          width: 42%;
+        }
+
+        .node.proposal {
+          top: 414px;
+          right: 5%;
+          width: 42%;
+        }
+
+        .node.checkpoint {
+          top: 542px;
+          right: 5%;
+          left: 5%;
+          width: auto;
+        }
+
+        .agent-mini-list {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .route-caption {
+          display: block;
+          padding: 11px 17px;
+        }
+
+        .route-caption .mono {
+          display: block;
+          margin-top: 5px;
+        }
+
+        .context-panel,
+        .event-panel,
+        .detail-panel,
+        .agent-panel,
+        .safety-panel,
+        .timeline-panel {
+          padding: 17px;
+        }
+
+        .detail-columns {
+          grid-template-columns: 1fr;
+        }
+
+        .timeline-header {
+          display: block;
+        }
+
+        .timeline-header small {
+          display: block;
+          margin-top: 8px;
+          text-align: left;
+        }
+
+        .timeline {
+          grid-template-columns: repeat(var(--timeline-columns, 10), 125px);
+          padding-right: 10px;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          animation-duration: 0.001ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.001ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Synod / runtime map</div>
+          <h1>Un ciclo completo, visto desde dentro.</h1>
+          <p>
+            Reproduce cómo una solicitud pasa de objetivo a tarea verificable: el supervisor configura los roles,
+            un worker escribe detrás de un lease, la propuesta se sella y la evidencia cierra el circuito.
+          </p>
+        </div>
+        <div class="hero-meta" aria-label="Datos del visualizador">
+          <div class="hero-meta-item"><span>Repositorio</span><strong>ivand890/synod</strong></div>
+          <div class="hero-meta-item"><span>Estado canónico</span><strong>.synod/state.json</strong></div>
+          <div class="hero-meta-item"><span>Hilos máximos</span><strong>3 / sesión</strong></div>
+        </div>
+      </header>
+
+      <section class="controlbar" aria-label="Controles del ciclo">
+        <div class="transport">
+          <button class="icon-button" id="previous-step" type="button" aria-label="Paso anterior">←</button>
+          <button class="play-button" id="play-toggle" type="button">▶ Reproducir</button>
+          <button class="icon-button" id="next-step" type="button" aria-label="Siguiente paso">→</button>
+          <button id="reset-cycle" type="button">Reiniciar</button>
+        </div>
+        <div class="mode-controls">
+          <div class="select-wrap">
+            <span class="control-label">Perfil</span>
+            <select id="profile-select" aria-label="Perfil de modelos">
+              <option value="portable">portable</option>
+              <option value="synod-5.6">synod-5.6</option>
+            </select>
+          </div>
+          <button class="correction-toggle" id="correction-toggle" type="button" aria-pressed="false">
+            ↻ Simular corrección
+          </button>
+          <span class="step-counter" id="step-counter">01 / 11</span>
+        </div>
+      </section>
+
+      <main>
+        <div class="top-grid">
+          <section class="panel diagram-panel" aria-labelledby="diagram-title">
+            <div class="panel-head">
+              <div>
+                <div class="kicker">Mapa ejecutable</div>
+                <h2 id="diagram-title">Del objetivo al checkpoint</h2>
+                <p>Haz clic en cualquier etapa o usa los controles para seguir los eventos y los cambios de contexto.</p>
+              </div>
+              <div class="live-indicator">SIMULACIÓN LOCAL</div>
+            </div>
+
+            <div class="stage-rail" id="stage-rail" role="tablist" aria-label="Etapas del ciclo"></div>
+
+            <div class="canvas" id="canvas" aria-live="polite">
+              <svg class="routes" viewBox="0 0 1000 470" preserveAspectRatio="none" aria-hidden="true">
+                <defs>
+                  <marker id="arrow-cyan" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+                    <path d="M0,0 L9,4.5 L0,9 z" fill="#5de4f1"></path>
+                  </marker>
+                  <marker id="arrow-muted" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+                    <path d="M0,0 L9,4.5 L0,9 z" fill="#91a7b3"></path>
+                  </marker>
+                  <marker id="arrow-amber" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+                    <path d="M0,0 L9,4.5 L0,9 z" fill="#f4c979"></path>
+                  </marker>
+                </defs>
+                <path class="route route-intake" data-route="intake" d="M230 93 H340" marker-end="url(#arrow-muted)"></path>
+                <path class="route route-memory" data-route="memory" d="M660 93 H790" marker-end="url(#arrow-muted)"></path>
+                <path class="route route-delegate" data-route="delegate" d="M500 145 V202" marker-end="url(#arrow-muted)"></path>
+                <path class="route route-execute" data-route="execute" d="M340 270 H260 V316" marker-end="url(#arrow-muted)"></path>
+                <path class="route route-propose" data-route="propose" d="M660 270 H790 V316" marker-end="url(#arrow-muted)"></path>
+                <path class="route route-checkpoint" data-route="checkpoint" d="M790 355 H660 V412" marker-end="url(#arrow-muted)"></path>
+                <path class="route route-loop" data-route="loop" d="M870 155 C970 180 970 390 670 420" marker-end="url(#arrow-muted)"></path>
+                <path class="route branch route-correction" data-route="correction" d="M790 350 C680 320 600 285 515 310" marker-end="url(#arrow-amber)"></path>
+                <circle class="packet" id="packet" cx="250" cy="93" r="5"></circle>
+              </svg>
+
+              <div class="node source" id="node-source">
+                <div class="node-top">
+                  <span class="node-icon">IN</span>
+                  <div><h3>Solicitud</h3><p>objetivo humano + alcance</p></div>
+                </div>
+                <span class="node-code">prompt / GOAL.md</span>
+              </div>
+
+              <div class="node supervisor" id="node-supervisor">
+                <div class="node-top">
+                  <span class="node-icon">S</span>
+                  <div><h3>Supervisor</h3><p>arquitectura · contratos · decisión</p></div>
+                </div>
+                <span class="node-code">primary advisor · no-history forks</span>
+              </div>
+
+              <div class="node state-store" id="node-state">
+                <div class="node-top">
+                  <span class="node-icon">Σ</span>
+                  <div><h3>Estado canónico</h3><p>audit log + proyección humana</p></div>
+                </div>
+                <span class="node-code">.synod/state.json · events.jsonl</span>
+                <span class="node-state" id="state-pill">PLANNED</span>
+              </div>
+
+              <div class="node agent-cluster" id="node-agents">
+                <div class="node-top">
+                  <span class="node-icon">AG</span>
+                  <div><h3>Roles configurados</h3><p>cada fork recibe un contrato acotado</p></div>
+                </div>
+                <div class="agent-mini-list" id="agent-mini-list"></div>
+              </div>
+
+              <div class="node worktree" id="node-worktree">
+                <div class="node-top">
+                  <span class="node-icon">W</span>
+                  <div><h3>Checkout / worktree</h3><p>escritura con scope</p></div>
+                </div>
+                <span class="node-code">git diff · heartbeat</span>
+                <span class="node-state" id="lease-pill">sin lease</span>
+              </div>
+
+              <div class="node proposal" id="node-proposal">
+                <div class="node-top">
+                  <span class="node-icon">P</span>
+                  <div><h3>Propuesta sellada</h3><p>delta + fingerprint + bundle</p></div>
+                </div>
+                <span class="node-code">.synod/proposals/&lt;lease&gt;/&lt;generation&gt;</span>
+                <span class="node-state" id="proposal-pill">no sellada</span>
+              </div>
+
+              <div class="node checkpoint" id="node-checkpoint">
+                <div class="node-top">
+                  <span class="node-icon">✓</span>
+                  <div><h3>Checkpoint / handoff</h3><p>evidencia que sobrevive sesiones</p></div>
+                </div>
+                <span class="node-code">branch · HEAD · fingerprint</span>
+              </div>
+            </div>
+
+            <div class="route-caption">
+              <span id="route-caption">El supervisor carga el objetivo y la memoria durable.</span>
+              <span class="mono" id="route-event">preflight / read-only</span>
+            </div>
+          </section>
+
+          <aside class="side-stack">
+            <section class="panel context-panel" aria-labelledby="context-title">
+              <div class="section-heading tight">
+                <div class="kicker">Presión de contexto</div>
+                <h2 id="context-title">Qué viaja con cada agente</h2>
+              </div>
+              <p class="context-note">Escala educativa: 8,192 tokens. El límite real depende del runtime/modelo.</p>
+              <div class="context-total">
+                <strong id="context-total">1,680 <span>tok</span></strong>
+                <small id="context-free">79.5% libre</small>
+              </div>
+              <div class="context-bar" id="context-bar" aria-label="Uso estimado de contexto"></div>
+              <div class="context-legend">
+                <span class="legend-item"><i class="durable"></i>durable</span>
+                <span class="legend-item"><i class="contract"></i>contrato</span>
+                <span class="legend-item"><i class="thread"></i>historial</span>
+                <span class="legend-item"><i class="evidence"></i>evidencia</span>
+                <span class="legend-item"><i class="policy"></i>política</span>
+              </div>
+              <div class="thread-list" id="thread-list"></div>
+            </section>
+
+            <section class="panel event-panel" aria-labelledby="event-title">
+              <div class="event-tag-row" id="event-tags"></div>
+              <h3 id="event-title">La tarea entra al circuito</h3>
+              <p id="event-description">El supervisor recibe el objetivo y busca la memoria durable antes de delegar.</p>
+              <div class="event-command" id="event-command">read AGENTS.md + docs/synod/*</div>
+              <div class="kicker" style="margin-bottom: 9px;">Registros tocados</div>
+              <ul class="record-list" id="event-records"></ul>
+            </section>
+          </aside>
+        </div>
+
+        <div class="lower-grid">
+          <section class="panel detail-panel" aria-labelledby="detail-title">
+            <div class="detail-title">
+              <div>
+                <div class="kicker">Paso actual</div>
+                <h2 id="detail-title">La tarea entra al circuito</h2>
+              </div>
+              <span id="detail-phase">01 · Entrada</span>
+            </div>
+            <div class="detail-tags" id="detail-tags"></div>
+            <p class="detail-summary" id="detail-summary">El supervisor recibe el objetivo y carga la memoria durable.</p>
+            <div class="detail-columns">
+              <div class="detail-block">
+                <h3>Qué cambia</h3>
+                <ul id="detail-changes"></ul>
+              </div>
+              <div class="detail-block">
+                <h3>Qué se observa</h3>
+                <ul id="detail-observations"></ul>
+              </div>
+            </div>
+            <div class="record-highlight">
+              <span>Transición / operación</span>
+              <code id="detail-transition">read-only preflight</code>
+            </div>
+          </section>
+
+          <section class="panel agent-panel" aria-labelledby="agents-title">
+            <div class="section-heading tight">
+              <div class="kicker">Pool de agentes</div>
+              <h2 id="agents-title">Roles y aislamiento</h2>
+              <p>Selecciona un rol para ver qué puede hacer y qué contexto recibe.</p>
+            </div>
+            <div class="agent-roster" id="agent-roster"></div>
+            <div class="agent-callout" id="agent-callout"></div>
+          </section>
+
+          <section class="panel safety-panel" aria-labelledby="safety-title">
+            <div class="section-heading tight">
+              <div class="kicker">Ramas de seguridad</div>
+              <h2 id="safety-title">Lo que pasa cuando algo se desvía</h2>
+              <p>Estas rutas no aceptan el trabajo implícitamente: preservan el delta y exigen una decisión.</p>
+            </div>
+            <div class="safety-list">
+              <button class="safety-button" type="button" data-safety="correction">
+                <span class="safety-icon">↻</span>
+                <span><strong>Corrección acotada</strong><span>REVIEW → ACTIVE con evidencia y ronda limitada.</span></span>
+              </button>
+              <button class="safety-button" type="button" data-safety="recovery">
+                <span class="safety-icon">⏱</span>
+                <span><strong>Lease abandonado</strong><span>BLOCKED + propuesta preservada + resume/reassign/supersede.</span></span>
+              </button>
+              <button class="safety-button" type="button" data-safety="worktree">
+                <span class="safety-icon">◇</span>
+                <span><strong>Worktree aislado</strong><span>create → seal → integrate → cleanup, siempre con fence.</span></span>
+              </button>
+            </div>
+            <div class="safety-output" id="safety-output">
+              <strong>Corrección acotada</strong>
+              <p>El mismo contrato vuelve a ACTIVE solo después de adquirir un nuevo lease. Se incrementa correctionRound, se limpia acceptance/verification y se exige nueva evidencia.</p>
+            </div>
+          </section>
+        </div>
+
+        <section class="panel timeline-panel" aria-labelledby="timeline-title">
+          <div class="timeline-header">
+            <div class="section-heading tight">
+              <div class="kicker">Secuencia completa</div>
+              <h2 id="timeline-title">Un evento por decisión</h2>
+              <p>La línea inferior resume el recorrido que estás reproduciendo.</p>
+            </div>
+            <small>Las transiciones canónicas se escriben en el event log; los turnos, pulsos y lecturas son actividad del runtime.</small>
+          </div>
+          <div class="timeline" id="timeline"></div>
+          <div class="legend-footer">
+            <span><i></i>control y delegación</span>
+            <span><i class="green"></i>estado y verificación</span>
+            <span><i class="amber"></i>lease, proposal y corrección</span>
+            <span><i class="red"></i>recovery requiere decisión explícita</span>
+          </div>
+          <p class="disclaimer">
+            Las cifras de tokens son una escala visual para entender cómo se acota el contexto de cada fork. Synod conserva
+            estado, evidencia, fingerprints y handoffs; no fija por sí mismo un único tamaño de ventana de contexto.
+          </p>
+        </section>
+      </main>
+    </div>
+
+    <noscript>
+      <p style="margin: 2rem; color: white; font-family: sans-serif;">Este diagrama necesita JavaScript para reproducir la animación.</p>
+    </noscript>
+
+    <script>
+      (() => {
+        "use strict";
+
+        const CONTEXT_WINDOW = 8192;
+        const MAX_THREADS = 3;
+
+        const profiles = {
+          portable: {
+            supervisor: "gpt-5.5 · xhigh",
+            implementer: "gpt-5.5 · high",
+            explorer: "gpt-5.5 · medium",
+            reviewer: "gpt-5.5 · high",
+            verifier: "gpt-5.5 · high",
+            mechanical: "gpt-5.5 · low"
+          },
+          "synod-5.6": {
+            supervisor: "gpt-5.6-sol · high",
+            implementer: "gpt-5.6-luna · max",
+            explorer: "gpt-5.6-terra · medium",
+            reviewer: "gpt-5.6-terra · high",
+            verifier: "gpt-5.6-terra · high",
+            mechanical: "gpt-5.6-luna · medium"
+          }
+        };
+
+        const agents = {
+          supervisor: {
+            short: "S",
+            name: "Supervisor",
+            role: "primary advisor",
+            sandbox: "workspace-write",
+            description: "Mantiene el objetivo, descompone tareas, supervisa, integra, acepta y verifica el resultado final."
+          },
+          explorer: {
+            short: "EX",
+            name: "Explorer",
+            role: "read-only mapping",
+            sandbox: "read-only",
+            description: "Traza entry points, dependencias y evidencia. No modifica el checkout ni diseña la solución por su cuenta."
+          },
+          implementer: {
+            short: "IM",
+            name: "Implementer",
+            role: "atomic writer",
+            sandbox: "workspace-write",
+            description: "Implementa un solo contrato atómico dentro de los paths autorizados y devuelve diff, pruebas e incertidumbres."
+          },
+          reviewer: {
+            short: "RV",
+            name: "Reviewer",
+            role: "correctness / security",
+            sandbox: "read-only",
+            description: "Intenta refutar la propuesta: busca regresiones, riesgos, casos límite y huecos de cobertura."
+          },
+          verifier: {
+            short: "VF",
+            name: "Verifier",
+            role: "independent proof",
+            sandbox: "read-only",
+            description: "Ejecuta una comprobación independiente contra los criterios de aceptación y la evidencia de la revisión."
+          },
+          mechanical: {
+            short: "MX",
+            name: "Mechanical",
+            role: "bounded checks",
+            sandbox: "read-only",
+            description: "Resuelve comprobaciones repetibles y acotadas sin tomar decisiones de arquitectura ni editar archivos."
+          }
+        };
+
+        const state = {
+          index: 0,
+          playing: false,
+          speed: 1,
+          profile: "portable",
+          correction: false,
+          selectedAgent: "supervisor",
+          safety: "correction",
+          timer: null
+        };
+
+        const $ = (selector, root = document) => root.querySelector(selector);
+        const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+        function baseStep(overrides) {
+          return {
+            kind: "normal",
+            canonical: false,
+            stage: "Entrada",
+            state: "—",
+            revision: "—",
+            event: "runtime.read",
+            actor: "supervisor",
+            activeAgents: ["supervisor"],
+            routes: ["intake"],
+            title: "La tarea entra al circuito",
+            summary: "El supervisor recibe el objetivo y carga la memoria durable antes de decidir qué debe delegarse.",
+            caption: "El supervisor carga el objetivo y la memoria durable.",
+            command: "read AGENTS.md + docs/synod/*",
+            records: ["AGENTS.md", "docs/synod/GOAL.md", ".synod/state.json (si existe)"],
+            changes: ["El objetivo se convierte en contexto de trabajo.", "Git y la memoria durable se inspeccionan antes de mutar."],
+            observations: ["No hay worker escribiendo todavía.", "La conversación no es el estado canónico."],
+            tags: ["read-only", "supervisor"],
+            context: { active: "supervisor", supervisor: 1680, implementer: 0, reviewer: 0, verifier: 0, segments: { durable: 960, contract: 0, thread: 560, evidence: 0, policy: 160 } },
+            ...overrides
+          };
+        }
+
+        function buildSteps() {
+          const setup = [
+            baseStep({
+              id: "intake",
+              number: "01",
+              stage: "Entrada",
+              event: "runtime.read",
+              title: "La tarea entra al circuito",
+              summary: "El supervisor recibe el objetivo y carga la memoria durable antes de decidir qué debe delegarse.",
+              caption: "El supervisor carga el objetivo y la memoria durable.",
+              command: "read AGENTS.md + docs/synod/*",
+              records: ["AGENTS.md", "docs/synod/GOAL.md", ".synod/state.json (si existe)"],
+              context: { active: "supervisor", supervisor: 1680, implementer: 0, reviewer: 0, verifier: 0, segments: { durable: 960, contract: 0, thread: 560, evidence: 0, policy: 160 } }
+            }),
+            baseStep({
+              id: "agents",
+              number: "02",
+              stage: "Preflight",
+              event: "lifecycle.init",
+              title: "Se cargan perfil y roles",
+              summary: "Synod instala o verifica la skill, el perfil y los agentes configurados. Los roles no comparten automáticamente todo el historial del supervisor.",
+              caption: "El perfil materializa los roles y sus límites de ejecución.",
+              command: "init → profile + custom agents",
+              records: [".codex/config.toml", ".codex/agents/synod-*.toml", ".agents/skills/synod-advisor/SKILL.md"],
+              changes: ["Se selecciona portable o synod-5.6.", `Quedan disponibles hasta ${MAX_THREADS} hilos concurrentes por sesión.`],
+              observations: ["Implementer es el writer por defecto.", "Explorer, reviewer, verifier y mechanical son read-only."],
+              tags: ["init", "roles", "profile"],
+              activeAgents: ["supervisor", "explorer", "implementer", "reviewer", "verifier", "mechanical"],
+              routes: ["delegate", "memory"],
+              context: { active: "supervisor", supervisor: 2280, implementer: 0, reviewer: 0, verifier: 0, segments: { durable: 1110, contract: 0, thread: 840, evidence: 0, policy: 330 } }
+            }),
+            baseStep({
+              id: "contract",
+              number: "03",
+              stage: "Contrato",
+              canonical: true,
+              state: "PLANNED → READY",
+              revision: "r0",
+              event: "task.created / task.transitioned",
+              title: "Se crea un contrato atómico",
+              summary: "El supervisor registra objetivo, executor, dependencias, criterios de aceptación y comandos de verificación antes de ejecutar.",
+              caption: "El contrato queda en el estado canónico y puede avanzar sólo por transiciones legales.",
+              command: "task add T-001 --executor synod_implementer",
+              records: [".synod/state.json", ".synod/events.jsonl", "docs/synod/STATUS.md"],
+              changes: ["La tarea pasa de PLANNED a READY cuando sus dependencias están satisfechas.", "Acceptance y verification nacen pendientes."],
+              observations: ["Cada transición exige la revisión exacta.", "El supervisor conserva la responsabilidad de integración."],
+              tags: ["canonical", "task", "READY"],
+              routes: ["memory", "delegate"],
+              context: { active: "supervisor", supervisor: 2940, implementer: 0, reviewer: 0, verifier: 0, segments: { durable: 1300, contract: 660, thread: 760, evidence: 0, policy: 220 } }
+            }),
+            baseStep({
+              id: "lease",
+              number: "04",
+              stage: "Fence",
+              canonical: true,
+              state: "READY → ACTIVE",
+              revision: "r0",
+              event: "lease.acquired",
+              title: "El writer adquiere un lease",
+              summary: "Antes de escribir, el implementer recibe una identidad de thread, scopes exactos, generación, expiración y snapshot baseline.",
+              caption: "El lease reserva el scope; el heartbeat mantiene viva la autorización.",
+              command: "lease acquire T-001 --owner-thread thread:… --write-tree src/",
+              records: [".synod/lease-baselines.json", ".synod/state.json", ".synod/events.jsonl"],
+              changes: ["Se registra leaseId, generation, revision y heartbeatAt.", "Los write scopes que se solapan con otra tarea se rechazan."],
+              observations: ["El scope es la frontera de atribución del diff.", "El lease no es un permiso permanente: expira."],
+              tags: ["canonical", "lease", "generation 1"],
+              activeAgents: ["supervisor", "implementer"],
+              routes: ["delegate", "execute"],
+              context: { active: "implementer", supervisor: 3310, implementer: 1880, reviewer: 0, verifier: 0, segments: { durable: 720, contract: 520, thread: 500, evidence: 0, policy: 140 } }
+            }),
+            baseStep({
+              id: "implementation",
+              number: "05",
+              stage: "Ejecución",
+              state: "ACTIVE",
+              revision: "r0",
+              event: "runtime.turn / lease.heartbeat",
+              title: "El implementer trabaja dentro del scope",
+              summary: "El worker usa un fork fresco con el contrato completo, inspecciona el código y modifica sólo los paths cubiertos por su lease.",
+              caption: "La implementación crece; el supervisor conserva el mapa y el worker conserva el delta.",
+              command: "fresh fork → inspect → edit → test → heartbeat",
+              records: ["checkout / worktree", ".synod/lease-baselines.json", "git diff + test output"],
+              changes: ["El historial del worker crece con decisiones y resultados de pruebas.", "El baseline permite distinguir el delta propio del drift ajeno."],
+              observations: ["El supervisor no acepta todavía.", "Un worker puede detenerse sin borrar su propuesta."],
+              tags: ["runtime", "ACTIVE", "writer"],
+              activeAgents: ["supervisor", "implementer"],
+              routes: ["execute"],
+              context: { active: "implementer", supervisor: 3600, implementer: 2840, reviewer: 0, verifier: 0, segments: { durable: 760, contract: 540, thread: 1120, evidence: 280, policy: 140 } }
+            }),
+            baseStep({
+              id: "delivery",
+              number: "06",
+              stage: "Entrega",
+              canonical: true,
+              state: "ACTIVE → REVIEW",
+              revision: "r0 → r1",
+              event: "task.transitioned",
+              title: "La entrega se sella como propuesta",
+              summary: "La transición a REVIEW captura el delta dentro del scope, genera un bundle verificable y libera el lease de ejecución.",
+              caption: "La propuesta existe, pero todavía no es aceptación.",
+              command: "task transition T-001 REVIEW --revision 1 --evidence delivery:…",
+              records: [".synod/proposals/<lease>/<generation>", ".synod/events.jsonl", ".synod/state.json"],
+              changes: ["La revisión de tarea avanza a r1.", "Se guarda fingerprint, ownedPaths, bundleId y delivery evidence."],
+              observations: ["El lease se libera al entregar.", "La propuesta queda lista para revisión, no para producción."],
+              tags: ["canonical", "proposal", "REVIEW"],
+              activeAgents: ["supervisor", "implementer"],
+              routes: ["propose", "memory"],
+              context: { active: "supervisor", supervisor: 3890, implementer: 3300, reviewer: 0, verifier: 0, segments: { durable: 930, contract: 640, thread: 1250, evidence: 770, policy: 300 } }
+            }),
+            baseStep({
+              id: "review",
+              number: "07",
+              stage: "Revisión",
+              canonical: true,
+              state: "REVIEW",
+              revision: "r1",
+              event: "proposal.verify / reviewer",
+              title: "Un reviewer intenta refutar la propuesta",
+              summary: "El reviewer lee el diff y los artefactos sellados, busca regresiones y decide si el contrato está listo para aceptación o requiere corrección.",
+              caption: "La propuesta viaja a un lector independiente con contexto acotado.",
+              command: "review proposal + diff + acceptance criteria",
+              records: ["sealed proposal bundle", "delivery evidence", ".synod/state.json (read-only)"],
+              changes: ["El contexto del reviewer contiene contrato, diff y criterios; no necesita todo el chat.", "La aceptación sigue pendiente hasta que el supervisor registra evidencia."],
+              observations: ["Reviewer es read-only.", "Un resultado CORRECT abre una vuelta bounded; ACCEPT continúa el circuito."],
+              tags: ["canonical", "read-only", "REVIEW"],
+              activeAgents: ["supervisor", "reviewer"],
+              routes: ["propose", "correction"],
+              context: { active: "reviewer", supervisor: 4320, implementer: 0, reviewer: 2290, verifier: 0, segments: { durable: 520, contract: 610, thread: 660, evidence: 380, policy: 120 } }
+            })
+          ];
+
+          if (state.correction) {
+            setup.push(
+              baseStep({
+                id: "correction",
+                number: "08",
+                stage: "Corrección",
+                kind: "branch",
+                canonical: true,
+                state: "REVIEW → ACTIVE",
+                revision: "r1",
+                event: "task.transitioned / correction",
+                title: "La revisión devuelve un delta concreto",
+                summary: "El supervisor no reinicia todo: exige evidencia de corrección, incrementa la ronda, limpia acceptance/verification y pide un nuevo lease.",
+                caption: "La ruta ámbar vuelve al mismo contrato con una allowance explícita.",
+                command: "lease acquire → task transition T-001 ACTIVE --evidence correction:…",
+                records: [".synod/events.jsonl", ".synod/state.json", ".synod/lease-baselines.json"],
+                changes: ["correctionRound y correctionPolicy.used aumentan.", "La propuesta previa deja de ser la propuesta vigente."],
+                observations: ["El límite de correcciones es parte del estado canónico.", "Al agotarse, el supervisor debe split, supersede u override."],
+                tags: ["branch", "correction 1/2", "ACTIVE"],
+                activeAgents: ["supervisor", "implementer", "reviewer"],
+                routes: ["correction", "execute"],
+                context: { active: "implementer", supervisor: 4100, implementer: 2120, reviewer: 1450, verifier: 0, segments: { durable: 720, contract: 570, thread: 590, evidence: 170, policy: 70 } }
+              }),
+              baseStep({
+                id: "reimplementation",
+                number: "09",
+                stage: "Ejecución",
+                kind: "branch",
+                state: "ACTIVE",
+                revision: "r1",
+                event: "runtime.turn / lease.heartbeat",
+                title: "Se aplica sólo la corrección pedida",
+                summary: "El mismo worker —o uno reasignado con una decisión explícita— trabaja en el nuevo generation y conserva el alcance original.",
+                caption: "El nuevo lease crea otra frontera de evidencia, no una excepción silenciosa.",
+                command: "generation 2 → edit scoped paths → test",
+                records: ["checkout / worktree", ".synod/lease-baselines.json", "correction evidence"],
+                changes: ["El contexto incluye el fallo del reviewer y el contrato original.", "La corrección no hereda acceptance ni verification anteriores."],
+                observations: ["El worker sigue limitado por write scopes.", "El nuevo delta debe poder sellarse de forma independiente."],
+                tags: ["branch", "generation 2", "writer"],
+                activeAgents: ["supervisor", "implementer"],
+                routes: ["execute"],
+                context: { active: "implementer", supervisor: 4300, implementer: 2770, reviewer: 0, verifier: 0, segments: { durable: 740, contract: 650, thread: 1040, evidence: 250, policy: 90 } }
+              }),
+              baseStep({
+                id: "delivery-correction",
+                number: "10",
+                stage: "Entrega",
+                kind: "branch",
+                canonical: true,
+                state: "ACTIVE → REVIEW",
+                revision: "r1 → r2",
+                event: "task.transitioned",
+                title: "La corrección vuelve a REVIEW",
+                summary: "La segunda entrega se sella como una propuesta nueva; el reviewer debe volver a evaluar el revision exacto.",
+                caption: "Cada ronda produce evidencia de delivery y un fingerprint nuevo.",
+                command: "task transition T-001 REVIEW --revision 2 --evidence delivery:…",
+                records: [".synod/proposals/<lease>/<generation>", ".synod/events.jsonl", ".synod/state.json"],
+                changes: ["La revisión avanza a r2.", "La propuesta de generation 2 reemplaza el intento anterior como propuesta vigente."],
+                observations: ["La corrección no salta acceptance.", "El circuito vuelve a abrirse desde REVIEW."],
+                tags: ["branch", "proposal", "REVIEW r2"],
+                activeAgents: ["supervisor", "implementer"],
+                routes: ["propose", "memory"],
+                context: { active: "supervisor", supervisor: 4490, implementer: 3050, reviewer: 0, verifier: 0, segments: { durable: 900, contract: 700, thread: 1300, evidence: 930, policy: 300 } }
+              }),
+              baseStep({
+                id: "review-correction",
+                number: "11",
+                stage: "Revisión",
+                kind: "branch",
+                canonical: true,
+                state: "REVIEW",
+                revision: "r2",
+                event: "proposal.verify / reviewer",
+                title: "La propuesta corregida pasa la revisión",
+                summary: "El reviewer confirma que el delta responde a la corrección sin violar el contrato ni el scope.",
+                caption: "La segunda revisión puede desbloquear la aceptación del revision r2.",
+                command: "review generation 2 proposal → ACCEPT",
+                records: ["sealed proposal bundle", "correction + delivery evidence", ".synod/events.jsonl"],
+                changes: ["El supervisor tiene evidencia de delivery y corrección para r2.", "La allowance usada queda registrada aunque el resultado sea aceptable."],
+                observations: ["La aceptación siempre apunta a una revisión exacta.", "No se mezclan evidencias de r1 y r2."],
+                tags: ["branch", "read-only", "REVIEW r2"],
+                activeAgents: ["supervisor", "reviewer"],
+                routes: ["propose", "memory"],
+                context: { active: "reviewer", supervisor: 4630, implementer: 0, reviewer: 2370, verifier: 0, segments: { durable: 550, contract: 650, thread: 700, evidence: 350, policy: 120 } }
+              })
+            );
+          }
+
+          const revision = state.correction ? "r2" : "r1";
+          const finalNumber = state.correction ? "12" : "08";
+          const verifyNumber = state.correction ? "13" : "09";
+          const doneNumber = state.correction ? "14" : "10";
+          const handoffNumber = state.correction ? "15" : "11";
+
+          setup.push(
+            baseStep({
+              id: "acceptance",
+              number: finalNumber,
+              stage: "Aceptación",
+              canonical: true,
+              state: "REVIEW → ACCEPTED",
+              revision,
+              event: "task.transitioned",
+              title: "El supervisor acepta la revisión exacta",
+              summary: "Sólo el supervisor registra la aceptación, con evidencia ligada al mismo revision que acaba de revisar.",
+              caption: "Acceptance es una puerta separada: review aprobada no significa todavía verification pasada.",
+              command: `task transition T-001 ACCEPTED --revision ${state.correction ? "2" : "1"} --evidence review:approved`,
+              records: [".synod/events.jsonl", ".synod/state.json", "acceptance evidence"],
+              changes: ["acceptance.status = accepted para el revision exacto.", "La propuesta queda lista para la verificación independiente."],
+              observations: ["No hay lease activo al aceptar.", "La evidencia se guarda con branch, HEAD y fingerprint."],
+              tags: ["canonical", "ACCEPTED", revision],
+              activeAgents: ["supervisor", "reviewer"],
+              routes: ["memory"],
+              context: { active: "supervisor", supervisor: state.correction ? 4760 : 4560, implementer: 0, reviewer: 0, verifier: 0, segments: { durable: 1220, contract: 720, thread: 1780, evidence: 820, policy: 220 } }
+            }),
+            baseStep({
+              id: "verification",
+              number: verifyNumber,
+              stage: "Verificación",
+              canonical: true,
+              state: "ACCEPTED → VERIFIED",
+              revision,
+              event: "task.transitioned",
+              title: "Un verifier busca falsificar el cierre",
+              summary: "El verifier ejecuta los comandos del contrato y comprueba el checkout integrado contra la aceptación registrada.",
+              caption: "La verificación independiente cierra la segunda puerta de evidencia.",
+              command: `task transition T-001 VERIFIED --revision ${state.correction ? "2" : "1"} --evidence test:pass`,
+              records: ["verification commands", ".synod/events.jsonl", ".synod/state.json"],
+              changes: ["verification.status = passed para el mismo revision.", "Los resultados de pruebas quedan unidos al checkpoint observado."],
+              observations: ["Verifier es read-only.", "Sin acceptance y verification de la misma revisión no existe DONE."],
+              tags: ["canonical", "VERIFIED", revision],
+              activeAgents: ["supervisor", "verifier"],
+              routes: ["checkpoint", "memory"],
+              context: { active: "verifier", supervisor: 3420, implementer: 0, reviewer: 0, verifier: state.correction ? 2570 : 2240, segments: { durable: 570, contract: 660, thread: 710, evidence: state.correction ? 510 : 300, policy: 120 } }
+            }),
+            baseStep({
+              id: "done",
+              number: doneNumber,
+              stage: "Cierre",
+              canonical: true,
+              state: "VERIFIED → DONE",
+              revision,
+              event: "task.transitioned / checkpoint",
+              title: "La tarea termina sin perder la memoria",
+              summary: "Synod marca DONE sólo después de las dos puertas de evidencia. El supervisor acepta intencionalmente el estado Git como checkpoint.",
+              caption: "DONE describe el circuito local; publicar o desplegar requiere evidencia aparte.",
+              command: "task transition DONE → checkpoint --message 'Accepted revision'",
+              records: [".synod/state.json", ".synod/events.jsonl", ".synod/checkpoint.json", "docs/synod/STATUS.md"],
+              changes: ["El checkpoint guarda branch, HEAD y fingerprint del worktree.", "STATUS.md proyecta el estado para lectura humana."],
+              observations: ["DONE no significa push, deploy ni aprobación externa.", "La propuesta permanece verificable como artefacto durable."],
+              tags: ["canonical", "DONE", "checkpoint"],
+              activeAgents: ["supervisor"],
+              routes: ["checkpoint", "loop"],
+              context: { active: "supervisor", supervisor: state.correction ? 3060 : 2920, implementer: 0, reviewer: 0, verifier: 0, segments: { durable: 1420, contract: 380, thread: 840, evidence: state.correction ? 350 : 280, policy: 70 } }
+            }),
+            baseStep({
+              id: "handoff",
+              number: handoffNumber,
+              stage: "Handoff",
+              canonical: false,
+              state: "read-only",
+              revision,
+              event: "handoff.generated",
+              title: "La siguiente sesión recibe un mapa verificable",
+              summary: "A través de status o handoff, una nueva sesión puede reconstruir foco, drift, leases, propuestas, evidencia y transiciones legales sin depender del chat anterior.",
+              caption: "El ciclo vuelve a estar listo para la próxima tarea, con memoria durable y contexto acotado.",
+              command: "status --explain / handoff --json",
+              records: [".synod/state.json", ".synod/events.jsonl", "docs/synod/STATUS.md", "sealed proposals"],
+              changes: ["El contexto de la siguiente sesión empieza pequeño y verificable.", "El handoff distingue checkpoint reconocido, estado actual y drift."],
+              observations: ["No se trata el chat como fuente de verdad.", "Un recovery pendiente bloquea nuevas mutaciones hasta decidir."],
+              tags: ["read-only", "handoff", "next session"],
+              activeAgents: ["supervisor"],
+              routes: ["loop", "memory"],
+              context: { active: "supervisor", supervisor: state.correction ? 2080 : 1900, implementer: 0, reviewer: 0, verifier: 0, segments: { durable: 1370, contract: 180, thread: 280, evidence: 40, policy: 30 } }
+            })
+          );
+
+          return setup;
+        }
+
+        function activeStep() {
+          return buildSteps()[state.index] || buildSteps()[0];
+        }
+
+        function renderStageRail(steps) {
+          const rail = $("#stage-rail");
+          rail.innerHTML = steps.map((step, index) => `
+            <button type="button" class="${index === state.index ? "active" : ""}" data-index="${index}" role="tab" aria-selected="${index === state.index}">
+              <span>${step.number} / ${step.kind === "branch" ? "↻" : "●"}</span>${step.stage}
+            </button>
+          `).join("");
+          $$('button[data-index]', rail).forEach(button => {
+            button.addEventListener("click", () => {
+              pause();
+              state.index = Number(button.dataset.index);
+              render();
+            });
+          });
+        }
+
+        function renderTimeline(steps) {
+          const timeline = $("#timeline");
+          timeline.style.setProperty("--timeline-columns", steps.length);
+          timeline.innerHTML = steps.map((step, index) => `
+            <button type="button" class="timeline-step ${index === state.index ? "active" : ""}" data-index="${index}">
+              <span>${step.number} · ${step.state}</span>
+              <strong>${step.stage}</strong>
+              <small>${step.title}</small>
+            </button>
+          `).join("");
+          $$('button[data-index]', timeline).forEach(button => {
+            button.addEventListener("click", () => {
+              pause();
+              state.index = Number(button.dataset.index);
+              render();
+            });
+          });
+        }
+
+        function renderNodes(step) {
+          const active = new Set(step.activeAgents);
+          const nodeAgents = $("#node-agents");
+          const activeNodeMap = {
+            supervisor: "node-supervisor",
+            explorer: "node-agents",
+            implementer: "node-worktree",
+            reviewer: "node-proposal",
+            verifier: "node-checkpoint",
+            mechanical: "node-agents"
+          };
+          ["node-source", "node-supervisor", "node-state", "node-agents", "node-worktree", "node-proposal", "node-checkpoint"].forEach(id => $("#" + id).classList.remove("active"));
+          active.forEach(agent => {
+            const node = $("#" + activeNodeMap[agent]);
+            if (node) node.classList.add("active");
+          });
+          if (step.id === "intake") $("#node-source").classList.add("active");
+          if (step.routes.includes("memory")) $("#node-state").classList.add("active");
+          if (step.routes.includes("propose")) $("#node-proposal").classList.add("active");
+          if (step.routes.includes("checkpoint")) $("#node-checkpoint").classList.add("active");
+
+          $("#agent-mini-list").innerHTML = Object.entries(agents).map(([id, agent]) => `
+            <span class="agent-mini ${active.has(id) ? "active" : ""}" title="${agent.name}">${agent.short} ${agent.name}</span>
+          `).join("");
+
+          $$(".route").forEach(route => route.classList.toggle("active", step.routes.includes(route.dataset.route)));
+          $("#canvas").classList.toggle("playing", state.playing);
+          $("#state-pill").textContent = step.state === "—" ? "preflight" : step.state;
+          $("#lease-pill").textContent = ["lease", "implementation", "delivery", "correction", "reimplementation", "delivery-correction"].includes(step.id) ? "lease activo" : step.id === "done" ? "lease liberado" : "scope / baseline";
+          $("#proposal-pill").textContent = ["delivery", "review", "delivery-correction", "review-correction", "acceptance", "verification", "done", "handoff"].includes(step.id) ? "bundle verificable" : "no sellada";
+          $("#route-caption").textContent = step.caption;
+          $("#route-event").textContent = step.event;
+        }
+
+        function renderContext(step) {
+          const context = step.context;
+          const activeValue = context[context.active] || 0;
+          const free = Math.max(0, CONTEXT_WINDOW - activeValue);
+          $("#context-total").innerHTML = `${activeValue.toLocaleString("es-MX")} <span>tok</span>`;
+          $("#context-free").textContent = `${((free / CONTEXT_WINDOW) * 100).toFixed(1)}% libre`;
+          const segments = ["durable", "contract", "thread", "evidence", "policy"];
+          $("#context-bar").innerHTML = segments.map(segment => {
+            const value = context.segments[segment] || 0;
+            return `<span class="context-segment ${segment}" style="width:${Math.min(100, (value / CONTEXT_WINDOW) * 100)}%" title="${segment}: ${value} tok"></span>`;
+          }).join("");
+          $("#thread-list").innerHTML = ["supervisor", "implementer", "reviewer", "verifier"].map(id => {
+            const value = context[id] || 0;
+            return `
+              <div class="thread-row ${context.active === id ? "active" : ""}">
+                <span>${agents[id].name}</span>
+                <span class="thread-track"><span class="thread-fill" style="width:${Math.min(100, (value / CONTEXT_WINDOW) * 100)}%"></span></span>
+                <strong>${value ? value.toLocaleString("es-MX") : "—"}</strong>
+              </div>
+            `;
+          }).join("");
+        }
+
+        function renderEvent(step) {
+          $("#event-tags").innerHTML = [
+            `<span class="event-tag ${step.canonical ? "canonical" : "runtime"}">${step.canonical ? "● CANONICAL" : "◌ RUNTIME"}</span>`,
+            `<span class="event-tag ${step.kind === "branch" ? "branch" : "runtime"}">${step.stage}</span>`,
+            `<span class="event-tag runtime">actor: ${agents[step.actor]?.name || "supervisor"}</span>`
+          ].join("");
+          $("#event-title").textContent = step.title;
+          $("#event-description").textContent = step.summary;
+          $("#event-command").textContent = step.command;
+          $("#event-records").innerHTML = step.records.map(record => `<li><code>${record}</code></li>`).join("");
+        }
+
+        function renderDetail(step) {
+          $("#detail-title").textContent = step.title;
+          $("#detail-phase").textContent = `${step.number} · ${step.stage}`;
+          $("#detail-tags").innerHTML = step.tags.map(tag => {
+            const tone = tag.includes("canonical") || tag.includes("DONE") || tag.includes("VERIFIED") || tag.includes("ACCEPTED") ? "green" : tag.includes("branch") || tag.includes("correction") || tag.includes("generation") ? "amber" : "blue";
+            return `<span class="detail-tag ${tone}">${tag}</span>`;
+          }).join("");
+          $("#detail-summary").textContent = step.summary;
+          $("#detail-changes").innerHTML = step.changes.map(item => `<li>${item}</li>`).join("");
+          $("#detail-observations").innerHTML = step.observations.map(item => `<li>${item}</li>`).join("");
+          $("#detail-transition").textContent = `${step.event} · ${step.state} · ${step.revision}`;
+        }
+
+        function renderAgents() {
+          const modelProfile = profiles[state.profile];
+          $("#agent-roster").innerHTML = Object.entries(agents).map(([id, agent]) => `
+            <button type="button" class="agent-card ${state.selectedAgent === id ? "selected" : ""}" data-agent="${id}">
+              <span class="agent-avatar">${agent.short}</span>
+              <span><span class="agent-name">${agent.name}</span><span class="agent-role">${agent.role} · <span class="agent-sandbox">${agent.sandbox}</span></span></span>
+              <span class="agent-model"><strong>${modelProfile[id]}</strong>profile</span>
+            </button>
+          `).join("");
+          $$(".agent-card").forEach(button => {
+            button.addEventListener("click", () => {
+              state.selectedAgent = button.dataset.agent;
+              renderAgents();
+            });
+          });
+          const selected = agents[state.selectedAgent];
+          $("#agent-callout").innerHTML = `<strong>${selected.name} · ${selected.role}</strong>${selected.description}`;
+        }
+
+        function renderSafety() {
+          const output = {
+            correction: {
+              title: "Corrección acotada",
+              body: "El mismo contrato vuelve a ACTIVE sólo después de adquirir un nuevo lease. Se incrementa correctionRound, se limpia acceptance/verification y se exige nueva evidencia."
+            },
+            recovery: {
+              title: "Lease abandonado",
+              body: "Si el worker expira o es revocado, Synod conserva el delta y bloquea la tarea con recovery PENDING. El supervisor debe decidir: resume, reassign o supersede."
+            },
+            worktree: {
+              title: "Worktree aislado",
+              body: "Una tarea puede escribir en un checkout detached. Synod verifica identidad, sella un proposal, integra de forma transaccional y limpia sólo un worktree limpio."
+            }
+          }[state.safety];
+          $$(".safety-button").forEach(button => button.classList.toggle("active", button.dataset.safety === state.safety));
+          $("#safety-output").innerHTML = `<strong>${output.title}</strong><p>${output.body}</p>`;
+        }
+
+        function updateControls(steps) {
+          $("#step-counter").textContent = `${String(state.index + 1).padStart(2, "0")} / ${String(steps.length).padStart(2, "0")}`;
+          $("#play-toggle").textContent = state.playing ? "Ⅱ Pausar" : "▶ Reproducir";
+          $("#correction-toggle").classList.toggle("active", state.correction);
+          $("#correction-toggle").setAttribute("aria-pressed", String(state.correction));
+        }
+
+        function render() {
+          const steps = buildSteps();
+          if (state.index >= steps.length) state.index = steps.length - 1;
+          const step = steps[state.index];
+          renderStageRail(steps);
+          renderTimeline(steps);
+          renderNodes(step);
+          renderContext(step);
+          renderEvent(step);
+          renderDetail(step);
+          renderAgents();
+          renderSafety();
+          updateControls(steps);
+        }
+
+        function pause() {
+          state.playing = false;
+          if (state.timer) window.clearInterval(state.timer);
+          state.timer = null;
+          $("#canvas").classList.remove("playing");
+          $("#play-toggle").textContent = "▶ Reproducir";
+        }
+
+        function play() {
+          if (state.playing) {
+            pause();
+            return;
+          }
+          state.playing = true;
+          const tick = () => {
+            const steps = buildSteps();
+            if (state.index >= steps.length - 1) {
+              state.index = 0;
+            } else {
+              state.index += 1;
+            }
+            render();
+          };
+          state.timer = window.setInterval(tick, 2600 / state.speed);
+          render();
+        }
+
+        $("#previous-step").addEventListener("click", () => {
+          pause();
+          state.index = Math.max(0, state.index - 1);
+          render();
+        });
+
+        $("#next-step").addEventListener("click", () => {
+          pause();
+          const steps = buildSteps();
+          state.index = Math.min(steps.length - 1, state.index + 1);
+          render();
+        });
+
+        $("#reset-cycle").addEventListener("click", () => {
+          pause();
+          state.index = 0;
+          render();
+        });
+
+        $("#play-toggle").addEventListener("click", play);
+
+        $("#profile-select").addEventListener("change", event => {
+          state.profile = event.target.value;
+          renderAgents();
+        });
+
+        $("#correction-toggle").addEventListener("click", () => {
+          pause();
+          state.correction = !state.correction;
+          state.index = 0;
+          render();
+        });
+
+        $$(".safety-button").forEach(button => {
+          button.addEventListener("click", () => {
+            state.safety = button.dataset.safety;
+            renderSafety();
+          });
+        });
+
+        document.addEventListener("keydown", event => {
+          if (event.target.matches("input, select, textarea")) return;
+          if (event.key === "ArrowLeft") $("#previous-step").click();
+          if (event.key === "ArrowRight") $("#next-step").click();
+          if (event.key === " ") {
+            event.preventDefault();
+            $("#play-toggle").click();
+          }
+        });
+
+        render();
+      })();
+    </script>
+  </body>
+</html>
