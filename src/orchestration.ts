@@ -1791,6 +1791,24 @@ export async function readOrchestration(
   }
 }
 
+export async function withOrchestrationSnapshot<Result>(
+  targetDirectory: string,
+  action: (snapshot: {
+    state: OrchestrationState;
+    events: OrchestrationEvent[];
+    leaseBaselines: LeaseBaselinesLedger;
+    checkpoint?: CheckpointSnapshot;
+  }) => Promise<Result>
+): Promise<Result> {
+  const release = await acquireLock(targetDirectory);
+  try {
+    await recoverPendingMutation(targetDirectory);
+    return await action(await readOrchestrationRaw(targetDirectory));
+  } finally {
+    await release();
+  }
+}
+
 interface LockOwner {
   pid: number;
   token: string | null;

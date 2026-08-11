@@ -1,6 +1,6 @@
 import { errorEnvelope, successEnvelope } from "./contracts.js";
 import type { Warning } from "./contracts.js";
-import { parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs } from "./command-options.js";
+import { parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs, parseWorktreeArgs } from "./command-options.js";
 import type { HelpOptions, LifecycleOptions } from "./command-options.js";
 import { doctorProject } from "./doctor.js";
 import type { DoctorClient, DoctorDependencies } from "./doctor.js";
@@ -33,6 +33,8 @@ import { restoreRecoveryBundle } from "./restore.js";
 import { formatHandoff, generateHandoff } from "./handoff.js";
 import { formatWaitReport, waitForThreads } from "./wait.js";
 import type { ThreadStatusAdapter, WaitClient } from "./wait.js";
+import { createTaskWorktree, taskWorktreeStatus } from "./worktrees.js";
+import type { TaskWorktreeDependencies } from "./worktrees.js";
 
 const HELP = `Synod ${packageVersion}
 
@@ -58,6 +60,8 @@ Usage:
   synod lease expire <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --reason <text> [--cwd <directory>] [--json]
   synod lease revoke <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --reason <text> [--cwd <directory>] [--json]
   synod lease recover <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --decision <resume|reassign|supersede> --reason <text> [--owner-thread <thread-id>] [--cwd <directory>] [--json]
+  synod worktree create <task-id> --destination <path> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
+  synod worktree status <task-id> [--cwd <directory>] [--json]
   synod doctor [directory] [--json]
   synod uninstall [directory] [--dry-run] [--force] [--json]
   synod profiles [--json]
@@ -76,6 +80,7 @@ Commands:
   bundle      Export, verify, or transactionally restore a recovery bundle.
   task        Add tasks and apply validated, revision-aware state transitions.
   lease       Acquire and mutate fenced durable writer leases.
+  worktree    Create and inspect explicit detached task worktrees at an exact lease base.
   doctor      Probe Codex version, App Server, model, and reasoning capabilities.
   uninstall   Remove the local runtime and unchanged managed content; preserve durable state.
   profiles    List built-in model profiles and their requirements.
@@ -121,6 +126,7 @@ export interface CliDependencies extends LifecycleDependencies, OrchestrationDep
   doctorRuntimeResolver?: NonNullable<DoctorDependencies["runtimeResolver"]>;
   waitClientFactory?: (options?: { cwd?: string }) => WaitClient;
   waitAdapterFactory?: () => ThreadStatusAdapter;
+  worktreeDependencies?: TaskWorktreeDependencies;
 }
 
 type CheckResult = Awaited<ReturnType<typeof checkProject>>;
@@ -419,6 +425,32 @@ export async function run(
       if (options.json) output.log(JSON.stringify(successEnvelope("lease", data), null, 2));
       else output.log(`Lease ${options.action} for ${result.task.id}: ${result.lease.id} generation ${result.lease.generation}.`);
       return 0;
+    }
+
+    if (command === "worktree") {
+      const options = parseWorktreeArgs(args.slice(1));
+      if (isHelpOptions(options)) { output.log(HELP); return 0; }
+      const result = options.action === "create"
+        ? await createTaskWorktree({
+            directory: options.directory,
+            taskId: options.id,
+            destination: options.destination,
+            leaseId: options.leaseId,
+            generation: options.generation,
+            revision: options.revision,
+            expectedHeartbeatAt: options.expectedHeartbeatAt,
+            ownerThread: options.ownerThread
+          }, dependencies.worktreeDependencies)
+        : await taskWorktreeStatus({ directory: options.directory, taskId: options.id }, dependencies.worktreeDependencies);
+      const data = { action: options.action, ...result };
+      if (options.json) output.log(JSON.stringify(successEnvelope("worktree", data), null, 2));
+      else if (options.action === "create") {
+        output.log(`Created detached worktree for ${result.record.taskId} at ${result.record.worktreePath} (${result.record.baseHead}).`);
+      } else {
+        output.log(`Task worktree ${result.record.taskId}: ${result.reconciliation} at ${result.record.worktreePath}.`);
+        for (const reason of result.reasons) output.log(`  - ${reason}`);
+      }
+      return result.reconciliation === "manual_reconciliation" ? 1 : 0;
     }
 
     if (command === "profiles") {

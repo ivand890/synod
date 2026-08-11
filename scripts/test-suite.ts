@@ -12,7 +12,13 @@ const testFiles = readdirSync(testDirectory)
 if (testFiles.length === 0) throw new Error("No TypeScript test files were found.");
 
 const result = spawnSync(process.execPath, ["--import", "tsx", "--test", ...testFiles], {
-  stdio: "inherit"
+  stdio: "inherit",
+  env: {
+    ...process.env,
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "commit.gpgsign",
+    GIT_CONFIG_VALUE_0: "false"
+  }
 });
 
 if (result.error) throw result.error;
