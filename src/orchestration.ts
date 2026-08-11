@@ -1791,6 +1791,105 @@ export async function readOrchestration(
   }
 }
 
+async function validateOrchestrationProposalArtifactsFromCanonical(
+  targetDirectory: string,
+  canonical: Awaited<ReturnType<typeof readOrchestrationRaw>>
+): Promise<{
+  sealedProposals: number;
+  verifiedBundles: number;
+}> {
+  const recovery = await import("./recovery.js");
+    const verifiedPaths = new Map<string, Awaited<ReturnType<typeof recovery.verifyRecoveryBundle>>>();
+    let sealedProposals = 0;
+    for (const task of taskList(canonical.state)) {
+      const references: Array<{ proposal: TaskProposalReference; requiresBaseline: boolean }> = [
+        ...(task.proposal ? [{ proposal: task.proposal, requiresBaseline: proposalReservesPaths(task) }] : []),
+        ...(task.recovery?.proposal ? [{
+          proposal: task.recovery.proposal,
+          requiresBaseline: task.recovery.status === "PENDING"
+        }] : []),
+        ...(task.recoveryHistory || []).flatMap(item => item.proposal
+          ? [{ proposal: item.proposal, requiresBaseline: false }]
+          : [])
+      ];
+      for (const reference of references) {
+        const { proposal } = reference;
+        sealedProposals += 1;
+        const baseline = canonical.leaseBaselines.baselines.find(item =>
+          item.taskId === task.id
+          && item.leaseId === proposal.leaseId
+          && item.generation === proposal.generation
+          && item.taskRevision === proposal.baseRevision
+        );
+        if (!baseline && reference.requiresBaseline) {
+          throw new SynodError(ERROR_CODES.LEASE_BASELINE_INVALID, `Task ${task.id} proposal baseline is missing.`, {
+            details: { taskId: task.id, leaseId: proposal.leaseId, generation: proposal.generation }
+          });
+        }
+        let verified = verifiedPaths.get(proposal.path);
+        if (verified && verified.bundleId !== proposal.bundleId) {
+          throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, "One proposal path has conflicting canonical bundle identities.", {
+            details: { path: proposal.path, firstBundleId: verified.bundleId, secondBundleId: proposal.bundleId }
+          });
+        }
+        if (!verified) {
+          verified = await recovery.verifyRecoveryBundle({
+            bundle: resolveProjectPath(targetDirectory, proposal.path)
+          });
+          verifiedPaths.set(proposal.path, verified);
+        }
+        const expectedIdentity = {
+          taskId: task.id,
+          leaseId: proposal.leaseId,
+          generation: proposal.generation,
+          baseRevision: proposal.baseRevision,
+          revision: proposal.revision,
+          scopes: proposal.scopes,
+          ownedPaths: proposal.ownedPaths
+        };
+        const manifestIdentity = verified.manifest.proposal && {
+          taskId: verified.manifest.proposal.taskId,
+          leaseId: verified.manifest.proposal.leaseId,
+          generation: verified.manifest.proposal.generation,
+          baseRevision: verified.manifest.proposal.baseRevision,
+          revision: verified.manifest.proposal.revision,
+          scopes: verified.manifest.proposal.scopes,
+          ownedPaths: verified.manifest.proposal.ownedPaths
+        };
+        if (verified.bundleId !== proposal.bundleId
+          || verified.manifest.checkpoint.fingerprint !== proposal.fingerprint
+          || verified.manifest.checkpoint.snapshotHash !== proposal.snapshotHash
+          || stableStringify(manifestIdentity) !== stableStringify(expectedIdentity)
+          || (baseline && (
+            verified.manifest.source.branch !== baseline.snapshot.branch
+            || verified.manifest.source.head !== baseline.snapshot.head
+            || verified.manifest.proposal?.baseline.snapshotHash !== baseline.snapshot.contentHash
+            || verified.manifest.proposal?.baseline.worktreeFingerprint !== baseline.snapshot.worktreeFingerprint
+          ))) {
+          throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, `Task ${task.id} sealed proposal artifact is invalid.`, {
+            details: { taskId: task.id, path: proposal.path, bundleId: proposal.bundleId }
+          });
+        }
+      }
+    }
+  return { sealedProposals, verifiedBundles: verifiedPaths.size };
+}
+
+export async function validateOrchestrationProposalArtifacts({
+  directory = ".",
+  readOnly = false
+}: { directory?: string; readOnly?: boolean } = {}): Promise<{
+  sealedProposals: number;
+  verifiedBundles: number;
+}> {
+  const targetDirectory = path.resolve(directory);
+  return await withOrchestrationSnapshot(
+    targetDirectory,
+    canonical => validateOrchestrationProposalArtifactsFromCanonical(targetDirectory, canonical),
+    { readOnly }
+  );
+}
+
 export async function withOrchestrationSnapshot<Result>(
   targetDirectory: string,
   action: (snapshot: {
@@ -1798,11 +1897,21 @@ export async function withOrchestrationSnapshot<Result>(
     events: OrchestrationEvent[];
     leaseBaselines: LeaseBaselinesLedger;
     snapshot?: CheckpointSnapshot;
-  }) => Promise<Result>
+  }) => Promise<Result>,
+  { readOnly = false }: { readOnly?: boolean } = {}
 ): Promise<Result> {
   const release = await acquireLock(targetDirectory);
   try {
-    await recoverPendingMutation(targetDirectory);
+    if (readOnly) {
+      const pending = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
+      if (pending.type !== "missing") {
+        throw new SynodError(
+          ERROR_CODES.ORCHESTRATION_STATE_INVALID,
+          "Pending orchestration recovery is required; refusing to mutate records during read-only validation.",
+          { details: { path: ORCHESTRATION_PENDING_PATH, type: pending.type } }
+        );
+      }
+    } else await recoverPendingMutation(targetDirectory);
     return await action(await readOrchestrationRaw(targetDirectory));
   } finally {
     await release();
@@ -3898,30 +4007,18 @@ export async function recordCheckpoint(
   }), dependencies);
 }
 
-export async function orchestrationStatus(
-  { directory = ".", explain = false, readOnly = false }: { directory?: string; explain?: boolean; readOnly?: boolean } = {},
+async function orchestrationStatusFromCanonical(
+  targetDirectory: string,
+  canonical: Awaited<ReturnType<typeof readOrchestrationRaw>>,
+  { explain = false }: { explain?: boolean },
   dependencies: OrchestrationDependencies = {}
 ): Promise<OrchestrationStatusResult> {
-  const targetDirectory = path.resolve(directory);
-  const release = await acquireLock(targetDirectory);
   let state: OrchestrationState;
   let events: OrchestrationEvent[];
   let markdown: string;
   let currentCheckpoint: GitCheckpoint;
   let delta: CheckpointDelta | undefined;
-  try {
-    if (readOnly) {
-      const pending = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
-      if (pending.type !== "missing") {
-        throw new SynodError(
-          ERROR_CODES.ORCHESTRATION_STATE_INVALID,
-          "Pending orchestration recovery is required; refusing to mutate records during read-only validation.",
-          { details: { path: ORCHESTRATION_PENDING_PATH, type: pending.type } }
-        );
-      }
-    } else await recoverPendingMutation(targetDirectory);
-    const canonical = await readOrchestrationRaw(targetDirectory);
-    ({ state, events } = canonical);
+  ({ state, events } = canonical);
     markdown = await readRecord(targetDirectory, ORCHESTRATION_STATUS_PATH);
     const current = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
     currentCheckpoint = current.checkpoint;
@@ -3985,9 +4082,6 @@ export async function orchestrationStatus(
           });
         }
       }
-    }
-  } finally {
-    await release();
   }
   const expectedMarkdown = renderStatusMarkdown(state);
   if (contentHash(markdown) !== contentHash(expectedMarkdown)) {
@@ -4038,6 +4132,34 @@ export async function orchestrationStatus(
     markdownView: ORCHESTRATION_STATUS_PATH,
     ...(delta ? { delta } : {})
   };
+}
+
+export async function orchestrationStatus(
+  { directory = ".", explain = false, readOnly = false }: { directory?: string; explain?: boolean; readOnly?: boolean } = {},
+  dependencies: OrchestrationDependencies = {}
+): Promise<OrchestrationStatusResult> {
+  const targetDirectory = path.resolve(directory);
+  return await withOrchestrationSnapshot(
+    targetDirectory,
+    canonical => orchestrationStatusFromCanonical(targetDirectory, canonical, { explain }, dependencies),
+    { readOnly }
+  );
+}
+
+export async function orchestrationStatusWithArtifacts(
+  { directory = ".", explain = false, readOnly = false }: { directory?: string; explain?: boolean; readOnly?: boolean } = {},
+  dependencies: OrchestrationDependencies = {}
+) {
+  const targetDirectory = path.resolve(directory);
+  return await withOrchestrationSnapshot(targetDirectory, async canonical => {
+    const [status, proposals, worktreeModule] = await Promise.all([
+      orchestrationStatusFromCanonical(targetDirectory, canonical, { explain }, dependencies),
+      validateOrchestrationProposalArtifactsFromCanonical(targetDirectory, canonical),
+      import("./worktrees.js")
+    ]);
+    const worktrees = await worktreeModule.validateTaskWorktreeArtifacts({ directory: targetDirectory });
+    return { ...status, artifacts: { proposals, worktrees } };
+  }, { readOnly });
 }
 
 export async function validateOrchestrationReadOnly(

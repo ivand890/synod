@@ -23,7 +23,11 @@ export const LEGACY_RECORD_PATHS = new Set([
   ".synod/checkpoint.json",
   "docs/synod/STATUS.md"
 ]);
-export const RECORD_PATHS = new Set([...LEGACY_RECORD_PATHS, LEASE_BASELINES_PATH]);
+export const RECORD_PATHS = new Set([
+  ...LEGACY_RECORD_PATHS,
+  LEASE_BASELINES_PATH,
+  ".synod/task-worktrees.json"
+]);
 
 export function ownershipFor(relativePath: string): ManagedOwnership {
   if (relativePath === "AGENTS.md") return "shared";

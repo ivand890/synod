@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-10
+
+### Added
+
+- Added durable exact-revision writer leases with path/tree read and write scopes, heartbeat and expiry policy, deterministic overlap rejection, exact fencing, and append-only acquisition, heartbeat, release, revocation, and recovery events.
+- Added abandoned-worker recovery that seals the ended owner's exact scoped proposal and requires an explicit resume, reassign, or supersede decision before execution can continue.
+- Added canonical correction limits with explicit approved overrides and task splitting when ordinary correction rounds are exhausted.
+- Added change-driven thread waiting through App Server notifications or status cursors, with bounded polling fallback and observable wake, fallback, duration, timeout, approval, and user-input state.
+- Added explicit detached task worktrees with durable creation, sealing, integration, reconciliation, and non-force cleanup records. Sealed proposals remain independently verifiable after cleanup and uninstall.
+
+### Changed
+
+- Canonical orchestration state migrates explicitly from schema 1 to schema 2, preserving the hash-chained event history while adding lease baselines and recovery, correction, split, and proposal state.
+- `status`, `check`, and `handoff` now validate canonical proposal bundles, lease baselines, the task-worktree registry, and sealed worktree proposals before reporting healthy state.
+- Generated advisor guidance now requires an acquired lease before `ACTIVE`, exact fence values for mutations, explicit recovery and correction decisions, and isolated-worktree integration when parallel writers are needed.
+
+### Security
+
+- Lease mutations fail closed on stale IDs, generations, task revisions, heartbeat timestamps, owners, expiry, scope drift, and concurrent writers; recovery never advances acceptance or discards an abandoned proposal implicitly.
+- Worktree creation and integration bind the exact control branch, `HEAD`, lease baseline, scope, and proposal fingerprint; ambiguous control drift, changed proposals, dirty cleanup, unsafe destinations, and interrupted transactions require reconciliation instead of forceful deletion.
+- Upgrades preserve v0.7 durable records and reject attempts by an older CLI to replace or reinterpret a v0.8 runtime or template.
+
 ## [0.7.0] - 2026-08-10
 
 ### Added
@@ -139,7 +161,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/ivand890/synod/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ivand890/synod/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/ivand890/synod/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/ivand890/synod/compare/v0.6.1...v0.6.2

@@ -3,7 +3,7 @@ import { formatCheckpointDelta } from "./checkpoint.js";
 import type { CheckpointDelta } from "./checkpoint.js";
 import {
   legalTaskTransitions,
-  orchestrationStatus
+  orchestrationStatusWithArtifacts
 } from "./orchestration.js";
 import type {
   GitCheckpoint,
@@ -76,6 +76,10 @@ export interface HandoffResult {
   focusTaskIds: string[];
   tasks: HandoffTask[];
   recoveryBundle: HandoffRecoveryBundle;
+  artifacts: {
+    proposals: Awaited<ReturnType<typeof orchestrationStatusWithArtifacts>>["artifacts"]["proposals"];
+    worktrees: Awaited<ReturnType<typeof orchestrationStatusWithArtifacts>>["artifacts"]["worktrees"];
+  };
 }
 
 function gateEvidence(task: OrchestrationTask, evidenceIds: readonly string[]): TaskEvidence[] {
@@ -183,7 +187,7 @@ export async function generateHandoff(
   { directory = ".", bundle }: HandoffOptions = {},
   dependencies: OrchestrationDependencies = {}
 ): Promise<HandoffResult> {
-  const status = await orchestrationStatus({ directory, explain: true, readOnly: true }, dependencies);
+  const status = await orchestrationStatusWithArtifacts({ directory, explain: true, readOnly: true }, dependencies);
   const verification = bundle ? await verifyRecoveryBundle({ bundle }) : undefined;
   if (!status.delta) throw new TypeError("Handoff checkpoint delta is unavailable.");
   const taskMap = Object.fromEntries(status.tasks.map(task => [task.id, task]));
@@ -204,6 +208,7 @@ export async function generateHandoff(
     },
     focusTaskIds,
     tasks,
+    artifacts: status.artifacts,
     recoveryBundle: verification
       ? verifiedBundleMatches(verification, status.checkpoint, status.lastEvent)
       : { status: "not-supplied" }
@@ -227,6 +232,7 @@ export function formatHandoff(result: HandoffResult): string {
   lines.push(`Drift: ${result.checkpoint.drift.detected ? "detected" : "none"}`);
   lines.push(...formatCheckpointDelta(result.checkpoint.delta));
   lines.push(`Focus tasks: ${result.focusTaskIds.length > 0 ? result.focusTaskIds.join(", ") : "none"}`);
+  lines.push(`Durable artifacts: ${result.artifacts.proposals.verifiedBundles} task proposal bundle(s); ${result.artifacts.worktrees.records} worktree record(s), ${result.artifacts.worktrees.sealedProposals} worktree proposal(s)`);
   for (const task of result.tasks) {
     lines.push(`${task.id}: ${task.state} r${task.revision}; executor ${task.executor}`);
     lines.push(`  Objective: ${task.objective}`);

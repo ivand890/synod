@@ -44,7 +44,7 @@ Synod preserves an existing user-owned `.codex/config.toml`. It reports the file
 
 If `AGENTS.md` contains multiple complete Synod managed blocks, initialization stops without writing. `synod init --force` consolidates those blocks into one canonical block and preserves surrounding user content. Incomplete, nested, or orphaned Synod markers are always rejected because their ownership boundary cannot be repaired safely.
 
-Synod keeps canonical orchestration state in `.synod/state.json`, an append-only audit stream in `.synod/events.jsonl`, the normalized acknowledged worktree snapshot in `.synod/checkpoint.json`, and a generated human view in `docs/synod/STATUS.md`. Goal, decision, plan, state-note, and worklog Markdown remain user-owned supporting context. Upgrades and uninstall preserve both kinds of durable records.
+Synod keeps canonical orchestration state in `.synod/state.json`, an append-only audit stream in `.synod/events.jsonl`, exact lease baselines in `.synod/lease-baselines.json`, the normalized acknowledged checkout snapshot in `.synod/checkpoint.json`, task-worktree history in `.synod/task-worktrees.json`, sealed proposals under `.synod/proposals/` and `.synod/worktree-proposals/`, and a generated human view in `docs/synod/STATUS.md`. Goal, decision, plan, state-note, and worklog Markdown remain user-owned supporting context. Upgrades and uninstall preserve these durable records.
 
 The bootstrap records `.synod/runtime.json` schema 1 and creates an isolated pnpm project under `.synod/runtime/`. Its `package.json` and `pnpm-lock.yaml` pin the runtime, while its `.gitignore` excludes only `node_modules/`. Runtime metadata is deliberately separate from `.synod/manifest.json`: `runtimeVersion` identifies the executable, `templateVersion` identifies installed project content, and each descriptor keeps its own `schemaVersion`.
 
@@ -81,14 +81,14 @@ Synod rejects attempts to replace a newer project runtime with an older one. A f
 
 Initialization, upgrade, and uninstall recheck every destination immediately before mutation, replace files atomically, and roll back already-applied operations when a later operation fails. Modified Synod-owned files are conflicts; `--force` is required to replace or remove them. User-owned files are preserved even under `--force`.
 
-Uninstall the managed infrastructure and project-local runtime while retaining `docs/synod/`, canonical orchestration records, and surrounding user content in `AGENTS.md`:
+Uninstall the managed infrastructure and project-local runtime while retaining `docs/synod/`, canonical orchestration, lease, proposal, and task-worktree records, and surrounding user content in `AGENTS.md`:
 
 ```bash
 synod uninstall --dry-run
 synod uninstall
 ```
 
-Schema 1 manifests from v0.3.0 through v0.3.2 migrate through explicit `1 → 2 → 3` migrations. Schema 2 v0.4 projects migrate through `2 → 3`. Published legacy template hashes remain the baseline so drift is detected before upgrade.
+Schema 1 manifests from v0.3.0 through v0.3.2 migrate through explicit `1 → 2 → 3` migrations. Schema 2 v0.4 projects migrate through `2 → 3`. A v0.7 schema-1 orchestration state migrates explicitly to schema 2 before v0.8 lease, recovery, correction, and proposal events can be appended. Published legacy template hashes remain the baseline so drift is detected before upgrade, and older CLIs reject a v0.8 project as an unsupported downgrade.
 
 ## Enforced orchestration
 
@@ -126,6 +126,56 @@ synod task transition T-001 DONE --revision 1
 
 Each evidence item also captures the Git branch, exact `HEAD`, and content-sensitive working-tree fingerprint observed for that event. State mutations hold an exclusive project lock, validate the complete event hash chain, append one event, and atomically replace state plus its Markdown projection.
 
+### Writer leases and recovery
+
+Every writer must acquire an exact-revision lease before moving its task to `ACTIVE`. Declare the narrowest allowed scopes; exact paths use `--write`/`--read`, while directory trees use `--write-tree`/`--read-tree`:
+
+```bash
+synod lease acquire T-001 \
+  --owner-thread thread:019f... \
+  --write-tree src/api \
+  --read-tree test/fixtures \
+  --ttl-seconds 300 \
+  --heartbeat-seconds 60 \
+  --json
+```
+
+The JSON result contains the lease ID, generation, task revision, owner, and `heartbeatAt`. Copy those exact values into heartbeat, release, worktree, revocation, or recovery commands; a stale value fails closed:
+
+```bash
+synod lease heartbeat T-001 --lease-id <id> --generation 1 --revision 0 \
+  --expected-heartbeat-at <iso> --owner-thread thread:019f...
+synod lease release T-001 --lease-id <id> --generation 1 --revision 0 \
+  --expected-heartbeat-at <new-iso> --owner-thread thread:019f...
+```
+
+Overlapping write scopes are rejected deterministically, including path/tree overlaps. Declared read scopes may coexist with readers and writers because they do not reserve mutation ownership. Synod compares the live scoped delta to the lease baseline before review so out-of-scope writes cannot be accepted silently.
+
+If a worker stops, an authorized supervisor revokes or expires its lease and makes one explicit recovery decision. Revocation seals the ended generation's scoped proposal without accepting it:
+
+```bash
+synod lease revoke T-001 --lease-id <id> --generation 1 --revision 0 \
+  --expected-heartbeat-at <iso> --reason "worker stopped"
+synod lease recover T-001 --lease-id <id> --generation 1 --revision 0 \
+  --expected-heartbeat-at <iso> --decision reassign \
+  --owner-thread thread:replacement --reason "continue the preserved proposal"
+```
+
+`resume`, `reassign`, and `supersede` are distinct hash-chained decisions. Recovery never changes acceptance or verification, and the sealed proposal remains verifiable in `.synod/proposals/`.
+
+### Bounded correction policy
+
+Tasks carry their correction allowance in canonical state. Once it is exhausted, another ordinary return to `ACTIVE` is rejected. The supervisor must supersede the task, split the remaining work, or record a bounded approval:
+
+```bash
+synod task override T-001 --additional-rounds 1 --approver release-owner \
+  --reference approval:123 --reason "one focused retry" --evidence review:exhausted
+synod task split T-001 --replacement T-001A --replacement T-001B \
+  --reason "separate the exhausted scope" --evidence review:split
+```
+
+Replacement tasks must already exist. Split supersedes the exhausted parent and records the relationship without accepting either replacement.
+
 Task mutations do not move the canonical checkpoint, so they cannot silently accept repository drift. Only `synod checkpoint` changes the acknowledged branch, `HEAD`, and working-tree fingerprint.
 
 Read actual state and compare its last checkpoint with the current repository:
@@ -142,7 +192,7 @@ synod status --json
 synod checkpoint --message "Accepted the integrated revision"
 ```
 
-Do not hand-edit `.synod/state.json`, `.synod/events.jsonl`, `.synod/checkpoint.json`, or `docs/synod/STATUS.md`. A broken event sequence, hash chain, state/log match, checkpoint snapshot, or Markdown projection fails closed. Historical checkpoints created before snapshot support remain valid for summary status, but path-level explanation requires recording a new checkpoint when the historical worktree no longer matches the live checkout.
+Do not hand-edit `.synod/state.json`, `.synod/events.jsonl`, `.synod/checkpoint.json`, `.synod/task-worktrees.json`, sealed proposal directories, or `docs/synod/STATUS.md`. A broken event sequence, hash chain, state/log match, lease baseline, checkpoint snapshot, proposal identity, task-worktree chain, or Markdown projection fails closed. Historical checkpoints created before snapshot support remain valid for summary status, but path-level explanation requires recording a new checkpoint when the historical worktree no longer matches the live checkout.
 
 ## Canonical handoff
 
@@ -154,11 +204,42 @@ synod handoff --bundle ../project-recovery.bundle
 synod handoff --json
 ```
 
-The handoff reports the acknowledged and current checkpoints, drift and path delta, focus tasks, blockers, incomplete dependencies, unresolved acceptance and verification gates, current-revision evidence, and legal next transitions. It does not treat `GOAL.md`, `PLAN.md`, `STATE.md`, `WORKLOG.md`, or chat history as authoritative, and it does not update canonical records or `STATUS.md`. If pending orchestration recovery would require a write, handoff fails closed instead.
+The handoff reports the acknowledged and current checkpoints, drift and path delta, focus tasks, blockers, lease/recovery/proposal state, incomplete dependencies, unresolved acceptance and verification gates, current-revision evidence, legal next transitions, and verified proposal/worktree artifact counts. It does not treat `GOAL.md`, `PLAN.md`, `STATE.md`, `WORKLOG.md`, or chat history as authoritative, and it does not update canonical records or `STATUS.md`. If pending orchestration recovery would require a write, or any durable proposal/worktree artifact does not verify, handoff fails closed instead. `status` and `check` enforce the same artifact validation.
 
 An optional bundle must pass full verification and match the canonical checkpoint fingerprint and snapshot hash. A bundle exported earlier at that checkpoint remains valid after later task events; handoff labels its event identity as older instead of pretending it is current. A bundle from another checkpoint is rejected.
 
 `DONE` means only that Synod's local delivery, acceptance, and verification transitions completed for the recorded task revision. It does not mean the work is committed, pushed, reviewed by a hosting provider, deployed, externally approved, or operationally verified; those outcomes require their own evidence.
+
+## Optional isolated task worktrees
+
+An active leased task can execute in an explicit detached Git worktree outside the control checkout. Creation binds the destination, control branch and `HEAD`, task revision, owner, generation, lease baseline, and allowed scopes:
+
+```bash
+synod worktree create T-001 --destination ../task-T-001 \
+  --lease-id <id> --generation 1 --revision 0 \
+  --expected-heartbeat-at <iso> --owner-thread thread:019f...
+synod task transition T-001 ACTIVE --revision 0
+```
+
+After the worker stops editing, the supervisor seals its exact staged, unstaged, deleted, renamed, and allowed untracked delta into a durable proposal, then integrates it transactionally into the control checkout:
+
+```bash
+synod worktree status T-001
+synod worktree seal T-001 --lease-id <id> --generation 1 --revision 0 \
+  --expected-heartbeat-at <iso> --owner-thread thread:019f...
+synod worktree integrate T-001 --lease-id <id> --generation 1 --revision 0 \
+  --expected-heartbeat-at <iso> --owner-thread thread:019f...
+synod task transition T-001 REVIEW --revision 1 --evidence worktree:integrated
+```
+
+Integration refuses a moved base, changed proposal, unowned or ambiguous control drift, and stale or expired fencing. It preserves independently attributed drift and verifies the installed fingerprint before marking the integration complete. Creation and integration intents are recoverable after interruption.
+
+Cleanup is separate and non-force. It refuses any dirty or untracked material, never removes the control checkout or an unrelated registered worktree, and keeps the sealed proposal and registry history:
+
+```bash
+git -C ../task-T-001 status --short
+synod worktree cleanup T-001
+```
 
 ## Local recovery bundles
 
@@ -201,6 +282,17 @@ Synod reads Codex's local session metadata through the App Server and reconstruc
 
 For a session that is still running, the report is a persisted snapshot: the active request appears after Codex emits its next token counter update.
 
+## Change-driven thread waiting
+
+Wait for one or more child threads to become quiescent without a fixed busy-poll loop:
+
+```bash
+synod wait --thread thread:one --thread thread:two --timeout-seconds 300
+synod wait --thread thread:one --poll-interval-ms 1000 --json
+```
+
+Synod prefers App Server status notifications, then a status cursor when available. If neither capability exists it uses a bounded polling fallback of at most five seconds. Text and JSON report `mode`, `wakeCount`, `fallbackPollCount`, elapsed time, timeout/abort state, and whether approval or user input is required. Every path bounds startup, waiting, listener removal, and client cleanup; cleanup degradation is emitted as a warning instead of leaving a process handle alive.
+
 ## JSON contract
 
 Every command with `--json` emits exactly one JSON document. Envelope schema version 1 has this top-level shape:
@@ -213,7 +305,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
   "data": {},
   "warnings": [],
   "diagnostics": {
-    "synodVersion": "0.7.0",
+    "synodVersion": "0.8.0",
     "nodeVersion": "24.12.0",
     "platform": "darwin",
     "codexVersion": "0.142.0"
@@ -223,7 +315,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
 
 Failures set `ok` to `false`, omit `data`, include `error: { code, message, details? }`, and return a non-zero exit status. Warnings use `{ code, message, details? }`. Codes are stable within schema version 1.
 
-Lifecycle errors include stable codes for invalid/unsupported manifests, invalid or conflicting local runtimes, failed runtime installation or execution, required upgrades, conflicts, unsafe paths, destination races, transaction rollback, and unsupported downgrades. Orchestration errors identify invalid state/logs, state-log mismatch, held locks, invalid tasks or transitions, stale revisions, missing evidence, and checkpoint drift. Recovery errors distinguish invalid or corrupted bundles, existing export destinations, required untracked opt-in, unsupported dirty submodules, wrong restore bases, dirty destinations, restore failures, invalid journals, and rollback failures. Existing command, App Server, session, and JSON codes remain stable within envelope schema version 1.
+Lifecycle errors include stable codes for invalid/unsupported manifests, invalid or conflicting local runtimes, failed runtime installation or execution, required upgrades, conflicts, unsafe paths, destination races, transaction rollback, and unsupported downgrades. Orchestration errors identify invalid state/logs, state-log mismatch, held locks, invalid tasks or transitions, stale revisions, missing evidence, checkpoint drift, lease conflicts and fencing, proposal validation, correction exhaustion, wait failures, and worktree reconciliation. Recovery errors distinguish invalid or corrupted bundles, existing export destinations, required untracked opt-in, unsupported dirty submodules, wrong restore bases, dirty destinations, restore failures, invalid journals, and rollback failures. Existing command, App Server, session, and JSON codes remain stable within envelope schema version 1.
 
 Warnings identify preserved user state, available upgrades, missing user-owned files, incompatible profiles, unsupported Codex versions, and bounded App Server cleanup fallbacks.
 

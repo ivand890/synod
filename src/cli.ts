@@ -16,14 +16,14 @@ import {
   expireTaskLease,
   formatOrchestrationStatus,
   heartbeatTaskLease,
-  orchestrationStatus,
   recordCheckpoint,
   recoverTaskLease,
   releaseTaskLease,
   revokeTaskLease,
   overrideCorrectionPolicy,
   splitTask,
-  transitionTask
+  transitionTask,
+  orchestrationStatusWithArtifacts
 } from "./orchestration.js";
 import type { OrchestrationDependencies } from "./orchestration.js";
 import type { UsageClient } from "./usage.js";
@@ -283,7 +283,7 @@ export async function run(
     if (command === "status") {
       const options = parseLifecycleArgs(args.slice(1), { allowExplain: true });
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      const result = await orchestrationStatus(options, dependencies);
+      const result = await orchestrationStatusWithArtifacts(options, dependencies);
       if (options.json) {
         const envelope = result.healthy
           ? successEnvelope("status", result)

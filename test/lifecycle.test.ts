@@ -23,6 +23,7 @@ import {
   transitionTask
 } from "../src/orchestration.js";
 import { isRecord } from "../src/validation.js";
+import { TASK_WORKTREES_PATH, validateTaskWorktreeRegistry } from "../src/worktrees.js";
 
 const temporaryDirectories = new Set<string>();
 const execFileAsync = promisify(execFile);
@@ -176,6 +177,25 @@ test("check rejects inconsistent canonical orchestration records", async () => {
   assert.equal(orchestration.code, ERROR_CODES.EVENT_LOG_INVALID);
 });
 
+test("fresh projects record and validate the durable task worktree registry", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory, profile: "portable" });
+  const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
+  const registryPath = path.join(directory, TASK_WORKTREES_PATH);
+  const registry = validateTaskWorktreeRegistry(JSON.parse(await readFile(registryPath, "utf8")));
+
+  assert.equal(manifest.files.find((entry: { path?: unknown }) => entry.path === TASK_WORKTREES_PATH)?.ownership, "record");
+  assert.deepEqual(registry.records, []);
+  const healthy = await checkProject({ directory });
+  assert.equal(healthy.checks.find(item => item.path === ".synod/task-worktrees")?.status, "valid");
+
+  await writeFile(registryPath, `${JSON.stringify({ ...registry, schemaVersion: 99 }, null, 2)}\n`);
+  const tampered = await checkProject({ directory });
+  assert.equal(tampered.healthy, false);
+  assert.equal(tampered.checks.find(item => item.path === ".synod/task-worktrees")?.status, "invalid");
+  assert.equal(tampered.checks.find(item => item.path === ".synod/task-worktrees")?.code, ERROR_CODES.WORKTREE_INVALID);
+});
+
 test("init dry-run refuses pending orchestration recovery without writing", async () => {
   const directory = await temporaryProject();
   await initProject({ directory });
@@ -233,6 +253,30 @@ test("upgrade dry-run is non-mutating and profile changes preserve durable state
   assert.equal(await readFile(goalPath, "utf8"), "# Durable custom goal\n");
   const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
   assert.equal(manifest.profile, "synod-5.6");
+});
+
+test("upgrade creates the v0.8 worktree registry and rejects template downgrade", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory, profile: "portable" });
+  const manifestPath = path.join(directory, ".synod/manifest.json");
+  const registryPath = path.join(directory, TASK_WORKTREES_PATH);
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.templateVersion = "0.7.0";
+  manifest.files = manifest.files.filter((entry: { path?: unknown }) => entry.path !== TASK_WORKTREES_PATH);
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  await unlink(registryPath);
+
+  const upgraded = await upgradeProject({ directory, profile: "portable" });
+  assert.ok(upgraded.created.includes(TASK_WORKTREES_PATH));
+  assert.deepEqual(validateTaskWorktreeRegistry(JSON.parse(await readFile(registryPath, "utf8"))).records, []);
+
+  const newer = JSON.parse(await readFile(manifestPath, "utf8"));
+  newer.templateVersion = "9.0.0";
+  await writeFile(manifestPath, `${JSON.stringify(newer, null, 2)}\n`);
+  await assert.rejects(
+    upgradeProject({ directory, profile: "portable" }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.DOWNGRADE_UNSUPPORTED
+  );
 });
 
 test("init recommends an upgrade for the validated project and requested profile", async () => {
@@ -344,6 +388,9 @@ test("uninstall removes owned infrastructure and preserves user state and AGENTS
   const recordPaths = [
     ".synod/state.json",
     ".synod/events.jsonl",
+    ".synod/checkpoint.json",
+    ".synod/lease-baselines.json",
+    TASK_WORKTREES_PATH,
     "docs/synod/STATUS.md"
   ];
   const recordsBeforeReinstall = await Promise.all(
@@ -404,10 +451,13 @@ test("uninstall preserves immutable sealed proposal material", async () => {
   assert.ok(delivered.task.proposal);
   const manifestPath = path.join(directory, delivered.task.proposal.path, "manifest.json");
   const manifestBefore = await readFile(manifestPath, "utf8");
+  const checked = await checkProject({ directory });
+  assert.equal(checked.checks.find(item => item.path === ".synod/proposals")?.status, "valid");
 
-  await uninstallProject({ directory });
+  const uninstalled = await uninstallProject({ directory });
 
   assert.equal(await readFile(manifestPath, "utf8"), manifestBefore);
+  assert.ok(uninstalled.preserved.includes(".synod/proposals"));
 });
 
 test("uninstall refuses modified Synod-owned files without removing anything", async () => {

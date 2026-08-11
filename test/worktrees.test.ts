@@ -17,6 +17,7 @@ import {
   integrateTaskWorktreeProposal,
   sealTaskWorktreeProposal,
   taskWorktreeStatus,
+  validateTaskWorktreeArtifacts,
   validateTaskWorktreeRegistry
 } from "../src/worktrees.js";
 
@@ -129,7 +130,7 @@ test("rejects existing, in-control, and symlink destinations before registration
       createTaskWorktree({ ...fixtureData.options, destination }),
       error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_CONFLICT
     );
-    await assert.rejects(readFile(path.join(fixtureData.control, TASK_WORKTREES_PATH), "utf8"), { code: "ENOENT" });
+    assert.equal(JSON.parse(await readFile(path.join(fixtureData.control, TASK_WORKTREES_PATH), "utf8")).records.length, 0);
   }
 });
 
@@ -142,7 +143,7 @@ test("rejects destinations nested in another registered worktree", async () => {
     error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_CONFLICT
   );
   assert.equal(await git(outer, "status", "--porcelain"), "");
-  await assert.rejects(readFile(path.join(data.control, TASK_WORKTREES_PATH), "utf8"), { code: "ENOENT" });
+  assert.equal(JSON.parse(await readFile(path.join(data.control, TASK_WORKTREES_PATH), "utf8")).records.length, 0);
 });
 
 test("fails closed when the exact lease fence or control HEAD moves", async () => {
@@ -160,7 +161,7 @@ test("fails closed when the exact lease fence or control HEAD moves", async () =
     createTaskWorktree(moved.options),
     error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_CONFLICT
   );
-  await assert.rejects(readFile(path.join(moved.control, TASK_WORKTREES_PATH), "utf8"), { code: "ENOENT" });
+  assert.equal(JSON.parse(await readFile(path.join(moved.control, TASK_WORKTREES_PATH), "utf8")).records.length, 0);
 });
 
 test("resumes an interrupted intent only when both path and registration are absent", async () => {
@@ -533,6 +534,32 @@ test("completed history rotates before the registry record limit blocks new work
   assert.equal(rotated.records.filter(record => record.cleanup.status !== "COMPLETE").length, 1);
   assert.equal(rotated.events[0]?.sequence, 1);
   assert.equal(rotated.events[0]?.previousHash, null);
+});
+
+test("pruned worktree history retains and validates every sealed proposal", async () => {
+  const data = await fixture();
+  await createTaskWorktree(data.options);
+  await activate(data.control);
+  await mkdir(path.join(data.destination, "src"));
+  await writeFile(path.join(data.destination, "src/t-001.ts"), "proposal\n");
+  const sealed = await sealTaskWorktreeProposal(data.options);
+  await git(data.destination, "reset", "--hard", "HEAD");
+  await git(data.destination, "clean", "-fd");
+  await cleanupTaskWorktree({ directory: data.control, taskId: "T-001" });
+
+  const registryPath = path.join(data.control, TASK_WORKTREES_PATH);
+  const registry = JSON.parse(await readFile(registryPath, "utf8"));
+  assert.equal(registry.sealedProposals.length, 1);
+  registry.records = [];
+  registry.events = [];
+  await writeFile(registryPath, `${JSON.stringify(registry, null, 2)}\n`);
+
+  assert.equal((await validateTaskWorktreeArtifacts({ directory: data.control })).sealedProposals, 1);
+  await rm(path.join(data.control, sealed.proposal!.path), { recursive: true });
+  await assert.rejects(
+    validateTaskWorktreeArtifacts({ directory: data.control }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.RECOVERY_BUNDLE_INVALID
+  );
 });
 
 test("requires manual reconciliation after a registered worktree changes", async () => {
