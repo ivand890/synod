@@ -577,8 +577,18 @@ export function parseWorktreeArgs(args: string[]): WorktreeCommandOptions | Help
   }
 
   if (action === "status" || action === "cleanup") {
-    if ([destination, leaseId, generation, revision, expectedHeartbeatAt, ownerThread].some(value => value !== undefined)) {
-      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Worktree status received a creation-only option.");
+    const unsupported = [
+      ["--destination", destination],
+      ["--lease-id", leaseId],
+      ["--generation", generation],
+      ["--revision", revision],
+      ["--expected-heartbeat-at", expectedHeartbeatAt],
+      ["--owner-thread", ownerThread]
+    ].find(([, value]) => value !== undefined);
+    if (unsupported) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Worktree ${action} does not accept creation or lease-fencing options.`, {
+        details: { action, option: unsupported[0] }
+      });
     }
     return { action: action as WorktreeStatusCommandOptions["action"], id, directory, json };
   }

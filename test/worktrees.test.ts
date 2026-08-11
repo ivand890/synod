@@ -326,6 +326,27 @@ test("reconciles killed integration after restore without applying the proposal 
   assert.equal(await readFile(path.join(control, "src/t-001.ts"), "utf8"), "proposal\n");
 });
 
+test("proposal sealing recovers when interrupted before atomic publication", async () => {
+  const { control, destination, options } = await fixture();
+  await createTaskWorktree(options);
+  await activate(control);
+  await mkdir(path.join(destination, "src"));
+  await writeFile(path.join(destination, "src/t-001.ts"), "proposal\n");
+  await assert.rejects(
+    sealTaskWorktreeProposal(options, {
+      worktreeHook(stage) {
+        if (stage === "before-proposal-rename") throw new Error("simulated stop before proposal rename");
+      }
+    }),
+    /simulated stop before proposal rename/
+  );
+  const interrupted = await taskWorktreeStatus({ directory: control, taskId: "T-001" });
+  assert.equal(interrupted.record.proposal?.status, "INTENT");
+  await assert.rejects(readFile(path.join(control, interrupted.record.proposal!.path, "manifest.json")), { code: "ENOENT" });
+  const sealed = await sealTaskWorktreeProposal(options);
+  assert.equal(sealed.proposal?.status, "SEALED");
+});
+
 test("integration rechecks checkout contents at the completion boundary", async () => {
   const { control, destination, options } = await fixture();
   await createTaskWorktree(options);

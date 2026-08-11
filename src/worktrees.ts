@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { lstat, mkdir, realpath } from "node:fs/promises";
+import { lstat, mkdir, realpath, rename } from "node:fs/promises";
 import path from "node:path";
 import { explainCheckpointDelta, stableCheckpointStringify } from "./checkpoint.js";
 import { applyTransaction, inspectPath, pathType, resolveProjectPath, unsafeAncestor } from "./filesystem.js";
@@ -134,6 +134,7 @@ export interface TaskWorktreeDependencies {
     | "after-add"
     | "before-complete"
     | "after-proposal-intent"
+    | "before-proposal-rename"
     | "after-proposal-publish"
     | "after-integration-intent"
     | "after-integration-restore"
@@ -989,9 +990,10 @@ export async function sealTaskWorktreeProposal(
 
     let verified;
     if (await pathType(destination.absolute) === "missing") {
-      verified = await exportSnapshotRecoveryBundle({
+      const temporaryDestination = `${destination.absolute}.staging-${randomUUID()}`;
+      await exportSnapshotRecoveryBundle({
         directory: record.worktreePath,
-        destination: destination.absolute,
+        destination: temporaryDestination,
         snapshot: captured.snapshot,
         source: { branch: null, head: record.baseHead },
         event: { sequence: orchestration.state.lastEvent.sequence, hash: orchestration.state.lastEvent.hash },
@@ -999,6 +1001,12 @@ export async function sealTaskWorktreeProposal(
         guardCheckpoint: captured.checkpoint,
         includeUntracked: true
       });
+      await dependencies.worktreeHook?.("before-proposal-rename");
+      if (await pathType(destination.absolute) !== "missing") {
+        reconciliationRequired("Task worktree proposal destination changed before atomic publication.", { recordId: record.id });
+      }
+      await rename(temporaryDestination, destination.absolute);
+      verified = await verifyRecoveryBundle({ bundle: destination.absolute });
     } else {
       verified = await verifyRecoveryBundle({ bundle: destination.absolute });
     }

@@ -582,32 +582,32 @@ async function buildTemporaryIndex(
 ): Promise<{ path: string; bytes: Buffer }> {
   const temporary = path.join(path.dirname(indexPath), `synod-recovery-index-${randomUUID()}`);
   const env = { GIT_INDEX_FILE: temporary };
-  if (seedIndex) {
-    const handle = await open(temporary, "wx", 0o600);
-    try {
-      await handle.writeFile(seedIndex);
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-  } else {
-    await runGit(directory, ["read-tree", manifest.source.head!], { env });
-  }
-  const zero = "0".repeat(objectFormat === "sha256" ? 64 : 40);
-  const records: string[] = [];
-  for (const entry of manifest.entries) {
-    records.push(`0 ${zero}\t${entry.path}\0`);
-    if (entry.sourcePath && hasIndexRename(entry.status)) records.push(`0 ${zero}\t${entry.sourcePath}\0`);
-  }
-  for (const entry of manifest.entries) {
-    const ids = objectIds.get(entry.path) || [];
-    for (const [position, item] of entry.index.entries()) {
-      records.push(item.stage === 0
-        ? `${item.mode} ${ids[position]}\t${entry.path}\0`
-        : `${item.mode} ${ids[position]} ${item.stage}\t${entry.path}\0`);
-    }
-  }
   try {
+    if (seedIndex) {
+      const handle = await open(temporary, "wx", 0o600);
+      try {
+        await handle.writeFile(seedIndex);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    } else {
+      await runGit(directory, ["read-tree", manifest.source.head!], { env });
+    }
+    const zero = "0".repeat(objectFormat === "sha256" ? 64 : 40);
+    const records: string[] = [];
+    for (const entry of manifest.entries) {
+      records.push(`0 ${zero}\t${entry.path}\0`);
+      if (entry.sourcePath && hasIndexRename(entry.status)) records.push(`0 ${zero}\t${entry.sourcePath}\0`);
+    }
+    for (const entry of manifest.entries) {
+      const ids = objectIds.get(entry.path) || [];
+      for (const [position, item] of entry.index.entries()) {
+        records.push(item.stage === 0
+          ? `${item.mode} ${ids[position]}\t${entry.path}\0`
+          : `${item.mode} ${ids[position]} ${item.stage}\t${entry.path}\0`);
+      }
+    }
     await runGit(directory, ["update-index", "--info-only", "-z", "--index-info"], {
       env,
       input: Buffer.from(records.join(""), "utf8")
@@ -1200,6 +1200,9 @@ export async function restoreRecoveryBundleOverlayUnderLock(
   let context: JournalContext | undefined;
   try {
     context = await createJournal(targetDirectory, manifest, plans.paths, temporaryIndex.bytes, locations);
+    if (hashBytes(liveIndex) !== context.journal.originalIndexHash) {
+      throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "The control index changed after the proposal index seed was read.");
+    }
     const boundary = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
     if (boundary.checkpoint.head !== initial.checkpoint.head
       || boundary.checkpoint.branch !== initial.checkpoint.branch

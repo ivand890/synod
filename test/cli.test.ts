@@ -231,6 +231,11 @@ test("worktree parsing requires a complete exact lease fence", async () => {
     const envelope = JSON.parse(takeMessage(messages));
     assert.equal(status, 1);
     assert.equal(envelope.error.code, ERROR_CODES.UNKNOWN_OPTION);
+    if (args[1] === "cleanup") {
+      assert.match(envelope.error.message, /cleanup/);
+      assert.equal(envelope.error.details.action, "cleanup");
+      assert.equal(envelope.error.details.option, "--lease-id");
+    }
   }
 });
 

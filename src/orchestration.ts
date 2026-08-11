@@ -1797,7 +1797,7 @@ export async function withOrchestrationSnapshot<Result>(
     state: OrchestrationState;
     events: OrchestrationEvent[];
     leaseBaselines: LeaseBaselinesLedger;
-    checkpoint?: CheckpointSnapshot;
+    snapshot?: CheckpointSnapshot;
   }) => Promise<Result>
 ): Promise<Result> {
   const release = await acquireLock(targetDirectory);
