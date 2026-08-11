@@ -118,14 +118,26 @@ export interface WorktreeCreateCommandOptions {
   json: boolean;
 }
 
+export interface WorktreeFencedCommandOptions {
+  action: "seal" | "integrate";
+  id: string;
+  directory: string;
+  leaseId: string;
+  generation: number;
+  revision: number;
+  expectedHeartbeatAt: string;
+  ownerThread: string;
+  json: boolean;
+}
+
 export interface WorktreeStatusCommandOptions {
-  action: "status";
+  action: "status" | "cleanup";
   id: string;
   directory: string;
   json: boolean;
 }
 
-export type WorktreeCommandOptions = WorktreeCreateCommandOptions | WorktreeStatusCommandOptions;
+export type WorktreeCommandOptions = WorktreeCreateCommandOptions | WorktreeFencedCommandOptions | WorktreeStatusCommandOptions;
 
 interface TaskCommonOptions {
   id: string;
@@ -521,7 +533,7 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
 export function parseWorktreeArgs(args: string[]): WorktreeCommandOptions | HelpOptions {
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
-  if (action !== "create" && action !== "status") {
+  if (!["create", "seal", "integrate", "cleanup", "status"].includes(action)) {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown worktree action: ${action}`, { details: { action } });
   }
   const id = args[1];
@@ -564,16 +576,20 @@ export function parseWorktreeArgs(args: string[]): WorktreeCommandOptions | Help
     index += 1;
   }
 
-  if (action === "status") {
+  if (action === "status" || action === "cleanup") {
     if ([destination, leaseId, generation, revision, expectedHeartbeatAt, ownerThread].some(value => value !== undefined)) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Worktree status received a creation-only option.");
     }
-    return { action, id, directory, json };
+    return { action: action as WorktreeStatusCommandOptions["action"], id, directory, json };
   }
-  if (!destination || !leaseId || generation === undefined || revision === undefined || !expectedHeartbeatAt || !ownerThread) {
+  if (action !== "create" && destination !== undefined) {
+    throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Worktree ${action} does not accept --destination.`);
+  }
+  if ((action === "create" && !destination)
+    || !leaseId || generation === undefined || revision === undefined || !expectedHeartbeatAt || !ownerThread) {
     throw new SynodError(
       ERROR_CODES.WORKTREE_INVALID,
-      "Worktree create requires --destination, --lease-id, --generation, --revision, --expected-heartbeat-at, and --owner-thread."
+      `Worktree ${action} requires ${action === "create" ? "--destination, " : ""}--lease-id, --generation, --revision, --expected-heartbeat-at, and --owner-thread.`
     );
   }
   if (!Number.isSafeInteger(generation) || generation <= 0 || !Number.isSafeInteger(revision) || revision < 0) {
@@ -582,7 +598,10 @@ export function parseWorktreeArgs(args: string[]): WorktreeCommandOptions | Help
   if (Number.isNaN(Date.parse(expectedHeartbeatAt))) {
     throw new SynodError(ERROR_CODES.WORKTREE_INVALID, "Worktree expected heartbeat must be an ISO timestamp.");
   }
-  return { action, id, directory, destination, leaseId, generation, revision, expectedHeartbeatAt, ownerThread, json };
+  const fenced = { id, directory, leaseId, generation, revision, expectedHeartbeatAt, ownerThread, json };
+  return action === "create"
+    ? { action, destination: destination!, ...fenced }
+    : { action: action as WorktreeFencedCommandOptions["action"], ...fenced };
 }
 
 export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {

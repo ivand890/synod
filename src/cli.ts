@@ -33,7 +33,7 @@ import { restoreRecoveryBundle } from "./restore.js";
 import { formatHandoff, generateHandoff } from "./handoff.js";
 import { formatWaitReport, waitForThreads } from "./wait.js";
 import type { ThreadStatusAdapter, WaitClient } from "./wait.js";
-import { createTaskWorktree, taskWorktreeStatus } from "./worktrees.js";
+import { cleanupTaskWorktree, createTaskWorktree, integrateTaskWorktreeProposal, sealTaskWorktreeProposal, taskWorktreeStatus } from "./worktrees.js";
 import type { TaskWorktreeDependencies } from "./worktrees.js";
 
 const HELP = `Synod ${packageVersion}
@@ -61,6 +61,9 @@ Usage:
   synod lease revoke <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --reason <text> [--cwd <directory>] [--json]
   synod lease recover <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --decision <resume|reassign|supersede> --reason <text> [--owner-thread <thread-id>] [--cwd <directory>] [--json]
   synod worktree create <task-id> --destination <path> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
+  synod worktree seal <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
+  synod worktree integrate <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
+  synod worktree cleanup <task-id> [--cwd <directory>] [--json]
   synod worktree status <task-id> [--cwd <directory>] [--json]
   synod doctor [directory] [--json]
   synod uninstall [directory] [--dry-run] [--force] [--json]
@@ -430,22 +433,40 @@ export async function run(
     if (command === "worktree") {
       const options = parseWorktreeArgs(args.slice(1));
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      const result = options.action === "create"
-        ? await createTaskWorktree({
-            directory: options.directory,
-            taskId: options.id,
-            destination: options.destination,
-            leaseId: options.leaseId,
-            generation: options.generation,
-            revision: options.revision,
-            expectedHeartbeatAt: options.expectedHeartbeatAt,
-            ownerThread: options.ownerThread
-          }, dependencies.worktreeDependencies)
-        : await taskWorktreeStatus({ directory: options.directory, taskId: options.id }, dependencies.worktreeDependencies);
+      let result;
+      if (options.action === "status") {
+        result = await taskWorktreeStatus({ directory: options.directory, taskId: options.id }, dependencies.worktreeDependencies);
+      } else if (options.action === "cleanup") {
+        result = { record: await cleanupTaskWorktree({ directory: options.directory, taskId: options.id }, dependencies.worktreeDependencies), reconciliation: "complete" as const, reasons: [] };
+      } else {
+        if (!("leaseId" in options)) throw new SynodError(ERROR_CODES.INTERNAL, "Fenced worktree options were not parsed.");
+        const fenced = {
+          directory: options.directory,
+          taskId: options.id,
+          leaseId: options.leaseId,
+          generation: options.generation,
+          revision: options.revision,
+          expectedHeartbeatAt: options.expectedHeartbeatAt,
+          ownerThread: options.ownerThread
+        };
+        result = options.action === "create"
+          ? await createTaskWorktree({ ...fenced, destination: options.destination }, dependencies.worktreeDependencies)
+          : {
+              record: await (options.action === "seal" ? sealTaskWorktreeProposal : integrateTaskWorktreeProposal)(fenced, dependencies.worktreeDependencies),
+              reconciliation: "complete" as const,
+              reasons: []
+            };
+      }
       const data = { action: options.action, ...result };
       if (options.json) output.log(JSON.stringify(successEnvelope("worktree", data), null, 2));
       else if (options.action === "create") {
         output.log(`Created detached worktree for ${result.record.taskId} at ${result.record.worktreePath} (${result.record.baseHead}).`);
+      } else if (options.action === "seal") {
+        output.log(`Sealed worktree proposal ${result.record.proposal?.bundleId} for ${result.record.taskId}.`);
+      } else if (options.action === "integrate") {
+        output.log(`Integrated worktree proposal for ${result.record.taskId} (${result.record.integration.fingerprint}).`);
+      } else if (options.action === "cleanup") {
+        output.log(`Cleaned task worktree for ${result.record.taskId} at ${result.record.worktreePath}.`);
       } else {
         output.log(`Task worktree ${result.record.taskId}: ${result.reconciliation} at ${result.record.worktreePath}.`);
         for (const reason of result.reasons) output.log(`  - ${reason}`);

@@ -7,10 +7,13 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
 import { initProject } from "../src/lifecycle.js";
-import { acquireTaskLease, addTask, transitionTask } from "../src/orchestration.js";
+import { acquireTaskLease, addTask, releaseTaskLease, transitionTask } from "../src/orchestration.js";
 import {
   TASK_WORKTREES_PATH,
+  cleanupTaskWorktree,
   createTaskWorktree,
+  integrateTaskWorktreeProposal,
+  sealTaskWorktreeProposal,
   taskWorktreeStatus,
   validateTaskWorktreeRegistry
 } from "../src/worktrees.js";
@@ -55,6 +58,7 @@ async function fixture() {
   return {
     root,
     control,
+    lease,
     destination: path.join(root, "task-T-001"),
     options: {
       directory: control,
@@ -67,6 +71,10 @@ async function fixture() {
       ownerThread: lease.ownerThread
     }
   };
+}
+
+async function activate(directory: string) {
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
 }
 
 test.afterEach(async () => {
@@ -190,6 +198,177 @@ test("rechecks cleanliness at the completion boundary and preserves an intent on
   assert.equal(interrupted.record.creation.status, "INTENT");
   assert.equal(interrupted.reconciliation, "manual_reconciliation");
   assert.ok(interrupted.reasons.includes("interrupted creation worktree is not clean"));
+});
+
+test("rechecks lease expiry at the completion boundary", async () => {
+  const { control, lease, options } = await fixture();
+  const beforeExpiry = new Date(Date.parse(lease.expiresAt) - 1);
+  const expired = new Date(lease.expiresAt);
+  let calls = 0;
+  await assert.rejects(
+    createTaskWorktree(options, { clock: () => (++calls >= 3 ? expired : beforeExpiry) }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_CONFLICT
+  );
+  const interrupted = await taskWorktreeStatus({ directory: control, taskId: "T-001" });
+  assert.equal(interrupted.record.creation.status, "INTENT");
+  assert.equal(interrupted.reconciliation, "complete");
+});
+
+test("seals and transactionally integrates a scoped proposal while preserving attributed drift", async () => {
+  const { control, destination, options } = await fixture();
+  await createTaskWorktree(options);
+  await activate(control);
+  await addTask({
+    directory: control,
+    id: "T-002",
+    objective: "Own disjoint control drift",
+    executor: "synod_implementer",
+    acceptance: ["Disjoint drift is preserved."],
+    verification: ["pnpm test"]
+  });
+  await transitionTask({ directory: control, id: "T-002", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory: control, id: "T-002", ownerThread: "thread:T-002", writeTree: ["other"] });
+  await mkdir(path.join(control, "other"));
+  await writeFile(path.join(control, "other/owned.txt"), "other task\n");
+  await git(control, "add", "other/owned.txt");
+  const otherIndex = await git(control, "rev-parse", ":other/owned.txt");
+  await mkdir(path.join(destination, "src"));
+  await writeFile(path.join(destination, "src/t-001.ts"), "staged proposal\n");
+  await git(destination, "add", "src/t-001.ts");
+  await writeFile(path.join(destination, "src/t-001.ts"), "staged proposal\nunstaged proposal\n");
+
+  const sealed = await sealTaskWorktreeProposal(options);
+  assert.equal(sealed.proposal?.status, "SEALED");
+  assert.ok(sealed.proposal?.bundleId);
+  const integrated = await integrateTaskWorktreeProposal(options);
+  assert.equal(integrated.integration.status, "COMPLETE");
+  assert.equal(await readFile(path.join(control, "src/t-001.ts"), "utf8"), "staged proposal\nunstaged proposal\n");
+  assert.equal(await git(control, "show", ":src/t-001.ts"), "staged proposal");
+  assert.equal(await readFile(path.join(control, "other/owned.txt"), "utf8"), "other task\n");
+  assert.equal(await git(control, "rev-parse", ":other/owned.txt"), otherIndex);
+  assert.equal((await integrateTaskWorktreeProposal(options)).integration.status, "COMPLETE");
+  const reviewed = await transitionTask({
+    directory: control,
+    id: "T-001",
+    to: "REVIEW",
+    revision: 1,
+    evidence: ["worktree:integrated"]
+  });
+  assert.equal(reviewed.task.state, "REVIEW");
+  assert.equal(reviewed.task.proposal?.fingerprint, integrated.integration.fingerprint);
+});
+
+test("integration rejects unowned drift and rolls back ordinary restore failures", async () => {
+  const unowned = await fixture();
+  await createTaskWorktree(unowned.options);
+  await activate(unowned.control);
+  await mkdir(path.join(unowned.destination, "src"));
+  await writeFile(path.join(unowned.destination, "src/t-001.ts"), "proposal\n");
+  await sealTaskWorktreeProposal(unowned.options);
+  await writeFile(path.join(unowned.control, "foreign.txt"), "unowned\n");
+  await assert.rejects(
+    integrateTaskWorktreeProposal(unowned.options),
+    error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_CONFLICT
+  );
+  await assert.rejects(readFile(path.join(unowned.control, "src/t-001.ts"), "utf8"), { code: "ENOENT" });
+
+  const rollback = await fixture();
+  await createTaskWorktree(rollback.options);
+  await activate(rollback.control);
+  await mkdir(path.join(rollback.destination, "src"));
+  await writeFile(path.join(rollback.destination, "src/t-001.ts"), "proposal\n");
+  await sealTaskWorktreeProposal(rollback.options);
+  await assert.rejects(
+    integrateTaskWorktreeProposal(rollback.options, {
+      restoreHook(phase) {
+        if (phase === "before-path-install") throw new Error("simulated integration failure");
+      }
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.RECOVERY_RESTORE_FAILED
+  );
+  await assert.rejects(readFile(path.join(rollback.control, "src/t-001.ts"), "utf8"), { code: "ENOENT" });
+  assert.equal((await integrateTaskWorktreeProposal(rollback.options)).integration.status, "COMPLETE");
+});
+
+test("reconciles killed integration after restore without applying the proposal twice", async () => {
+  const { control, destination, options } = await fixture();
+  await createTaskWorktree(options);
+  await activate(control);
+  await mkdir(path.join(destination, "src"));
+  await writeFile(path.join(destination, "src/t-001.ts"), "proposal\n");
+  await sealTaskWorktreeProposal(options);
+  await assert.rejects(
+    integrateTaskWorktreeProposal(options, {
+      worktreeHook(stage) {
+        if (stage === "after-integration-restore") throw new Error("simulated stop after integration");
+      }
+    }),
+    /simulated stop after integration/
+  );
+  assert.equal(await readFile(path.join(control, "src/t-001.ts"), "utf8"), "proposal\n");
+  const completed = await integrateTaskWorktreeProposal(options);
+  assert.equal(completed.integration.status, "COMPLETE");
+  assert.equal(await readFile(path.join(control, "src/t-001.ts"), "utf8"), "proposal\n");
+});
+
+test("cleanup is explicit, non-force, interruption-safe, and unblocks a new generation", async () => {
+  for (const interruptedStage of ["after-cleanup-intent", "after-cleanup-remove"] as const) {
+    const data = await fixture();
+    await createTaskWorktree(data.options);
+    await assert.rejects(
+      cleanupTaskWorktree({ directory: data.control, taskId: "T-001" }, {
+        worktreeHook(stage) {
+          if (stage === interruptedStage) throw new Error(`simulated ${interruptedStage}`);
+        }
+      }),
+      new RegExp(interruptedStage)
+    );
+    const cleaned = await cleanupTaskWorktree({ directory: data.control, taskId: "T-001" });
+    assert.equal(cleaned.cleanup.status, "COMPLETE");
+    await assert.rejects(git(data.destination, "status", "--porcelain"));
+  }
+
+  const replacement = await fixture();
+  await createTaskWorktree(replacement.options);
+  await cleanupTaskWorktree({ directory: replacement.control, taskId: "T-001" });
+  await releaseTaskLease({
+    directory: replacement.control,
+    id: "T-001",
+    leaseId: replacement.lease.id,
+    generation: replacement.lease.generation,
+    revision: replacement.lease.taskRevision,
+    expectedHeartbeatAt: replacement.lease.heartbeatAt,
+    ownerThread: replacement.lease.ownerThread
+  });
+  const next = await acquireTaskLease({
+    directory: replacement.control,
+    id: "T-001",
+    ownerThread: "thread:T-001-next",
+    writeTree: ["src"]
+  });
+  const nextDestination = path.join(replacement.root, "task-T-001-next");
+  const created = await createTaskWorktree({
+    directory: replacement.control,
+    taskId: "T-001",
+    destination: nextDestination,
+    leaseId: next.lease.id,
+    generation: next.lease.generation,
+    revision: next.lease.taskRevision,
+    expectedHeartbeatAt: next.lease.heartbeatAt,
+    ownerThread: next.lease.ownerThread
+  });
+  assert.equal(created.record.generation, replacement.lease.generation + 1);
+});
+
+test("cleanup refuses dirty or untracked worktree material", async () => {
+  const { control, destination, options } = await fixture();
+  await createTaskWorktree(options);
+  await writeFile(path.join(destination, "untracked.txt"), "preserve me\n");
+  await assert.rejects(
+    cleanupTaskWorktree({ directory: control, taskId: "T-001" }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.WORKTREE_CONFLICT
+  );
+  assert.equal(await readFile(path.join(destination, "untracked.txt"), "utf8"), "preserve me\n");
 });
 
 test("requires manual reconciliation after a registered worktree changes", async () => {
