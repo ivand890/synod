@@ -109,7 +109,10 @@ test("prints version and help", () => {
   assert.match(help.stdout, /synod handoff/);
   assert.match(help.stdout, /--explain/);
   assert.match(help.stdout, /synod task add/);
+  assert.match(help.stdout, /synod task override/);
+  assert.match(help.stdout, /synod task split/);
   assert.match(help.stdout, /synod lease acquire/);
+  assert.match(help.stdout, /synod lease recover/);
   assert.match(help.stdout, /--write-tree/);
   assert.match(help.stdout, /--read-tree/);
   assert.match(help.stdout, /synod bundle export/);
@@ -340,6 +343,7 @@ test("task and status commands expose canonical orchestration through schema-1 e
       "--executor", "synod_implementer",
       "--acceptance", "The task is persisted",
       "--verification", "pnpm test",
+      "--correction-limit", "4",
       "--cwd", directory,
       "--json"
     ], output);
@@ -349,6 +353,7 @@ test("task and status commands expose canonical orchestration through schema-1 e
     assert.equal(added.command, "task");
     assert.equal(added.data.action, "add");
     assert.equal(added.data.task.id, "T-001");
+    assert.equal(added.data.task.correctionPolicy.limit, 4);
 
     const statusCode = await run(["status", directory, "--json"], output);
     const status = JSON.parse(takeMessage(messages));
@@ -432,6 +437,107 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
     assert.equal(heartbeatCode, 0);
     assert.equal(heartbeat.data.action, "heartbeat");
     assert.equal(heartbeat.data.lease.generation, 1);
+
+    await run(["task", "transition", "T-LEASE", "ACTIVE", "--revision", "0", "--cwd", directory], output);
+    messages.length = 0;
+    await mkdir(path.join(directory, "src/lease"), { recursive: true });
+    await writeFile(path.join(directory, "src/lease/work.ts"), "abandoned\n");
+    const revokeCode = await run([
+      "lease", "revoke", "T-LEASE",
+      "--lease-id", heartbeat.data.lease.id,
+      "--generation", "1",
+      "--revision", "0",
+      "--expected-heartbeat-at", heartbeat.data.lease.heartbeatAt,
+      "--reason", "worker stopped",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const revoked = JSON.parse(takeMessage(messages));
+    assert.equal(revokeCode, 0);
+    assert.equal(revoked.data.task.recovery.status, "PENDING");
+
+    const recoverCode = await run([
+      "lease", "recover", "T-LEASE",
+      "--lease-id", heartbeat.data.lease.id,
+      "--generation", "1",
+      "--revision", "0",
+      "--expected-heartbeat-at", heartbeat.data.lease.heartbeatAt,
+      "--decision", "reassign",
+      "--owner-thread", "thread:replacement",
+      "--reason", "continue with replacement",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const recovered = JSON.parse(takeMessage(messages));
+    assert.equal(recoverCode, 0);
+    assert.equal(recovered.data.action, "recover");
+    assert.equal(recovered.data.lease.ownerThread, "thread:replacement");
+    assert.equal(recovered.data.lease.generation, 2);
+    assert.equal(recovered.data.task.recovery.status, "REASSIGNED");
+    assert.match(recovered.data.task.recovery.proposal.bundleId, /^sha256:/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("task override and split commands expose canonical policy decisions through JSON", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-policy-json-test-"));
+  const { messages, output } = capturedOutput();
+  const add = async (id: string) => {
+    const code = await run([
+      "task", "add", id,
+      "--objective", `Exercise ${id}`,
+      "--executor", "synod_implementer",
+      "--acceptance", "The policy decision is recorded",
+      "--verification", "pnpm test",
+      "--correction-limit", "0",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    assert.equal(code, 0);
+    messages.length = 0;
+  };
+
+  try {
+    await run(["init", directory], output);
+    messages.length = 0;
+    await add("T-OVERRIDE");
+    const overrideCode = await run([
+      "task", "override", "T-OVERRIDE",
+      "--additional-rounds", "1",
+      "--approver", "release-owner",
+      "--reference", "approval:cli",
+      "--reason", "one bounded retry",
+      "--evidence", "review:exhausted",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const overridden = JSON.parse(takeMessage(messages));
+    assert.equal(overrideCode, 0);
+    assert.equal(overridden.data.action, "override");
+    assert.equal(overridden.data.task.correctionPolicy.limit, 1);
+    assert.equal(overridden.data.override.reference, "approval:cli");
+
+    await add("T-SPLIT");
+    await add("T-LEFT");
+    await add("T-RIGHT");
+    const splitCode = await run([
+      "task", "split", "T-SPLIT",
+      "--replacement", "T-LEFT",
+      "--replacement", "T-RIGHT",
+      "--reason", "separate exhausted scope",
+      "--evidence", "review:split",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const split = JSON.parse(takeMessage(messages));
+    assert.equal(splitCode, 0);
+    assert.equal(split.data.action, "split");
+    assert.equal(split.data.task.state, "SUPERSEDED");
+    assert.deepEqual(split.data.replacements.map((item: { id: string }) => item.id), ["T-LEFT", "T-RIGHT"]);
+    assert.ok(split.data.replacements.every((item: { state: string; acceptance: { status: string } }) =>
+      item.state === "PLANNED" && item.acceptance.status === "pending"
+    ));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

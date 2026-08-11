@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { link, lstat, mkdir, open, readFile, readlink, unlink } from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { ERROR_CODES, SynodError } from "./errors.js";
 import {
@@ -47,6 +48,7 @@ import {
   MIN_LEASE_TTL_SECONDS,
   createLeaseBaselinesLedger,
   isCorrectionPolicy,
+  isEndedTaskLease,
   isLeaseBaselineReference,
   isTaskLease,
   isTaskProposalReference,
@@ -130,6 +132,24 @@ export interface TaskEvidence {
   };
 }
 
+export interface TaskRecoveryRecord {
+  status: "PENDING" | "RESUMED" | "REASSIGNED" | "SUPERSEDED";
+  endedLease: EndedTaskLease;
+  detectedAt: string;
+  reason: string;
+  proposal?: TaskProposalReference;
+  decision?: {
+    action: "resume" | "reassign" | "supersede";
+    actor: string;
+    recordedAt: string;
+    priorOwnerThread: string;
+    priorGeneration: number;
+    newOwnerThread?: string;
+    newGeneration?: number;
+    reason: string;
+  };
+}
+
 export interface OrchestrationTask {
   id: string;
   objective: string;
@@ -160,6 +180,16 @@ export interface OrchestrationTask {
   blocker?: string;
   blockedFrom?: TaskState;
   supersededReason?: string;
+  recovery?: TaskRecoveryRecord;
+  recoveryHistory?: TaskRecoveryRecord[];
+  split?: {
+    replacements: string[];
+    actor: string;
+    reason: string;
+    evidence: string[];
+    recordedAt: string;
+  };
+  splitFrom?: string;
   preLease?: true;
 }
 
@@ -205,7 +235,7 @@ export interface OrchestrationEvent {
 
 type LegacyOrchestrationTask = Omit<
   OrchestrationTask,
-  "correctionPolicy" | "leaseGeneration" | "lease" | "proposal" | "preLease"
+  "correctionPolicy" | "leaseGeneration" | "lease" | "proposal" | "recovery" | "recoveryHistory" | "split" | "splitFrom" | "preLease"
 >;
 
 interface LegacyOrchestrationStateCore {
@@ -339,12 +369,17 @@ export function legalTaskTransitions(
   task: OrchestrationTask,
   tasks: Readonly<Record<string, OrchestrationTask>>
 ): TaskState[] {
+  if (task.recovery?.status === "PENDING") return [];
   let allowed = [...TRANSITIONS[task.state]];
   if (task.state === "BLOCKED") {
     allowed = allowed.filter(target => target === "SUPERSEDED" || target === task.blockedFrom);
   }
   if (task.dependsOn.some(dependency => tasks[dependency]?.state !== "DONE")) {
     allowed = allowed.filter(target => target !== "READY");
+  }
+  if (task.correctionPolicy.used >= task.correctionPolicy.limit
+    && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)) {
+    allowed = allowed.filter(target => target !== "ACTIVE");
   }
   return allowed;
 }
@@ -894,10 +929,13 @@ export function renderStatusMarkdown(
         `- Depends on: ${task.dependsOn.length > 0 ? task.dependsOn.map(markdownCell).join(", ") : "—"}`,
         `- Revision: ${task.revision}`,
         `- Correction round: ${task.correctionRound}`,
+        `- Correction policy: ${task.correctionPolicy.used}/${task.correctionPolicy.limit} used; ${task.correctionPolicy.overrides.length} override(s)`,
         `- Writer lease: ${task.lease ? `${task.lease.id} generation ${task.lease.generation}; owner ${markdownCell(task.lease.ownerThread)}; expires ${task.lease.expiresAt}` : task.preLease ? "migration required before further progress" : "—"}`,
         `- Sealed proposal: ${task.proposal ? `${task.proposal.bundleId}; lease ${task.proposal.leaseId} generation ${task.proposal.generation}; revision ${task.proposal.revision}; ${task.proposal.path}` : "—"}`,
         `- Proposal-owned paths: ${task.proposal && task.proposal.ownedPaths.length > 0 ? task.proposal.ownedPaths.map(markdownCell).join(", ") : "—"}`,
         `- Excluded foreign paths: ${task.proposal && task.proposal.excludedForeignPaths.length > 0 ? task.proposal.excludedForeignPaths.map(markdownCell).join(", ") : "—"}`,
+        `- Abandoned-owner recovery: ${task.recovery ? `${task.recovery.status}; prior owner ${markdownCell(task.recovery.endedLease.ownerThread)} generation ${task.recovery.endedLease.generation}; proposal ${task.recovery.proposal?.bundleId || "not sealed"}; decisions ${task.recovery.status === "PENDING" ? "resume, reassign, supersede" : task.recovery.decision?.action}; prior recoveries ${task.recoveryHistory?.length || 0}` : "—"}`,
+        `- Split: ${task.split ? `${task.split.replacements.map(markdownCell).join(", ")}; ${markdownCell(task.split.reason)}` : task.splitFrom ? `replacement for ${markdownCell(task.splitFrom)}` : "—"}`,
         "- Acceptance criteria:"
       );
       for (const criterion of task.acceptance.criteria) lines.push(`  - ${markdownCell(criterion)}`);
@@ -1131,6 +1169,46 @@ function isTaskEvidence(value: unknown): value is TaskEvidence {
     && typeof value.checkpoint.worktreeFingerprint === "string";
 }
 
+function isTaskRecovery(value: unknown): value is TaskRecoveryRecord {
+  if (!isRecord(value) || !isEndedTaskLease(value.endedLease)) return false;
+  const detectedAt = typeof value.detectedAt === "string" ? Date.parse(value.detectedAt) : Number.NaN;
+  const validDecision = value.decision === undefined || (isRecord(value.decision)
+    && ["resume", "reassign", "supersede"].includes(String(value.decision.action))
+    && typeof value.decision.actor === "string"
+    && value.decision.actor.length > 0
+    && typeof value.decision.recordedAt === "string"
+    && Number.isFinite(Date.parse(value.decision.recordedAt))
+    && typeof value.decision.priorOwnerThread === "string"
+    && value.decision.priorOwnerThread.length > 0
+    && isNonNegativeInteger(value.decision.priorGeneration)
+    && value.decision.priorGeneration > 0
+    && (value.decision.newOwnerThread === undefined || (typeof value.decision.newOwnerThread === "string" && value.decision.newOwnerThread.length > 0))
+    && (value.decision.newGeneration === undefined || isNonNegativeInteger(value.decision.newGeneration))
+    && typeof value.decision.reason === "string"
+    && value.decision.reason.length > 0);
+  return ["PENDING", "RESUMED", "REASSIGNED", "SUPERSEDED"].includes(String(value.status))
+    && typeof value.detectedAt === "string"
+    && Number.isFinite(detectedAt)
+    && detectedAt >= Date.parse(value.endedLease.heartbeatAt)
+    && ["EXPIRED", "REVOKED"].includes(value.endedLease.status)
+    && typeof value.reason === "string"
+    && value.reason.length > 0
+    && (value.proposal === undefined || isTaskProposalReference(value.proposal))
+    && validDecision;
+}
+
+function isTaskSplit(value: unknown): value is NonNullable<OrchestrationTask["split"]> {
+  return isRecord(value)
+    && isStringArray(value.replacements)
+    && value.replacements.length >= 2
+    && new Set(value.replacements).size === value.replacements.length
+    && typeof value.actor === "string"
+    && typeof value.reason === "string"
+    && isStringArray(value.evidence)
+    && value.evidence.length > 0
+    && typeof value.recordedAt === "string";
+}
+
 function isOrchestrationTask(value: unknown): value is OrchestrationTask {
   if (!isRecord(value) || !isRecord(value.acceptance) || !isRecord(value.verification)) return false;
   return typeof value.id === "string"
@@ -1147,6 +1225,11 @@ function isOrchestrationTask(value: unknown): value is OrchestrationTask {
     && isNonNegativeInteger(value.leaseGeneration)
     && (value.lease === undefined || isTaskLease(value.lease))
     && (value.proposal === undefined || isTaskProposalReference(value.proposal))
+    && (value.recovery === undefined || isTaskRecovery(value.recovery))
+    && (value.recoveryHistory === undefined || (Array.isArray(value.recoveryHistory)
+      && value.recoveryHistory.every(item => isTaskRecovery(item) && item.status !== "PENDING")))
+    && (value.split === undefined || isTaskSplit(value.split))
+    && (value.splitFrom === undefined || typeof value.splitFrom === "string")
     && isStringArray(value.acceptance.criteria)
     && value.acceptance.criteria.length > 0
     && value.acceptance.criteria.every(item => item.length > 0)
@@ -1175,6 +1258,10 @@ function isLegacyOrchestrationTask(value: unknown): value is LegacyOrchestration
     && value.leaseGeneration === undefined
     && value.lease === undefined
     && value.proposal === undefined
+    && value.recovery === undefined
+    && value.recoveryHistory === undefined
+    && value.split === undefined
+    && value.splitFrom === undefined
     && value.preLease === undefined
     && isOrchestrationTask({
       ...value,
@@ -1316,6 +1403,70 @@ export function validateOrchestrationState(value: unknown): OrchestrationState {
     if (task.proposal && ["PLANNED", "READY", "ACTIVE"].includes(task.state)) {
       invalidState(`Task ${id} cannot retain a sealed proposal while it is ${task.state}.`, { taskId: id, state: task.state });
     }
+    if (task.recovery) {
+      if (task.recovery.endedLease.taskId !== task.id || task.recovery.endedLease.taskRevision > task.revision) {
+        invalidState(`Task ${id} recovery lease does not match its task revision.`, { taskId: id });
+      }
+      if (task.recovery.proposal && (
+        task.recovery.proposal.leaseId !== task.recovery.endedLease.id
+        || task.recovery.proposal.generation !== task.recovery.endedLease.generation
+        || task.recovery.proposal.baseRevision !== task.recovery.endedLease.taskRevision
+      )) invalidState(`Task ${id} recovery proposal does not match its ended lease.`, { taskId: id });
+      if (task.recovery.status === "PENDING" && task.recovery.decision) {
+        invalidState(`Task ${id} pending recovery cannot contain a decision.`, { taskId: id });
+      }
+      if (task.recovery.status === "PENDING" && (task.recovery.proposal || task.lease)) {
+        invalidState(`Task ${id} pending recovery cannot contain a proposal or active lease.`, { taskId: id });
+      }
+      if (task.recovery.status !== "PENDING" && (!task.recovery.decision || !task.recovery.proposal)) {
+        invalidState(`Task ${id} completed recovery is missing its decision.`, { taskId: id });
+      }
+      const decision = task.recovery.decision;
+      const expectedAction = task.recovery.status === "RESUMED"
+        ? "resume"
+        : task.recovery.status === "REASSIGNED"
+          ? "reassign"
+          : task.recovery.status === "SUPERSEDED"
+            ? "supersede"
+            : undefined;
+      if (decision && (
+        decision.action !== expectedAction
+        || decision.priorOwnerThread !== task.recovery.endedLease.ownerThread
+        || decision.priorGeneration !== task.recovery.endedLease.generation
+        || Date.parse(decision.recordedAt) < Date.parse(task.recovery.detectedAt)
+        || ((decision.action === "resume" || decision.action === "reassign") && (
+          !decision.newOwnerThread
+          || !decision.newGeneration
+          || decision.newGeneration <= decision.priorGeneration
+          || (decision.action === "resume" && decision.newOwnerThread !== decision.priorOwnerThread)
+          || (decision.action === "reassign" && decision.newOwnerThread === decision.priorOwnerThread)
+        ))
+        || (decision.action === "supersede" && (decision.newOwnerThread !== undefined || decision.newGeneration !== undefined))
+      )) invalidState(`Task ${id} recovery decision does not match its status or ended lease.`, { taskId: id });
+      if (task.recovery.status === "SUPERSEDED" && task.state !== "SUPERSEDED") {
+        invalidState(`Task ${id} superseded recovery must leave the task superseded.`, { taskId: id, state: task.state });
+      }
+    }
+    const recoveryRecords = [...(task.recoveryHistory || []), ...(task.recovery ? [task.recovery] : [])];
+    const recoveryGenerations = recoveryRecords.map(item => item.endedLease.generation);
+    if (new Set(recoveryGenerations).size !== recoveryGenerations.length || recoveryGenerations.some((generation, index) =>
+      index > 0 && generation <= recoveryGenerations[index - 1]!
+    )) invalidState(`Task ${id} recovery history is not strictly generation ordered.`, { taskId: id });
+    const maximumRecoveryGeneration = Math.max(0, ...recoveryRecords.flatMap(record => [
+      record.endedLease.generation,
+      ...(record.decision?.newGeneration ? [record.decision.newGeneration] : [])
+    ]));
+    if (maximumRecoveryGeneration > task.leaseGeneration) {
+      invalidState(`Task ${id} recovery generation exceeds its task-local lease generation.`, { taskId: id });
+    }
+    for (const record of recoveryRecords) {
+      if (record.endedLease.taskId !== task.id || record.endedLease.taskRevision > task.revision
+        || (record.proposal && (record.proposal.leaseId !== record.endedLease.id
+          || record.proposal.generation !== record.endedLease.generation
+          || record.proposal.baseRevision !== record.endedLease.taskRevision))) {
+        invalidState(`Task ${id} recovery history contains a mismatched lease or proposal.`, { taskId: id });
+      }
+    }
     if (task.state === "ACTIVE" && !task.lease && !task.preLease) {
       invalidState(`Active task ${id} is missing its durable writer lease.`, { taskId: id });
     }
@@ -1327,6 +1478,14 @@ export function validateOrchestrationState(value: unknown): OrchestrationState {
     }
     for (const dependency of task.dependsOn) {
       if (!state.tasks[dependency] || dependency === id) invalidState(`Task ${id} has an invalid dependency.`, { taskId: id, dependency });
+    }
+    if (task.split) {
+      if (task.state !== "SUPERSEDED" || task.split.replacements.some(replacement =>
+        !state.tasks[replacement] || state.tasks[replacement]?.splitFrom !== id
+      )) invalidState(`Task ${id} split replacement links are invalid.`, { taskId: id });
+    }
+    if (task.splitFrom && (!state.tasks[task.splitFrom]?.split?.replacements.includes(id))) {
+      invalidState(`Task ${id} split origin link is invalid.`, { taskId: id, splitFrom: task.splitFrom });
     }
     for (const item of task.evidence) validateEvidence(item, task);
     const evidenceById = new Map(task.evidence.map(item => [item.id, item]));
@@ -1553,6 +1712,12 @@ async function readLeaseBaselines(
         generation: task.proposal.generation,
         taskRevision: task.proposal.baseRevision,
         reference: undefined
+      }] : []),
+      ...(task.recovery?.status === "PENDING" ? [{
+        id: task.recovery.endedLease.id,
+        generation: task.recovery.endedLease.generation,
+        taskRevision: task.recovery.endedLease.taskRevision,
+        reference: task.recovery.endedLease.baseline
       }] : [])
     ];
     for (const identity of identities) {
@@ -2267,6 +2432,7 @@ export interface AddTaskOptions {
   acceptance?: unknown[];
   verification?: unknown[];
   dependsOn?: unknown[];
+  correctionLimit?: number;
   actor?: string;
 }
 
@@ -2278,12 +2444,14 @@ export async function addTask({
   acceptance = [],
   verification = [],
   dependsOn = [],
+  correctionLimit = 2,
   actor = "supervisor"
 }: AddTaskOptions = {}, dependencies: OrchestrationDependencies = {}) {
   const taskId = String(id || "").trim().toUpperCase();
   const taskObjective = String(objective || "").trim();
   const taskExecutor = String(executor || "").trim();
-  if (!/^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*$/.test(taskId) || !taskObjective || !taskExecutor) {
+  if (!/^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*$/.test(taskId) || !taskObjective || !taskExecutor
+    || !Number.isSafeInteger(correctionLimit) || correctionLimit < 0) {
     throw new SynodError(ERROR_CODES.TASK_INVALID, "Task ID, objective, and executor are required.", {
       details: { id: taskId, objective: taskObjective, executor: taskExecutor }
     });
@@ -2310,7 +2478,7 @@ export async function addTask({
       revision: 0,
       executor: taskExecutor,
       correctionRound: 0,
-      correctionPolicy: { limit: 2, used: 0, overrides: [] },
+      correctionPolicy: { limit: correctionLimit, used: 0, overrides: [] },
       leaseGeneration: 0,
       acceptance: { criteria, status: "pending", revision: null, evidenceIds: [] },
       verification: { commands, status: "pending", revision: null, evidenceIds: [] },
@@ -2323,6 +2491,180 @@ export async function addTask({
     return {
       metadata: { revision: 0, toState: "PLANNED", payload: { task } },
       result: { task }
+    };
+  }, dependencies);
+}
+
+export interface OverrideCorrectionOptions {
+  directory?: string;
+  id?: string;
+  additionalRounds?: number;
+  approver?: string;
+  reference?: string;
+  reason?: string;
+  evidence?: unknown[];
+  actor?: string;
+}
+
+export async function overrideCorrectionPolicy({
+  directory = ".",
+  id,
+  additionalRounds,
+  approver,
+  reference,
+  reason,
+  evidence = [],
+  actor = "supervisor"
+}: OverrideCorrectionOptions = {}, dependencies: OrchestrationDependencies = {}) {
+  const taskId = taskIdValue(id);
+  const added = Number(additionalRounds);
+  const approval = String(approver || "").trim();
+  const approvalReference = String(reference || "").trim();
+  const explanation = String(reason || "").trim();
+  const evidenceReferences = [...new Set(evidence.map(value => String(value).trim()).filter(Boolean))];
+  if (!Number.isSafeInteger(added) || added <= 0 || !approval || !approvalReference || !explanation || evidenceReferences.length === 0) {
+    throw new SynodError(ERROR_CODES.TASK_INVALID, "Correction override requires positive additional rounds, approver, reference, reason, and evidence.");
+  }
+  return commitMutation(path.resolve(directory), "task.correction-overridden", { actor, taskId }, (state, context) => {
+    const task = state.tasks[taskId];
+    if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    if (TERMINAL_STATES.has(task.state) || task.correctionPolicy.used < task.correctionPolicy.limit) {
+      throw new SynodError(ERROR_CODES.CORRECTION_EXHAUSTED, `Task ${taskId} is not eligible for an exhausted-policy override.`, {
+        details: { taskId, state: task.state, used: task.correctionPolicy.used, limit: task.correctionPolicy.limit }
+      });
+    }
+    task.correctionPolicy.limit += added;
+    task.correctionPolicy.overrides.push({
+      added,
+      actor,
+      approver: approval,
+      reference: approvalReference,
+      reason: explanation,
+      recordedAt: context.timestamp,
+      evidence: evidenceReferences
+    });
+    task.updatedAt = context.timestamp;
+    return {
+      metadata: {
+        revision: task.revision,
+        payload: { added, approver: approval, reference: approvalReference, reason: explanation, evidence: evidenceReferences }
+      },
+      result: { task, override: task.correctionPolicy.overrides.at(-1)! }
+    };
+  }, dependencies);
+}
+
+export interface SplitTaskOptions {
+  directory?: string;
+  id?: string;
+  replacements?: unknown[];
+  reason?: string;
+  evidence?: unknown[];
+  actor?: string;
+}
+
+export async function splitTask({
+  directory = ".",
+  id,
+  replacements = [],
+  reason,
+  evidence = [],
+  actor = "supervisor"
+}: SplitTaskOptions = {}, dependencies: OrchestrationDependencies = {}) {
+  const taskId = taskIdValue(id);
+  const replacementIds = [...new Set(replacements.map(taskIdValue).filter(Boolean))];
+  const explanation = String(reason || "").trim();
+  const evidenceReferences = [...new Set(evidence.map(value => String(value).trim()).filter(Boolean))];
+  if (replacementIds.length < 2 || !explanation || evidenceReferences.length === 0 || replacementIds.includes(taskId)) {
+    throw new SynodError(ERROR_CODES.TASK_INVALID, "Task split requires at least two distinct replacements, a reason, and evidence.");
+  }
+  return commitMutation(path.resolve(directory), "task.split", { actor, taskId }, (state, context) => {
+    const task = state.tasks[taskId];
+    if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    if (task.correctionPolicy.used < task.correctionPolicy.limit || TERMINAL_STATES.has(task.state) || task.lease) {
+      throw new SynodError(ERROR_CODES.CORRECTION_EXHAUSTED, `Task ${taskId} is not eligible for an exhausted-policy split.`, {
+        details: { taskId, state: task.state, used: task.correctionPolicy.used, limit: task.correctionPolicy.limit }
+      });
+    }
+    if (task.recovery?.status === "PENDING") {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} requires an explicit abandoned-owner recovery decision before it can split.`, {
+        details: { taskId, leaseId: task.recovery.endedLease.id, generation: task.recovery.endedLease.generation }
+      });
+    }
+    for (const replacementId of replacementIds) {
+      const replacement = state.tasks[replacementId];
+      if (!replacement || replacement.state !== "PLANNED" || replacement.splitFrom) {
+        throw new SynodError(ERROR_CODES.TASK_INVALID, `Split replacement ${replacementId} must be an unlinked PLANNED task.`, {
+          details: { taskId, replacementId, state: replacement?.state }
+        });
+      }
+    }
+    const inheritedDependencies = task.dependsOn.filter(dependency => !replacementIds.includes(dependency));
+    const replacementDependencies = new Map<string, string[]>(replacementIds.map(replacementId => [
+      replacementId,
+      [...new Set([...state.tasks[replacementId]!.dependsOn, ...inheritedDependencies])]
+    ]));
+    const dependentIds = state.taskOrder.filter(id => id !== taskId && state.tasks[id]?.dependsOn.includes(taskId));
+    const rewrittenDependencies = new Map<string, string[]>(dependentIds.map(dependentId => {
+      const dependencies = (replacementDependencies.get(dependentId) || state.tasks[dependentId]!.dependsOn)
+        .flatMap(dependency => dependency === taskId ? replacementIds : [dependency]);
+      return [dependentId, [...new Set(dependencies)]];
+    }));
+    const dependencyMap = new Map(state.taskOrder.map(id => [
+      id,
+      rewrittenDependencies.get(id) || replacementDependencies.get(id) || state.tasks[id]!.dependsOn
+    ]));
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+    const hasCycle = (id: string): boolean => {
+      if (visiting.has(id)) return true;
+      if (visited.has(id)) return false;
+      visiting.add(id);
+      if ((dependencyMap.get(id) || []).some(hasCycle)) return true;
+      visiting.delete(id);
+      visited.add(id);
+      return false;
+    };
+    if (state.taskOrder.some(hasCycle)) {
+      throw new SynodError(ERROR_CODES.TASK_INVALID, `Splitting task ${taskId} would create a dependency cycle.`, {
+        details: { taskId, replacements: replacementIds, dependents: dependentIds }
+      });
+    }
+    const fromState = task.state;
+    task.state = "SUPERSEDED";
+    task.supersededReason = explanation;
+    task.split = { replacements: replacementIds, actor, reason: explanation, evidence: evidenceReferences, recordedAt: context.timestamp };
+    task.updatedAt = context.timestamp;
+    delete task.blocker;
+    delete task.blockedFrom;
+    for (const replacementId of replacementIds) {
+      const replacement = state.tasks[replacementId]!;
+      replacement.dependsOn = rewrittenDependencies.get(replacementId) || replacementDependencies.get(replacementId)!;
+      replacement.splitFrom = taskId;
+      replacement.updatedAt = context.timestamp;
+    }
+    for (const [dependentId, dependencies] of rewrittenDependencies) {
+      const dependent = state.tasks[dependentId]!;
+      dependent.dependsOn = dependencies;
+      dependent.updatedAt = context.timestamp;
+    }
+    return {
+      metadata: {
+        fromState,
+        toState: "SUPERSEDED",
+        revision: task.revision,
+        payload: {
+          replacements: replacementIds,
+          replacementDependencies: replacementIds.map(replacementId => ({
+            id: replacementId,
+            dependsOn: state.tasks[replacementId]!.dependsOn
+          })),
+          dependents: dependentIds.map(dependentId => ({ id: dependentId, dependsOn: state.tasks[dependentId]!.dependsOn })),
+          reason: explanation,
+          evidence: evidenceReferences
+        }
+      },
+      result: { task, replacements: replacementIds.map(replacementId => state.tasks[replacementId]!) }
     };
   }, dependencies);
 }
@@ -2345,6 +2687,9 @@ function retainedLeaseBaselines(
       ...(task.lease ? [task.lease] : []),
       ...(proposalReservesPaths(task) && task.proposal
         ? [{ id: task.proposal.leaseId, generation: task.proposal.generation }]
+        : []),
+      ...(task.recovery?.status === "PENDING"
+        ? [{ id: task.recovery.endedLease.id, generation: task.recovery.endedLease.generation }]
         : [])
     ])
   );
@@ -2520,7 +2865,7 @@ async function sealTaskProposal(
   targetDirectory: string,
   state: OrchestrationState,
   task: OrchestrationTask,
-  lease: TaskLease,
+  lease: TaskLease | EndedTaskLease,
   revision: number,
   context: MutationContext,
   dependencies: OrchestrationDependencies
@@ -2809,6 +3154,18 @@ export async function acquireTaskLease({
         details: { taskId, state: task.state }
       });
     }
+    if (task.recovery?.status === "PENDING") {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, `Task ${taskId} requires an explicit abandoned-owner recovery decision.`, {
+        details: { taskId, leaseId: task.recovery.endedLease.id, generation: task.recovery.endedLease.generation }
+      });
+    }
+    const correctionSource = task.state === "BLOCKED" ? task.blockedFrom : task.state;
+    if (correctionSource && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(correctionSource)
+      && task.correctionPolicy.used >= task.correctionPolicy.limit) {
+      throw new SynodError(ERROR_CODES.CORRECTION_EXHAUSTED, `Task ${taskId} has exhausted its correction allowance.`, {
+        details: { taskId, used: task.correctionPolicy.used, limit: task.correctionPolicy.limit }
+      });
+    }
     if (task.lease) {
       throw new SynodError(ERROR_CODES.LEASE_CONFLICT, `Task ${taskId} already has an active writer lease.`, {
         details: { taskId, leaseId: task.lease.id, generation: task.lease.generation }
@@ -2818,12 +3175,15 @@ export async function acquireTaskLease({
       const leaseCollisions = other.lease
         ? scopes.filter(scope => other.lease?.scopes.some(existing => leaseScopesOverlap(scope, existing)))
         : [];
+      const recoveryCollisions = other.id !== taskId && other.recovery?.status === "PENDING"
+        ? scopes.filter(scope => other.recovery?.endedLease.scopes.some(existing => leaseScopesOverlap(scope, existing)))
+        : [];
       const proposalCollisions = other.id !== taskId && proposalReservesPaths(other) && other.proposal
         ? scopes.filter(scope => scope.access === "write" && other.proposal?.ownedPaths.some(candidate =>
           leaseScopeCoversPath(scope, candidate)
         ))
         : [];
-      const collisions = [...leaseCollisions, ...proposalCollisions];
+      const collisions = [...leaseCollisions, ...recoveryCollisions, ...proposalCollisions];
       if (collisions.length > 0) {
         throw new SynodError(ERROR_CODES.LEASE_CONFLICT, `Task ${taskId} write scope overlaps task ${other.id}.`, {
           details: { taskId, conflictingTaskId: other.id, paths: collisions.map(scope => scope.path) }
@@ -2899,7 +3259,10 @@ export async function acquireTaskLease({
       baselines: [...context.leaseBaselines.baselines, baseline]
     }), taskList(state).flatMap(currentTask => [
       ...(currentTask.lease ? [currentTask.lease] : []),
-      ...(currentTask.proposal ? [{ id: currentTask.proposal.leaseId, generation: currentTask.proposal.generation }] : [])
+      ...(currentTask.proposal ? [{ id: currentTask.proposal.leaseId, generation: currentTask.proposal.generation }] : []),
+      ...(currentTask.recovery?.status === "PENDING"
+        ? [{ id: currentTask.recovery.endedLease.id, generation: currentTask.recovery.endedLease.generation }]
+        : [])
     ]));
     return {
       leaseBaselines,
@@ -3021,11 +3384,23 @@ async function endTaskLease(
       task.blocker = `Writer lease ${action}d: ${explanation}`;
     }
     task.updatedAt = context.timestamp;
-    const leaseBaselines = retainedLeaseBaselines(state, context.leaseBaselines);
     const endedLease: EndedTaskLease = {
       ...lease,
       status: action === "expire" ? "EXPIRED" : "REVOKED"
     };
+    if (task.recovery) {
+      if (task.recovery.status === "PENDING") {
+        throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} already has a pending recovery decision.`, { details: { taskId } });
+      }
+      task.recoveryHistory = [...(task.recoveryHistory || []), task.recovery];
+    }
+    task.recovery = {
+      status: "PENDING",
+      endedLease,
+      detectedAt: context.timestamp,
+      reason: explanation
+    };
+    const leaseBaselines = retainedLeaseBaselines(state, context.leaseBaselines);
     return {
       ...(leaseBaselines ? { leaseBaselines } : {}),
       metadata: {
@@ -3045,6 +3420,184 @@ export function expireTaskLease(options: LeaseIdentityOptions = {}, dependencies
 
 export function revokeTaskLease(options: LeaseIdentityOptions = {}, dependencies: OrchestrationDependencies = {}) {
   return endTaskLease("revoke", options, dependencies);
+}
+
+export interface RecoverTaskLeaseOptions extends LeaseIdentityOptions {
+  decision?: "resume" | "reassign" | "supersede" | string;
+}
+
+export async function recoverTaskLease({
+  directory = ".",
+  id,
+  leaseId,
+  generation,
+  revision,
+  expectedHeartbeatAt,
+  ownerThread,
+  actor = "supervisor",
+  reason,
+  decision
+}: RecoverTaskLeaseOptions = {}, dependencies: OrchestrationDependencies = {}) {
+  const taskId = taskIdValue(id);
+  const action = String(decision || "").trim().toLowerCase();
+  const explanation = String(reason || "").trim();
+  if (!(["resume", "reassign", "supersede"] as string[]).includes(action)) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease recovery requires --decision resume, reassign, or supersede.");
+  }
+  if (!explanation) throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease recovery requires --reason.");
+  const requestedOwner = String(ownerThread || "").trim();
+  const targetDirectory = path.resolve(directory);
+  const recoveryEventType = action === "resume" ? "lease.resumed" : action === "reassign" ? "lease.reassigned" : "lease.superseded";
+  const attemptRecovery = () => commitMutation(targetDirectory, recoveryEventType, { actor, taskId }, async (state, context) => {
+    const task = state.tasks[taskId];
+    if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    const fromState = task.state;
+    const recovery = task.recovery;
+    if (!recovery || recovery.status !== "PENDING") {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} has no pending abandoned-owner recovery.`, {
+        details: { taskId, status: recovery?.status }
+      });
+    }
+    const ended = recovery.endedLease;
+    if (Date.parse(context.timestamp) < Date.parse(recovery.detectedAt)
+      || Date.parse(context.timestamp) < Date.parse(ended.heartbeatAt)) {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, "Recovery clock moved behind the ended lease decision.", {
+        details: { taskId, detectedAt: recovery.detectedAt, heartbeatAt: ended.heartbeatAt, observedAt: context.timestamp }
+      });
+    }
+    if (
+      ended.id !== leaseId
+      || ended.generation !== generation
+      || ended.taskRevision !== revision
+      || ended.heartbeatAt !== expectedHeartbeatAt
+    ) {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} recovery fence is stale.`, {
+        details: {
+          taskId,
+          expected: { leaseId: ended.id, generation: ended.generation, revision: ended.taskRevision, heartbeatAt: ended.heartbeatAt },
+          actual: { leaseId, generation, revision, heartbeatAt: expectedHeartbeatAt }
+        }
+      });
+    }
+    const nextOwner = action === "resume" ? ended.ownerThread : requestedOwner;
+    if (action === "resume" && requestedOwner && requestedOwner !== ended.ownerThread) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "Resume must retain the abandoned lease owner thread.", {
+        details: { taskId, expectedOwnerThread: ended.ownerThread, actualOwnerThread: requestedOwner }
+      });
+    }
+    if (action === "reassign" && (!nextOwner || nextOwner === ended.ownerThread)) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "Reassignment requires a different --owner-thread.", {
+        details: { taskId, priorOwnerThread: ended.ownerThread }
+      });
+    }
+    for (const other of taskList(state)) {
+      if (other.id === taskId) continue;
+      const leaseCollisions = other.lease
+        ? ended.scopes.filter(scope => other.lease?.scopes.some(existing => leaseScopesOverlap(scope, existing)))
+        : [];
+      const recoveryCollisions = other.recovery?.status === "PENDING"
+        ? ended.scopes.filter(scope => other.recovery?.endedLease.scopes.some(existing => leaseScopesOverlap(scope, existing)))
+        : [];
+      const proposalCollisions = proposalReservesPaths(other) && other.proposal
+        ? ended.scopes.filter(scope => scope.access === "write" && other.proposal?.ownedPaths.some(candidate =>
+          leaseScopeCoversPath(scope, candidate)
+        ))
+        : [];
+      const collisions = [...leaseCollisions, ...recoveryCollisions, ...proposalCollisions];
+      if (collisions.length > 0) {
+        throw new SynodError(ERROR_CODES.LEASE_CONFLICT, `Task ${taskId} recovery scope overlaps task ${other.id}.`, {
+          details: { taskId, conflictingTaskId: other.id, paths: [...new Set(collisions.map(scope => scope.path))] }
+        });
+      }
+    }
+    const sealed = await sealTaskProposal(targetDirectory, state, task, ended, task.revision + 1, context, dependencies);
+    recovery.proposal = sealed.proposal;
+
+    let nextLease: TaskLease | undefined;
+    let leaseBaselines = context.leaseBaselines;
+    if (action === "resume" || action === "reassign") {
+      task.leaseGeneration += 1;
+      nextLease = {
+        id: randomUUID(),
+        generation: task.leaseGeneration,
+        taskId,
+        taskRevision: task.revision,
+        ownerThread: nextOwner,
+        executor: task.executor,
+        scopes: ended.scopes,
+        acquiredAt: context.timestamp,
+        heartbeatAt: context.timestamp,
+        expiresAt: leaseDeadline(context.timestamp, ended.ttlSeconds),
+        heartbeatIntervalSeconds: ended.heartbeatIntervalSeconds,
+        ttlSeconds: ended.ttlSeconds,
+        baseline: {
+          path: LEASE_BASELINES_PATH,
+          snapshotContentHash: context.snapshot.contentHash,
+          branch: context.snapshot.branch,
+          head: context.snapshot.head,
+          worktreeFingerprint: context.snapshot.worktreeFingerprint,
+          lastEvent: state.lastEvent
+        },
+        status: "ACTIVE"
+      };
+      task.lease = nextLease;
+      leaseBaselines = validateLeaseBaselinesLedger({
+        ...context.leaseBaselines,
+        baselines: [...context.leaseBaselines.baselines, {
+          leaseId: nextLease.id,
+          generation: nextLease.generation,
+          taskId,
+          taskRevision: task.revision,
+          capturedAt: context.snapshot.capturedAt,
+          snapshot: context.snapshot
+        }]
+      });
+    } else {
+      task.state = "SUPERSEDED";
+      task.supersededReason = explanation;
+      delete task.blocker;
+      delete task.blockedFrom;
+    }
+    recovery.status = action === "resume" ? "RESUMED" : action === "reassign" ? "REASSIGNED" : "SUPERSEDED";
+    recovery.decision = {
+      action: action as "resume" | "reassign" | "supersede",
+      actor,
+      recordedAt: context.timestamp,
+      priorOwnerThread: ended.ownerThread,
+      priorGeneration: ended.generation,
+      ...(nextLease ? { newOwnerThread: nextLease.ownerThread, newGeneration: nextLease.generation } : {}),
+      reason: explanation
+    };
+    task.updatedAt = context.timestamp;
+    const retained = retainedLeaseBaselines(state, leaseBaselines) || leaseBaselines;
+    return {
+      leaseBaselines: retained,
+      metadata: {
+        fromState,
+        toState: task.state,
+        revision: task.revision,
+        payload: {
+          decision: action,
+          priorOwnerThread: ended.ownerThread,
+          priorGeneration: ended.generation,
+          proposal: { path: sealed.proposal.path, bundleId: sealed.proposal.bundleId },
+          foreignPaths: sealed.foreign.map(item => item.path),
+          ...(nextLease ? { newOwnerThread: nextLease.ownerThread, newGeneration: nextLease.generation } : {}),
+          reason: explanation
+        }
+      },
+      result: { task, recovery, ...(nextLease ? { lease: nextLease } : { lease: ended }) }
+    };
+  }, dependencies);
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    try {
+      return await attemptRecovery();
+    } catch (error) {
+      if (!(error instanceof SynodError) || error.code !== ERROR_CODES.ORCHESTRATION_LOCKED) throw error;
+      await delay(10);
+    }
+  }
+  throw new SynodError(ERROR_CODES.ORCHESTRATION_LOCKED, `Timed out waiting to recover task ${taskId}.`, { details: { taskId } });
 }
 
 function requireRevision(task: OrchestrationTask, targetState: TaskState, revision: unknown): asserts revision is number {
@@ -3150,9 +3703,21 @@ export async function transitionTask({
   return commitMutation(targetDirectory, "task.transitioned", { actor, taskId }, async (state, context) => {
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    if (task.recovery?.status === "PENDING") {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} requires an explicit abandoned-owner recovery decision before any transition.`, {
+        details: { taskId, leaseId: task.recovery.endedLease.id, generation: task.recovery.endedLease.generation }
+      });
+    }
     if (!TRANSITIONS[task.state].has(targetState)) {
       throw new SynodError(ERROR_CODES.TRANSITION_INVALID, `Task ${taskId} cannot transition from ${task.state} to ${targetState}.`, {
         details: { taskId, fromState: task.state, targetState, allowed: [...TRANSITIONS[task.state]] }
+      });
+    }
+    if (targetState === "ACTIVE"
+      && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)
+      && task.correctionPolicy.used >= task.correctionPolicy.limit) {
+      throw new SynodError(ERROR_CODES.CORRECTION_EXHAUSTED, `Task ${taskId} has exhausted its correction allowance.`, {
+        details: { taskId, used: task.correctionPolicy.used, limit: task.correctionPolicy.limit }
       });
     }
     if (task.state === "BLOCKED" && targetState !== "SUPERSEDED" && targetState !== task.blockedFrom) {
@@ -3554,7 +4119,10 @@ export function formatOrchestrationStatus(result: OrchestrationStatusResult): st
     const lease = task.lease
       ? `lease ${task.lease.id} g${task.lease.generation} owner ${task.lease.ownerThread} expires ${task.lease.expiresAt}`
       : task.preLease ? "lease migration required" : "no writer lease";
-    lines.push(`${task.id.padEnd(12)} ${task.state.padEnd(10)} r${task.revision} correction ${task.correctionRound} executor ${task.executor}; acceptance ${task.acceptance.status}; verification ${task.verification.status}; ${lease}`);
+    const recovery = task.recovery
+      ? `; recovery ${task.recovery.status} prior ${task.recovery.endedLease.ownerThread} g${task.recovery.endedLease.generation} proposal ${task.recovery.proposal?.bundleId || "unsealed"}`
+      : "";
+    lines.push(`${task.id.padEnd(12)} ${task.state.padEnd(10)} r${task.revision} corrections ${task.correctionPolicy.used}/${task.correctionPolicy.limit} executor ${task.executor}; acceptance ${task.acceptance.status}; verification ${task.verification.status}; ${lease}${recovery}`);
   }
   for (const candidate of result.leaseExpiryCandidates) {
     lines.push(`Expiry candidate: ${candidate.taskId} lease ${candidate.leaseId} g${candidate.generation}; heartbeat ${candidate.heartbeatAt}; expired ${candidate.expiresAt}`);

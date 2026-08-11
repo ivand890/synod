@@ -29,11 +29,14 @@ import {
   expireTaskLease,
   heartbeatTaskLease,
   orchestrationStatus,
+  overrideCorrectionPolicy,
   readOrchestration,
   recordCheckpoint,
+  recoverTaskLease,
   releaseTaskLease,
   renderStatusMarkdown,
   revokeTaskLease,
+  splitTask,
   transitionTask
 } from "../src/orchestration.js";
 import type { AddTaskOptions } from "../src/orchestration.js";
@@ -207,6 +210,155 @@ test("a correction round invalidates prior acceptance and advances the next deli
     ["correction", 1],
     ["delivery", 2]
   ]);
+});
+
+test("default correction limits reject a third round until an approved bounded override", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/t-001.ts"), "revision 1\n");
+  await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery:r1"] });
+
+  for (const revision of [2, 3]) {
+    await acquireDefaultLease(directory);
+    await transitionTask({
+      directory,
+      id: "T-001",
+      to: "ACTIVE",
+      revision: revision - 1,
+      evidence: [`correction:r${revision}`]
+    });
+    await writeFile(path.join(directory, "src/t-001.ts"), `revision ${revision}\n`);
+    await transitionTask({
+      directory,
+      id: "T-001",
+      to: "REVIEW",
+      revision,
+      evidence: [`delivery:r${revision}`]
+    });
+  }
+
+  const exhausted = await readOrchestration(directory);
+  assert.equal(exhausted.state.tasks["T-001"]?.correctionPolicy.used, 2);
+  assert.equal(exhausted.state.tasks["T-001"]?.correctionPolicy.limit, 2);
+  assert.equal(exhausted.state.tasks["T-001"]?.lease, undefined);
+  await assert.rejects(
+    acquireDefaultLease(directory),
+    error => error instanceof SynodError && error.code === ERROR_CODES.CORRECTION_EXHAUSTED
+  );
+  await assert.rejects(
+    transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 3, evidence: ["correction:forbidden"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.CORRECTION_EXHAUSTED
+  );
+  assert.equal((await readOrchestration(directory)).state.lastEvent.sequence, exhausted.state.lastEvent.sequence);
+
+  const overridden = await overrideCorrectionPolicy({
+    directory,
+    id: "T-001",
+    additionalRounds: 1,
+    approver: "release-owner",
+    reference: "approval:CORR-3",
+    reason: "one bounded final correction",
+    evidence: ["review:exhausted"]
+  });
+  assert.equal(overridden.task.correctionPolicy.limit, 3);
+  assert.deepEqual(overridden.override, {
+    added: 1,
+    actor: "supervisor",
+    approver: "release-owner",
+    reference: "approval:CORR-3",
+    reason: "one bounded final correction",
+    recordedAt: overridden.event.timestamp,
+    evidence: ["review:exhausted"]
+  });
+  await acquireDefaultLease(directory);
+  const finalCorrection = await transitionTask({
+    directory,
+    id: "T-001",
+    to: "ACTIVE",
+    revision: 3,
+    evidence: ["correction:r4"]
+  });
+  assert.equal(finalCorrection.task.correctionPolicy.used, 3);
+  assert.equal(finalCorrection.task.correctionPolicy.limit, 3);
+});
+
+test("an exhausted task can split only into explicit unaccepted replacement tasks", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-BASE", objective: "Upstream prerequisite" });
+  await addDefaultTask(directory, { correctionLimit: 0, dependsOn: ["T-BASE"] });
+  await addDefaultTask(directory, { id: "T-DEPENDENT", objective: "Dependent continuation", dependsOn: ["T-001"] });
+  await addDefaultTask(directory, { id: "T-LEFT", objective: "Left replacement" });
+  await addDefaultTask(directory, { id: "T-RIGHT", objective: "Right replacement" });
+  await transitionTask({ directory, id: "T-BASE", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory, "T-BASE");
+  await transitionTask({ directory, id: "T-BASE", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/t-base.ts"), "upstream done\n");
+  await transitionTask({ directory, id: "T-BASE", to: "REVIEW", revision: 1, evidence: ["delivery:base"] });
+  await transitionTask({ directory, id: "T-BASE", to: "ACCEPTED", revision: 1, evidence: ["review:base"] });
+  await transitionTask({ directory, id: "T-BASE", to: "VERIFIED", revision: 1, evidence: ["test:base"] });
+  await transitionTask({ directory, id: "T-BASE", to: "DONE", revision: 1 });
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await writeFile(path.join(directory, "src/t-001.ts"), "needs split\n");
+  await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery:split"] });
+
+  const split = await splitTask({
+    directory,
+    id: "T-001",
+    replacements: ["T-LEFT", "T-RIGHT"],
+    reason: "scope exceeds the exhausted task",
+    evidence: ["review:split-required"]
+  });
+  assert.equal(split.task.state, "SUPERSEDED");
+  assert.deepEqual(split.task.split?.replacements, ["T-LEFT", "T-RIGHT"]);
+  assert.deepEqual(split.replacements.map(task => [task.id, task.state, task.acceptance.status, task.splitFrom]), [
+    ["T-LEFT", "PLANNED", "pending", "T-001"],
+    ["T-RIGHT", "PLANNED", "pending", "T-001"]
+  ]);
+  assert.deepEqual(split.replacements.map(task => [task.id, task.dependsOn]), [
+    ["T-LEFT", ["T-BASE"]],
+    ["T-RIGHT", ["T-BASE"]]
+  ]);
+  const persisted = await readOrchestration(directory);
+  assert.deepEqual(persisted.state.tasks["T-DEPENDENT"]?.dependsOn, ["T-LEFT", "T-RIGHT"]);
+  assert.equal(persisted.events.at(-1)?.type, "task.split");
+  assert.deepEqual(persisted.events.at(-1)?.payload.dependents, [{
+    id: "T-DEPENDENT",
+    dependsOn: ["T-LEFT", "T-RIGHT"]
+  }]);
+});
+
+test("task split rejects rewiring that would create a dependency cycle", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { correctionLimit: 0 });
+  await addDefaultTask(directory, { id: "T-DEPENDENT", objective: "Dependent continuation", dependsOn: ["T-001"] });
+  await addDefaultTask(directory, { id: "T-LEFT", objective: "Cyclic replacement", dependsOn: ["T-DEPENDENT"] });
+  await addDefaultTask(directory, { id: "T-RIGHT", objective: "Right replacement" });
+  const before = await readOrchestration(directory);
+
+  await assert.rejects(
+    splitTask({
+      directory,
+      id: "T-001",
+      replacements: ["T-LEFT", "T-RIGHT"],
+      reason: "unsafe split",
+      evidence: ["review:split"]
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.TASK_INVALID
+  );
+  const after = await readOrchestration(directory);
+  assert.equal(after.state.lastEvent.sequence, before.state.lastEvent.sequence);
+  assert.equal(after.state.tasks["T-001"]?.state, "PLANNED");
+  assert.deepEqual(after.state.tasks["T-DEPENDENT"]?.dependsOn, ["T-001"]);
 });
 
 test("delivery seals only owned paths and acceptance tolerates disjoint authorized work", async () => {
@@ -811,6 +963,8 @@ test("expiry and revocation block active work while fencing stale owners", async
     heartbeatIntervalSeconds: 10
   }, { clock: () => "2026-08-10T12:00:00.000Z" });
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 }, { clock: () => "2026-08-10T12:00:01.000Z" });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/work.ts"), "abandoned one\n");
   await assert.rejects(
     expireTaskLease({ directory, id: "T-001", leaseId: first.lease.id, generation: 1, revision: 0, expectedHeartbeatAt: "2026-08-10T12:00:00.000Z", reason: "timeout" }, {
       clock: () => "2026-08-10T12:00:29.000Z"
@@ -827,10 +981,26 @@ test("expiry and revocation block active work while fencing stale owners", async
   assert.equal(expired.task.blockedFrom, "ACTIVE");
   assert.match(expired.task.blocker ?? "", /heartbeat timeout/);
 
-  const second = await acquireTaskLease({ directory, id: "T-001", ownerThread: "thread:two", write: ["src/work.ts"] }, {
-    clock: () => "2026-08-10T12:00:32.000Z"
-  });
+  const resumeOptions = {
+    directory,
+    id: "T-001",
+    leaseId: first.lease.id,
+    generation: first.lease.generation,
+    revision: 0,
+    expectedHeartbeatAt: "2026-08-10T12:00:00.000Z",
+    decision: "resume" as const,
+    reason: "resume abandoned work"
+  };
+  await assert.rejects(
+    recoverTaskLease(resumeOptions, { clock: () => "2026-08-10T12:00:29.000Z" }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_STALE
+  );
+  const second = await recoverTaskLease(resumeOptions, { clock: () => "2026-08-10T12:00:32.000Z" });
+  assert.equal(second.lease.ownerThread, "thread:one");
+  assert.equal(second.lease.generation, 2);
+  assert.deepEqual(second.recovery.proposal?.ownedPaths, ["src/work.ts"]);
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 }, { clock: () => "2026-08-10T12:00:33.000Z" });
+  await writeFile(path.join(directory, "src/work.ts"), "abandoned two\n");
   const revoked = await revokeTaskLease({
     directory,
     id: "T-001",
@@ -841,6 +1011,22 @@ test("expiry and revocation block active work while fencing stale owners", async
     reason: "supervisor reassignment"
   }, { clock: () => "2026-08-10T12:00:34.000Z" });
   assert.equal(revoked.task.state, "BLOCKED");
+  const reassigned = await recoverTaskLease({
+    directory,
+    id: "T-001",
+    leaseId: second.lease.id,
+    generation: second.lease.generation,
+    revision: 0,
+    expectedHeartbeatAt: "2026-08-10T12:00:32.000Z",
+    decision: "reassign",
+    ownerThread: "thread:two",
+    reason: "assign a replacement worker"
+  }, { clock: () => "2026-08-10T12:00:35.000Z" });
+  assert.equal(reassigned.lease.ownerThread, "thread:two");
+  assert.equal(reassigned.lease.generation, 3);
+  assert.equal(reassigned.recovery.status, "REASSIGNED");
+  assert.equal(reassigned.task.recoveryHistory?.length, 1);
+  assert.equal(reassigned.task.recoveryHistory?.[0]?.status, "RESUMED");
   await assert.rejects(
     heartbeatTaskLease({
       directory,
@@ -851,8 +1037,139 @@ test("expiry and revocation block active work while fencing stale owners", async
       expectedHeartbeatAt: "2026-08-10T12:00:32.000Z",
       ownerThread: "thread:two"
     }),
-    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_NOT_FOUND
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_STALE
   );
+});
+
+test("simultaneous abandoned-owner recovery has one canonical winner", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  const acquired = await acquireTaskLease({
+    directory,
+    id: "T-001",
+    ownerThread: "thread:abandoned",
+    write: ["src/work.ts"]
+  });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/work.ts"), "recover me\n");
+  await revokeTaskLease({
+    directory,
+    id: "T-001",
+    leaseId: acquired.lease.id,
+    generation: acquired.lease.generation,
+    revision: 0,
+    expectedHeartbeatAt: acquired.lease.heartbeatAt,
+    reason: "worker disappeared"
+  });
+  await addDefaultTask(directory, { id: "T-OVERLAP", objective: "Attempt overlapping ownership" });
+  await transitionTask({ directory, id: "T-OVERLAP", to: "READY", revision: 0 });
+  const beforeOverlap = await readOrchestration(directory);
+  await assert.rejects(
+    acquireTaskLease({
+      directory,
+      id: "T-OVERLAP",
+      ownerThread: "thread:overlap",
+      write: ["src/work.ts"]
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_CONFLICT
+  );
+  assert.equal((await readOrchestration(directory)).state.lastEvent.sequence, beforeOverlap.state.lastEvent.sequence);
+  await addDefaultTask(directory, { id: "T-UNRELATED", objective: "Acquire an unrelated lease" });
+  await transitionTask({ directory, id: "T-UNRELATED", to: "READY", revision: 0 });
+  await acquireTaskLease({
+    directory,
+    id: "T-UNRELATED",
+    ownerThread: "thread:unrelated",
+    write: ["src/unrelated.ts"]
+  });
+  const before = await readOrchestration(directory);
+  await assert.rejects(
+    transitionTask({ directory, id: "T-001", to: "SUPERSEDED", revision: 0, reason: "bypass recovery" }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_STALE
+  );
+  assert.equal((await readOrchestration(directory)).state.lastEvent.sequence, before.state.lastEvent.sequence);
+  const options = {
+    directory,
+    id: "T-001",
+    leaseId: acquired.lease.id,
+    generation: acquired.lease.generation,
+    revision: 0,
+    expectedHeartbeatAt: acquired.lease.heartbeatAt,
+    decision: "resume" as const,
+    reason: "resume exact proposal"
+  };
+  const attempts = await Promise.allSettled([recoverTaskLease(options), recoverTaskLease(options)]);
+  assert.equal(attempts.filter(result => result.status === "fulfilled").length, 1);
+  const rejected = attempts.find(result => result.status === "rejected");
+  assert.ok(rejected && rejected.status === "rejected");
+  assert.ok(rejected.reason instanceof SynodError && rejected.reason.code === ERROR_CODES.LEASE_STALE);
+
+  const after = await readOrchestration(directory);
+  assert.equal(after.state.lastEvent.sequence, before.state.lastEvent.sequence + 1);
+  assert.equal(after.state.tasks["T-001"]?.recovery?.status, "RESUMED");
+  assert.deepEqual(after.state.tasks["T-001"]?.recovery?.proposal?.ownedPaths, ["src/work.ts"]);
+  assert.equal(after.state.tasks["T-001"]?.acceptance.status, "pending");
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await writeFile(path.join(directory, "src/work.ts"), "continued after recovery\n");
+  const delivered = await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery:recovered"] });
+  assert.equal(delivered.task.recovery?.status, "RESUMED");
+  assert.equal(delivered.task.revision, 1);
+});
+
+test("ambiguous abandoned drift is read-only before explicit supersession preserves the proposal", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  const acquired = await acquireTaskLease({
+    directory,
+    id: "T-001",
+    ownerThread: "thread:abandoned",
+    write: ["src/owned.ts"]
+  });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/owned.ts"), "owned\n");
+  await writeFile(path.join(directory, "src/unowned.ts"), "ambiguous\n");
+  await revokeTaskLease({
+    directory,
+    id: "T-001",
+    leaseId: acquired.lease.id,
+    generation: acquired.lease.generation,
+    revision: 0,
+    expectedHeartbeatAt: acquired.lease.heartbeatAt,
+    reason: "worker disappeared"
+  });
+  const before = await readOrchestration(directory);
+  const recovery = {
+    directory,
+    id: "T-001",
+    leaseId: acquired.lease.id,
+    generation: acquired.lease.generation,
+    revision: 0,
+    expectedHeartbeatAt: acquired.lease.heartbeatAt,
+    decision: "supersede" as const,
+    reason: "replace abandoned task"
+  };
+  await assert.rejects(
+    recoverTaskLease(recovery),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_SCOPE_DRIFT
+  );
+  const unchanged = await readOrchestration(directory);
+  assert.equal(unchanged.state.lastEvent.sequence, before.state.lastEvent.sequence);
+  assert.equal(unchanged.state.tasks["T-001"]?.recovery?.status, "PENDING");
+  assert.equal(unchanged.state.tasks["T-001"]?.recovery?.proposal, undefined);
+
+  await unlink(path.join(directory, "src/unowned.ts"));
+  const superseded = await recoverTaskLease(recovery);
+  assert.equal(superseded.task.state, "SUPERSEDED");
+  assert.equal(superseded.recovery.status, "SUPERSEDED");
+  assert.deepEqual(superseded.recovery.proposal?.ownedPaths, ["src/owned.ts"]);
+  assert.equal(superseded.task.acceptance.status, "pending");
+  await verifyRecoveryBundle({ bundle: path.join(directory, superseded.recovery.proposal!.path) });
 });
 
 test("writer acquisition rejects an exact file scope whose target is a symlink", async () => {

@@ -38,6 +38,11 @@ export interface HandoffTask {
   blocker: string | null;
   lease: OrchestrationTask["lease"] | null;
   proposal: OrchestrationTask["proposal"] | null;
+  recovery: OrchestrationTask["recovery"] | null;
+  recoveryHistory: NonNullable<OrchestrationTask["recoveryHistory"]>;
+  correctionPolicy: OrchestrationTask["correctionPolicy"];
+  split: OrchestrationTask["split"] | null;
+  splitFrom: string | null;
   acceptance: OrchestrationTask["acceptance"] & { unresolved: boolean };
   verification: OrchestrationTask["verification"] & { unresolved: boolean };
   evidence: HandoffTaskEvidence;
@@ -114,6 +119,11 @@ function handoffTask(
     blocker: task.blocker || null,
     lease: task.lease || null,
     proposal: task.proposal || null,
+    recovery: task.recovery || null,
+    recoveryHistory: task.recoveryHistory || [],
+    correctionPolicy: task.correctionPolicy,
+    split: task.split || null,
+    splitFrom: task.splitFrom || null,
     acceptance: { ...task.acceptance, unresolved: task.acceptance.status !== "accepted" },
     verification: { ...task.verification, unresolved: task.verification.status !== "passed" },
     evidence: {
@@ -224,6 +234,9 @@ export function formatHandoff(result: HandoffResult): string {
     lines.push(`  Blocker: ${task.blocker || "none"}`);
     lines.push(`  Writer lease: ${task.lease ? `${task.lease.id} generation ${task.lease.generation}; owner ${task.lease.ownerThread}; expires ${task.lease.expiresAt}` : "none"}`);
     lines.push(`  Sealed proposal: ${task.proposal ? `${task.proposal.bundleId}; ${task.proposal.path}; owned paths ${task.proposal.ownedPaths.length > 0 ? task.proposal.ownedPaths.join(", ") : "none"}; excluded foreign paths ${task.proposal.excludedForeignPaths.length > 0 ? task.proposal.excludedForeignPaths.join(", ") : "none"}` : "none"}`);
+    lines.push(`  Abandoned-owner recovery: ${task.recovery ? `${task.recovery.status}; prior owner ${task.recovery.endedLease.ownerThread} generation ${task.recovery.endedLease.generation}; proposal ${task.recovery.proposal?.bundleId || "not sealed"}; choices ${task.recovery.status === "PENDING" ? "resume, reassign, supersede" : task.recovery.decision?.action}; prior recoveries ${task.recoveryHistory.length}` : "none"}`);
+    lines.push(`  Correction policy: ${task.correctionPolicy.used}/${task.correctionPolicy.limit} used; overrides ${task.correctionPolicy.overrides.length}`);
+    lines.push(`  Split: ${task.split ? `${task.split.replacements.join(", ")} (${task.split.reason})` : task.splitFrom ? `replacement for ${task.splitFrom}` : "none"}`);
     lines.push(`  Acceptance criteria: ${task.acceptance.criteria.join("; ")}`);
     lines.push(`  Acceptance: ${task.acceptance.status}; evidence ${evidenceLabel(task.evidence.acceptance)}`);
     lines.push(`  Verification commands: ${task.verification.commands.join("; ")}`);
