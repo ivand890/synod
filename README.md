@@ -8,6 +8,8 @@ Open [`docs/synod/synod-cycle.html`](docs/synod/synod-cycle.html) in a browser t
 
 GitHub's file and raw views show HTML as source/text and do not execute its JavaScript. Download the file and open it locally, or serve the repository with `python3 -m http.server` from its root before opening the HTML.
 
+For a phone-friendly preview, use the [interactive web preview](https://htmlpreview.github.io/?https://github.com/ivand890/synod/blob/agent/interactive-synod-cycle-map/docs/synod/synod-cycle.html).
+
 The token bars are an educational scale for showing how a fresh agent receives a bounded context packet and how evidence accumulates. They are not a runtime token counter; the actual context window depends on the Codex surface and selected model profile.
 
 ## Install
