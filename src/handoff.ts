@@ -3,8 +3,7 @@ import { formatCheckpointDelta } from "./checkpoint.js";
 import type { CheckpointDelta } from "./checkpoint.js";
 import {
   legalTaskTransitions,
-  orchestrationStatus,
-  validateOrchestrationProposalArtifacts
+  orchestrationStatusWithArtifacts
 } from "./orchestration.js";
 import type {
   GitCheckpoint,
@@ -15,7 +14,6 @@ import type {
   TaskState
 } from "./orchestration.js";
 import { verifyRecoveryBundle } from "./recovery.js";
-import { validateTaskWorktreeArtifacts } from "./worktrees.js";
 
 export interface HandoffOptions {
   directory?: string;
@@ -79,8 +77,8 @@ export interface HandoffResult {
   tasks: HandoffTask[];
   recoveryBundle: HandoffRecoveryBundle;
   artifacts: {
-    proposals: Awaited<ReturnType<typeof validateOrchestrationProposalArtifacts>>;
-    worktrees: Awaited<ReturnType<typeof validateTaskWorktreeArtifacts>>;
+    proposals: Awaited<ReturnType<typeof orchestrationStatusWithArtifacts>>["artifacts"]["proposals"];
+    worktrees: Awaited<ReturnType<typeof orchestrationStatusWithArtifacts>>["artifacts"]["worktrees"];
   };
 }
 
@@ -189,9 +187,7 @@ export async function generateHandoff(
   { directory = ".", bundle }: HandoffOptions = {},
   dependencies: OrchestrationDependencies = {}
 ): Promise<HandoffResult> {
-  const status = await orchestrationStatus({ directory, explain: true, readOnly: true }, dependencies);
-  const proposals = await validateOrchestrationProposalArtifacts({ directory, readOnly: true });
-  const worktrees = await validateTaskWorktreeArtifacts({ directory });
+  const status = await orchestrationStatusWithArtifacts({ directory, explain: true, readOnly: true }, dependencies);
   const verification = bundle ? await verifyRecoveryBundle({ bundle }) : undefined;
   if (!status.delta) throw new TypeError("Handoff checkpoint delta is unavailable.");
   const taskMap = Object.fromEntries(status.tasks.map(task => [task.id, task]));
@@ -212,7 +208,7 @@ export async function generateHandoff(
     },
     focusTaskIds,
     tasks,
-    artifacts: { proposals, worktrees },
+    artifacts: status.artifacts,
     recoveryBundle: verification
       ? verifiedBundleMatches(verification, status.checkpoint, status.lastEvent)
       : { status: "not-supplied" }

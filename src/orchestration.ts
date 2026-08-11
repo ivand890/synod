@@ -1791,28 +1791,14 @@ export async function readOrchestration(
   }
 }
 
-export async function validateOrchestrationProposalArtifacts({
-  directory = ".",
-  readOnly = false
-}: { directory?: string; readOnly?: boolean } = {}): Promise<{
+async function validateOrchestrationProposalArtifactsFromCanonical(
+  targetDirectory: string,
+  canonical: Awaited<ReturnType<typeof readOrchestrationRaw>>
+): Promise<{
   sealedProposals: number;
   verifiedBundles: number;
 }> {
-  const targetDirectory = path.resolve(directory);
-  const release = await acquireLock(targetDirectory);
-  try {
-    if (readOnly) {
-      const pending = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
-      if (pending.type !== "missing") {
-        throw new SynodError(
-          ERROR_CODES.ORCHESTRATION_STATE_INVALID,
-          "Pending orchestration recovery is required; refusing read-only proposal validation.",
-          { details: { path: ORCHESTRATION_PENDING_PATH, type: pending.type } }
-        );
-      }
-    } else await recoverPendingMutation(targetDirectory);
-    const canonical = await readOrchestrationRaw(targetDirectory);
-    const recovery = await import("./recovery.js");
+  const recovery = await import("./recovery.js");
     const verifiedPaths = new Map<string, Awaited<ReturnType<typeof recovery.verifyRecoveryBundle>>>();
     let sealedProposals = 0;
     for (const task of taskList(canonical.state)) {
@@ -1886,10 +1872,22 @@ export async function validateOrchestrationProposalArtifacts({
         }
       }
     }
-    return { sealedProposals, verifiedBundles: verifiedPaths.size };
-  } finally {
-    await release();
-  }
+  return { sealedProposals, verifiedBundles: verifiedPaths.size };
+}
+
+export async function validateOrchestrationProposalArtifacts({
+  directory = ".",
+  readOnly = false
+}: { directory?: string; readOnly?: boolean } = {}): Promise<{
+  sealedProposals: number;
+  verifiedBundles: number;
+}> {
+  const targetDirectory = path.resolve(directory);
+  return await withOrchestrationSnapshot(
+    targetDirectory,
+    canonical => validateOrchestrationProposalArtifactsFromCanonical(targetDirectory, canonical),
+    { readOnly }
+  );
 }
 
 export async function withOrchestrationSnapshot<Result>(
@@ -1899,11 +1897,21 @@ export async function withOrchestrationSnapshot<Result>(
     events: OrchestrationEvent[];
     leaseBaselines: LeaseBaselinesLedger;
     snapshot?: CheckpointSnapshot;
-  }) => Promise<Result>
+  }) => Promise<Result>,
+  { readOnly = false }: { readOnly?: boolean } = {}
 ): Promise<Result> {
   const release = await acquireLock(targetDirectory);
   try {
-    await recoverPendingMutation(targetDirectory);
+    if (readOnly) {
+      const pending = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
+      if (pending.type !== "missing") {
+        throw new SynodError(
+          ERROR_CODES.ORCHESTRATION_STATE_INVALID,
+          "Pending orchestration recovery is required; refusing to mutate records during read-only validation.",
+          { details: { path: ORCHESTRATION_PENDING_PATH, type: pending.type } }
+        );
+      }
+    } else await recoverPendingMutation(targetDirectory);
     return await action(await readOrchestrationRaw(targetDirectory));
   } finally {
     await release();
@@ -3999,30 +4007,18 @@ export async function recordCheckpoint(
   }), dependencies);
 }
 
-export async function orchestrationStatus(
-  { directory = ".", explain = false, readOnly = false }: { directory?: string; explain?: boolean; readOnly?: boolean } = {},
+async function orchestrationStatusFromCanonical(
+  targetDirectory: string,
+  canonical: Awaited<ReturnType<typeof readOrchestrationRaw>>,
+  { explain = false }: { explain?: boolean },
   dependencies: OrchestrationDependencies = {}
 ): Promise<OrchestrationStatusResult> {
-  const targetDirectory = path.resolve(directory);
-  const release = await acquireLock(targetDirectory);
   let state: OrchestrationState;
   let events: OrchestrationEvent[];
   let markdown: string;
   let currentCheckpoint: GitCheckpoint;
   let delta: CheckpointDelta | undefined;
-  try {
-    if (readOnly) {
-      const pending = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_PENDING_PATH));
-      if (pending.type !== "missing") {
-        throw new SynodError(
-          ERROR_CODES.ORCHESTRATION_STATE_INVALID,
-          "Pending orchestration recovery is required; refusing to mutate records during read-only validation.",
-          { details: { path: ORCHESTRATION_PENDING_PATH, type: pending.type } }
-        );
-      }
-    } else await recoverPendingMutation(targetDirectory);
-    const canonical = await readOrchestrationRaw(targetDirectory);
-    ({ state, events } = canonical);
+  ({ state, events } = canonical);
     markdown = await readRecord(targetDirectory, ORCHESTRATION_STATUS_PATH);
     const current = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
     currentCheckpoint = current.checkpoint;
@@ -4086,9 +4082,6 @@ export async function orchestrationStatus(
           });
         }
       }
-    }
-  } finally {
-    await release();
   }
   const expectedMarkdown = renderStatusMarkdown(state);
   if (contentHash(markdown) !== contentHash(expectedMarkdown)) {
@@ -4139,6 +4132,34 @@ export async function orchestrationStatus(
     markdownView: ORCHESTRATION_STATUS_PATH,
     ...(delta ? { delta } : {})
   };
+}
+
+export async function orchestrationStatus(
+  { directory = ".", explain = false, readOnly = false }: { directory?: string; explain?: boolean; readOnly?: boolean } = {},
+  dependencies: OrchestrationDependencies = {}
+): Promise<OrchestrationStatusResult> {
+  const targetDirectory = path.resolve(directory);
+  return await withOrchestrationSnapshot(
+    targetDirectory,
+    canonical => orchestrationStatusFromCanonical(targetDirectory, canonical, { explain }, dependencies),
+    { readOnly }
+  );
+}
+
+export async function orchestrationStatusWithArtifacts(
+  { directory = ".", explain = false, readOnly = false }: { directory?: string; explain?: boolean; readOnly?: boolean } = {},
+  dependencies: OrchestrationDependencies = {}
+) {
+  const targetDirectory = path.resolve(directory);
+  return await withOrchestrationSnapshot(targetDirectory, async canonical => {
+    const [status, proposals, worktreeModule] = await Promise.all([
+      orchestrationStatusFromCanonical(targetDirectory, canonical, { explain }, dependencies),
+      validateOrchestrationProposalArtifactsFromCanonical(targetDirectory, canonical),
+      import("./worktrees.js")
+    ]);
+    const worktrees = await worktreeModule.validateTaskWorktreeArtifacts({ directory: targetDirectory });
+    return { ...status, artifacts: { proposals, worktrees } };
+  }, { readOnly });
 }
 
 export async function validateOrchestrationReadOnly(

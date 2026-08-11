@@ -29,6 +29,7 @@ import {
   expireTaskLease,
   heartbeatTaskLease,
   orchestrationStatus,
+  orchestrationStatusWithArtifacts,
   overrideCorrectionPolicy,
   readOrchestration,
   recordCheckpoint,
@@ -1711,13 +1712,13 @@ test("an interrupted unpublished lock candidate never blocks orchestration", asy
   assert.equal(await readFile(candidatePath, "utf8"), "{");
 });
 
-test("status holds one lock across its canonical snapshot", async () => {
+test("status holds one lock across its canonical and artifact snapshot", async () => {
   const directory = await temporaryProject();
   let signalCheckpoint: () => void = () => {};
   let releaseCheckpoint: () => void = () => {};
   const checkpointStarted = new Promise<void>(resolve => { signalCheckpoint = resolve; });
   const checkpointGate = new Promise<void>(resolve => { releaseCheckpoint = resolve; });
-  const statusPromise = orchestrationStatus({ directory }, {
+  const statusPromise = orchestrationStatusWithArtifacts({ directory }, {
     async gitRunner(_directory, args) {
       assert.deepEqual(args, ["rev-parse", "--is-inside-work-tree"]);
       signalCheckpoint();
@@ -1732,7 +1733,10 @@ test("status holds one lock across its canonical snapshot", async () => {
     error => error instanceof SynodError && error.code === ERROR_CODES.ORCHESTRATION_LOCKED
   );
   releaseCheckpoint();
-  assert.equal((await statusPromise).healthy, true);
+  const status = await statusPromise;
+  assert.equal(status.healthy, true);
+  assert.deepEqual(status.artifacts.proposals, { sealedProposals: 0, verifiedBundles: 0 });
+  assert.equal(status.artifacts.worktrees.records, 0);
 });
 
 test("event log mutations append without rewriting the prior prefix", async () => {

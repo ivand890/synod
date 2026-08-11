@@ -16,7 +16,6 @@ import {
   expireTaskLease,
   formatOrchestrationStatus,
   heartbeatTaskLease,
-  orchestrationStatus,
   recordCheckpoint,
   recoverTaskLease,
   releaseTaskLease,
@@ -24,7 +23,7 @@ import {
   overrideCorrectionPolicy,
   splitTask,
   transitionTask,
-  validateOrchestrationProposalArtifacts
+  orchestrationStatusWithArtifacts
 } from "./orchestration.js";
 import type { OrchestrationDependencies } from "./orchestration.js";
 import type { UsageClient } from "./usage.js";
@@ -34,7 +33,7 @@ import { restoreRecoveryBundle } from "./restore.js";
 import { formatHandoff, generateHandoff } from "./handoff.js";
 import { formatWaitReport, waitForThreads } from "./wait.js";
 import type { ThreadStatusAdapter, WaitClient } from "./wait.js";
-import { cleanupTaskWorktree, createTaskWorktree, integrateTaskWorktreeProposal, sealTaskWorktreeProposal, taskWorktreeStatus, validateTaskWorktreeArtifacts } from "./worktrees.js";
+import { cleanupTaskWorktree, createTaskWorktree, integrateTaskWorktreeProposal, sealTaskWorktreeProposal, taskWorktreeStatus } from "./worktrees.js";
 import type { TaskWorktreeDependencies } from "./worktrees.js";
 
 const HELP = `Synod ${packageVersion}
@@ -284,14 +283,7 @@ export async function run(
     if (command === "status") {
       const options = parseLifecycleArgs(args.slice(1), { allowExplain: true });
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      const canonical = await orchestrationStatus(options, dependencies);
-      const result = {
-        ...canonical,
-        artifacts: {
-          proposals: await validateOrchestrationProposalArtifacts({ directory: options.directory }),
-          worktrees: await validateTaskWorktreeArtifacts({ directory: options.directory })
-        }
-      };
+      const result = await orchestrationStatusWithArtifacts(options, dependencies);
       if (options.json) {
         const envelope = result.healthy
           ? successEnvelope("status", result)
