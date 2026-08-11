@@ -2385,6 +2385,14 @@ function scopesCoverPaths(scopes: TaskLease["scopes"], access: "read" | "write",
   return paths.every(candidate => scopes.some(scope => scope.access === access && leaseScopeCoversPath(scope, candidate)));
 }
 
+function proposalReservesPaths(task: OrchestrationTask): boolean {
+  if (!task.proposal) return false;
+  if (["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)) return true;
+  return task.state === "BLOCKED"
+    && task.blockedFrom !== undefined
+    && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.blockedFrom);
+}
+
 function classifyLeaseDelta(
   state: OrchestrationState,
   task: OrchestrationTask,
@@ -2408,7 +2416,7 @@ function classifyLeaseDelta(
       : []
   );
   const sealedForeignPaths = new Set(taskList(state).flatMap(other =>
-    other.id !== task.id && other.proposal
+    other.id !== task.id && proposalReservesPaths(other) && other.proposal
       ? other.proposal.ownedPaths.map(candidate => candidate.normalize("NFC").toLowerCase())
       : []
   ));

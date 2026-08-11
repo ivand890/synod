@@ -363,6 +363,37 @@ test("a failed delivery commit preserves and reuses its verified immutable propo
   assert.equal(retried.task.proposal?.bundleId, orphan.bundleId);
 });
 
+test("terminal proposals do not reserve paths from later task deliveries", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-FIRST", objective: "First shared edit" });
+  await transitionTask({ directory, id: "T-FIRST", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-FIRST", ownerThread: "test:first", write: ["src/shared.ts"] });
+  await transitionTask({ directory, id: "T-FIRST", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/shared.ts"), "first\n");
+  await transitionTask({ directory, id: "T-FIRST", to: "REVIEW", revision: 1, evidence: ["delivery:first"] });
+  await transitionTask({ directory, id: "T-FIRST", to: "ACCEPTED", revision: 1, evidence: ["acceptance:first"] });
+  await transitionTask({ directory, id: "T-FIRST", to: "VERIFIED", revision: 1, evidence: ["verification:first"] });
+  await transitionTask({ directory, id: "T-FIRST", to: "DONE", revision: 1 });
+
+  await addDefaultTask(directory, { id: "T-LATER", objective: "Later shared edit" });
+  await transitionTask({ directory, id: "T-LATER", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-LATER", ownerThread: "test:later", write: ["src/shared.ts"] });
+  await transitionTask({ directory, id: "T-LATER", to: "ACTIVE", revision: 0 });
+  await writeFile(path.join(directory, "src/shared.ts"), "later\n");
+  const delivered = await transitionTask({
+    directory,
+    id: "T-LATER",
+    to: "REVIEW",
+    revision: 1,
+    evidence: ["delivery:later"]
+  });
+
+  assert.deepEqual(delivered.task.proposal?.ownedPaths, ["src/shared.ts"]);
+  assert.deepEqual(delivered.task.proposal?.excludedForeignPaths, []);
+});
+
 test("rename delivery requires ownership of both source and destination", async () => {
   const directory = await temporaryProject();
   await mkdir(path.join(directory, "src"), { recursive: true });
