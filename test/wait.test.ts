@@ -63,8 +63,14 @@ const active = (threadId: string): ObservedThreadStatus => ({
 const idle = (threadId: string): ObservedThreadStatus => ({ threadId, status: { type: "idle" } });
 
 test("notification wait registers before its initial read and cannot lose completion", async () => {
-  const adapter = new FakeAdapter({ notification: true, reads: [{ statuses: [active("thread:a")] }] });
-  adapter.onRead = current => current.listener?.(idle("thread:a"));
+  const adapter = new FakeAdapter({ notification: true, reads: [
+    { statuses: [active("thread:a")] },
+    { statuses: [idle("thread:a")] }
+  ] });
+  let reads = 0;
+  adapter.onRead = current => {
+    if (reads++ === 0) queueMicrotask(() => current.listener?.(idle("thread:a")));
+  };
 
   const report = await waitForThreads({ threadIds: ["thread:a"], timeoutMs: 100 }, { adapterFactory: () => adapter });
 
@@ -82,17 +88,21 @@ test("notification wait registers before its initial read and cannot lose comple
 test("the App Server adapter preserves a notification that races thread/read", async () => {
   let listener: ((event: AppServerEvent) => void) | undefined;
   let closed = 0;
+  let reads = 0;
   const client: WaitClient = {
     async start() {},
     async request(method, params) {
       assert.equal(method, "thread/read");
       assert.deepEqual(params, { threadId: "thread:a", includeTurns: false });
-      listener?.({
-        type: "notification",
-        method: "thread/status/changed",
-        params: idle("thread:a")
-      });
-      return { thread: { id: "thread:a", status: active("thread:a").status } };
+      if (reads++ === 0) {
+        queueMicrotask(() => listener?.({
+          type: "notification",
+          method: "thread/status/changed",
+          params: idle("thread:a")
+        }));
+        return { thread: { id: "thread:a", status: active("thread:a").status } };
+      }
+      return { thread: { id: "thread:a", status: idle("thread:a").status } };
     },
     async close() { closed += 1; },
     subscribeEvents(next) {
@@ -116,6 +126,26 @@ test("the App Server adapter preserves a notification that races thread/read", a
   assert.equal(report.wakeCount, 1);
   assert.deepEqual(report.statuses, [idle("thread:a")]);
   assert.deepEqual(report.diagnostics, { fake: true, closed: 1 });
+});
+
+test("a notification overlapping thread/read cannot overwrite a newer snapshot", async () => {
+  const adapter = new FakeAdapter({ notification: true, reads: [
+    { statuses: [idle("thread:a")] },
+    { statuses: [idle("thread:a")] }
+  ] });
+  let reads = 0;
+  adapter.onRead = current => {
+    if (reads++ === 0) current.listener?.(active("thread:a"));
+  };
+
+  const report = await waitForThreads({ threadIds: ["thread:a"], timeoutMs: 100 }, {
+    adapterFactory: () => adapter
+  });
+
+  assert.equal(report.incomplete, false);
+  assert.equal(report.wakeCount, 1);
+  assert.deepEqual(report.statuses, [idle("thread:a")]);
+  assert.equal(adapter.closed, 1);
 });
 
 test("a notification transport failure rejects a blocked wait and cleans up", async () => {
@@ -154,8 +184,13 @@ test("cleanup failure does not replace the original wait failure", async () => {
 });
 
 test("notification wait ignores unrelated and malformed status events", async () => {
-  const adapter = new FakeAdapter({ notification: true, reads: [{ statuses: [active("thread:a")] }] });
+  const adapter = new FakeAdapter({ notification: true, reads: [
+    { statuses: [active("thread:a")] },
+    { statuses: [idle("thread:a")] }
+  ] });
+  let reads = 0;
   adapter.onRead = current => {
+    if (reads++ > 0) return;
     current.listener?.(idle("thread:other"));
     current.listener?.({ threadId: "thread:a", status: { type: "active", activeFlags: ["unknown"] } });
     current.listener?.(idle("thread:a"));

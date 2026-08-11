@@ -362,19 +362,24 @@ export async function waitForThreads({
         });
       }
 
-      const readOutcome = await boundedOperation(() => adapter.read(ids), deadline - now(), signal);
-      if (readOutcome.outcome === "timeout") timedOut = true;
-      else if (readOutcome.outcome === "abort") aborted = true;
-      else {
-        let snapshot = readOutcome.value;
+      let snapshot: { statuses: ObservedThreadStatus[]; cursor?: string } | undefined;
+      while (!timedOut && !aborted) {
+        const readOutcome = await boundedOperation(() => adapter.read(ids), deadline - now(), signal);
+        if (readOutcome.outcome === "timeout") { timedOut = true; break; }
+        if (readOutcome.outcome === "abort") { aborted = true; break; }
+        snapshot = readOutcome.value;
         for (const item of snapshot.statuses) byId.set(item.threadId, item.status);
-        while (notificationQueue.length > 0) {
-          const item = notificationQueue.shift()!;
-          byId.set(item.threadId, item.status);
-          wakeCount += 1;
-        }
         if (notificationFailure) throw notificationFailure;
+        if (mode !== "notification" || notificationQueue.length === 0) break;
 
+        // A notification observed while thread/read is in flight has ambiguous
+        // ordering relative to the response. Count it, then reconcile with a
+        // fresh bounded read instead of letting either value win by timing.
+        wakeCount += notificationQueue.length;
+        notificationQueue.length = 0;
+      }
+
+      if (snapshot && !timedOut && !aborted) {
         while (true) {
           const statuses = projectStatuses(ids, byId);
           if (completion(statuses).done) break;
