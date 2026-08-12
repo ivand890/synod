@@ -787,6 +787,8 @@
         const $ = (selector, root = document) => root.querySelector(selector);
         const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
         const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+        const isHtmlPreview = window.location.hostname === "htmlpreview.github.io"
+          && window.location.search.startsWith("?https://");
         const lanes = [
           { id: "supervisor", label: "Supervisor", hint: "split · assign · merge", icon: "S" },
           { id: "slot1", label: "Slot 1", hint: "reusable thread", icon: "1" },
@@ -901,7 +903,7 @@
         }
 
         const scenarios = { normal: normalScenario(), correction: correctionScenario() };
-        const params = new URLSearchParams(window.location.search);
+        const params = new URLSearchParams(isHtmlPreview ? window.location.hash.slice(1) : window.location.search);
         const state = {
           scenario: params.get("scenario") === "correction" ? "correction" : "normal",
           index: 0,
@@ -1089,9 +1091,11 @@
 
         function syncUrl() {
           const url = new URL(window.location.href);
-          url.searchParams.set("scenario", state.scenario);
-          url.searchParams.set("step", frame()[0]);
-          url.searchParams.set("focus", state.focus);
+          const stateParams = isHtmlPreview ? new URLSearchParams(url.hash.slice(1)) : url.searchParams;
+          stateParams.set("scenario", state.scenario);
+          stateParams.set("step", frame()[0]);
+          stateParams.set("focus", state.focus);
+          if (isHtmlPreview) url.hash = stateParams.toString();
           window.history.replaceState({ scenario: state.scenario, step: frame()[0], focus: state.focus }, "", url);
         }
 
