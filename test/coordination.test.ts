@@ -219,6 +219,10 @@ test("clips coordination calls and durations to the canonical task interval", as
     "2026-08-12T12:04:21.000Z",
     "late-duplicate",
     "exec"
+  )}\n${output(
+    "2026-08-12T12:04:22.000Z",
+    "late-orphan",
+    JSON.stringify({ ok: true })
   )}\n`, "utf8");
 
   const repeated = await collectUsage({
@@ -294,6 +298,35 @@ test("rejects a tool output paired to a start in another thread", async () => {
   await assert.rejects(
     collectUsage({ cwd: directory, clientFactory: () => client }),
     (error: unknown) => error instanceof SynodError && error.code === ERROR_CODES.ROLLOUT_INVALID
-      && error.message.includes("crosses thread ownership")
+      && (error.details as { unpairedOutputs?: number } | undefined)?.unpairedOutputs === 1
+  );
+});
+
+test("rejects outputs without a matching call start in snapshots and exact prefixes", async () => {
+  const directory = await temporaryDirectory();
+  await initProject({ directory }, { clock: () => "2026-08-12T12:00:00.000Z" });
+  const rootPath = await rollout(directory, "orphan-output", [
+    output("2026-08-12T12:01:00.000Z", "missing-start", JSON.stringify({ ok: true }))
+  ]);
+  const root = {
+    id: "root", parentThreadId: null, path: rootPath, cwd: directory,
+    createdAt: "2026-08-12T11:59:00.000Z", updatedAt: "2026-08-12T12:02:00.000Z"
+  };
+  const isUnpairedError = (error: unknown) => error instanceof SynodError
+    && error.code === ERROR_CODES.ROLLOUT_INVALID
+    && (error.details as { unpairedOutputs?: number } | undefined)?.unpairedOutputs === 1;
+
+  await assert.rejects(
+    collectUsage({ cwd: directory, clientFactory: () => usageClient(root) }),
+    isUnpairedError
+  );
+  await assert.rejects(
+    collectUsage({
+      cwd: directory,
+      sinceCheckpoint: true,
+      clientFactory: () => usageClient(root),
+      clock: () => "2026-08-12T12:02:00.000Z"
+    }),
+    isUnpairedError
   );
 });

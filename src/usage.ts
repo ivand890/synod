@@ -275,6 +275,7 @@ export type RolloutIssueKind =
   | "invalid-tool-call"
   | "duplicate-tool-call-start"
   | "duplicate-tool-call-output"
+  | "unpaired-tool-call-output"
   | "negative-tool-call-duration";
 
 export interface RolloutIssue {
@@ -613,6 +614,14 @@ export async function readRolloutTimeline(
     }
   }
   if (buffer.byteLength > 0) processRecord(buffer, buffer);
+  for (const output of toolOutputs) {
+    if (toolCallIndexes.has(output.callId)) continue;
+    issues.push({
+      kind: "unpaired-tool-call-output",
+      bytes: toolOutputBytes.get(output.callId) || bytes,
+      ...(output.observedAtMs !== undefined ? { observedAtMs: output.observedAtMs } : {})
+    });
+  }
 
   return {
     source,
@@ -978,6 +987,7 @@ function selectedTokens(timeline: RolloutTimeline, interval: UsageInterval | und
         "invalid-tool-call",
         "duplicate-tool-call-start",
         "duplicate-tool-call-output",
+        "unpaired-tool-call-output",
         "negative-tool-call-duration"
       ].includes(issue.kind)).length
     };
@@ -1145,6 +1155,7 @@ export async function collectUsage({
       const pairingIssues = timeline.issues.filter(issue => [
         "duplicate-tool-call-start",
         "duplicate-tool-call-output",
+        "unpaired-tool-call-output",
         "negative-tool-call-duration"
       ].includes(issue.kind) && (issue.bytes <= pairingPrefixBytes || issue.blocksPrefix));
       if (pairingIssues.length > 0) {
@@ -1153,6 +1164,7 @@ export async function collectUsage({
             threadId: thread.id,
             duplicateStarts: pairingIssues.filter(issue => issue.kind === "duplicate-tool-call-start").length,
             duplicateOutputs: pairingIssues.filter(issue => issue.kind === "duplicate-tool-call-output").length,
+            unpairedOutputs: pairingIssues.filter(issue => issue.kind === "unpaired-tool-call-output").length,
             negativeDurations: pairingIssues.filter(issue => issue.kind === "negative-tool-call-duration").length
           }
         });
@@ -1166,6 +1178,7 @@ export async function collectUsage({
           "invalid-tool-call",
           "duplicate-tool-call-start",
           "duplicate-tool-call-output",
+          "unpaired-tool-call-output",
           "negative-tool-call-duration"
         ].includes(issue.kind))) completenessReasons.add("invalid-tool-call-records");
       }
