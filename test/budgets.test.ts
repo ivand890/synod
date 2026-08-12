@@ -500,6 +500,19 @@ test("split decisions preserve complete budget history and require explicit repl
   );
 
   const replacementStart = (await readOrchestration(directory)).events.at(-1)!;
+  await assert.rejects(
+    setTaskBudgetPolicy({
+      directory,
+      id: "T-LEFT",
+      rootSessionId: "left-session",
+      startEvent: start.id,
+      hardTotalTokens: 50,
+      reason: "Attempt to reuse the parent phase boundary",
+      evidence: ["handoff:left"],
+      replace: true
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.BUDGET_INVALID
+  );
   const replaced = await setTaskBudgetPolicy({
     directory,
     id: "T-LEFT",
@@ -514,6 +527,49 @@ test("split decisions preserve complete budget history and require explicit repl
   assert.equal(replaced.task.budget?.policyHistory[0]?.rootSessionId, "root-session");
   assert.equal(replaced.task.budget?.observations[0]?.totalTokens, 120);
   await transitionTask({ directory, id: "T-LEFT", to: "READY", revision: 0 });
+});
+
+test("split rejects a replacement whose existing budget history would be overwritten", async () => {
+  const directory = await project();
+  await task(directory);
+  await task(directory, "T-LEFT");
+  await task(directory, "T-RIGHT");
+  const { start } = await configure(directory);
+  await setTaskBudgetPolicy({
+    directory,
+    id: "T-LEFT",
+    rootSessionId: "left-existing-session",
+    startEvent: start.id,
+    hardTotalTokens: 500,
+    reason: "Preserve the independent child budget",
+    evidence: ["roadmap:left"]
+  });
+  const observed = await observeTaskBudget({ directory, id: "T-BUDGET" }, {
+    usageCollector: collector(usageReport(start, 120))
+  });
+  await decideTaskBudget({
+    directory,
+    id: "T-BUDGET",
+    observation: observed.observation.event.id,
+    action: "split",
+    reason: "Separate the remaining work",
+    evidence: ["review:split"]
+  });
+
+  await assert.rejects(
+    splitTask({
+      directory,
+      id: "T-BUDGET",
+      replacements: ["T-LEFT", "T-RIGHT"],
+      reason: "Separate the remaining work",
+      evidence: ["review:split"]
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.BUDGET_INVALID
+  );
+  const canonical = await readOrchestration(directory);
+  assert.equal(canonical.state.tasks["T-BUDGET"]?.state, "PLANNED");
+  assert.equal(canonical.state.tasks["T-LEFT"]?.budget?.policy.rootSessionId, "left-existing-session");
+  assert.equal(canonical.state.tasks["T-LEFT"]?.splitFrom, undefined);
 });
 
 test("budget CLI exposes policy, report, observation, and exact decision envelopes", async () => {

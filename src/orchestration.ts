@@ -2992,6 +2992,11 @@ export async function setTaskBudgetPolicy({
   const canonical = await readOrchestration(targetDirectory);
   if (!canonical.state.tasks[taskId]) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
   const start = budgetEventIdentity(canonical.events, String(startEvent));
+  const splitFrom = canonical.state.tasks[taskId]!.splitFrom;
+  const splitBoundary = splitFrom ? canonical.events.filter(event => event.type === "task.split"
+    && event.taskId === splitFrom
+    && Array.isArray(event.payload.replacements)
+    && event.payload.replacements.includes(taskId)).at(-1) : undefined;
   const expected = canonical.state.lastEvent;
   const type = replace ? "task.budget-replaced" : "task.budget-set";
   return commitMutation(targetDirectory, type, { actor: principal, taskId }, (state, context) => {
@@ -3012,6 +3017,17 @@ export async function setTaskBudgetPolicy({
           priorRootSessionId: task.budget.policy.rootSessionId,
           requestedRootSessionId: session,
           decisionEvent: structuralDecision.event,
+          requestedStartEvent: start
+        }
+      });
+    }
+    if (task.budget?.thresholdStatus === "decision-required" && task.splitFrom && structuralDecision?.action === "split"
+      && (!splitBoundary || start.sequence < splitBoundary.sequence)) {
+      throw new SynodError(ERROR_CODES.BUDGET_INVALID, "A split replacement requires a canonical start event at or after the split event.", {
+        details: {
+          taskId,
+          splitFrom: task.splitFrom,
+          splitEvent: splitBoundary ? { sequence: splitBoundary.sequence, id: splitBoundary.id, hash: splitBoundary.eventHash } : undefined,
           requestedStartEvent: start
         }
       });
@@ -3360,6 +3376,11 @@ export async function splitTask({
       if (!replacement || replacement.state !== "PLANNED" || replacement.splitFrom) {
         throw new SynodError(ERROR_CODES.TASK_INVALID, `Split replacement ${replacementId} must be an unlinked PLANNED task.`, {
           details: { taskId, replacementId, state: replacement?.state }
+        });
+      }
+      if (task.budget && replacement.budget) {
+        throw new SynodError(ERROR_CODES.BUDGET_INVALID, `Split replacement ${replacementId} already has a budget that cannot be overwritten.`, {
+          details: { taskId, replacementId, policyRevision: replacement.budget.policy.revision }
         });
       }
     }
