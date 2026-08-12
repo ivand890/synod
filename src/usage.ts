@@ -1139,11 +1139,14 @@ export async function collectUsage({
       const timeline = await readRolloutTimeline(thread.path, {
         ...(intervalEndMs !== undefined ? { identityEndMs: intervalEndMs } : {})
       });
+      const pairingPrefixBytes = intervalEndMs === undefined
+        ? timeline.identity.bytes
+        : timelineIdentityAt(timeline, intervalEndMs).bytes;
       const pairingIssues = timeline.issues.filter(issue => [
         "duplicate-tool-call-start",
         "duplicate-tool-call-output",
         "negative-tool-call-duration"
-      ].includes(issue.kind));
+      ].includes(issue.kind) && (issue.bytes <= pairingPrefixBytes || issue.blocksPrefix));
       if (pairingIssues.length > 0) {
         throw new SynodError(ERROR_CODES.ROLLOUT_INVALID, "Tool calls require unique, non-negative call_id pairs.", {
           details: {

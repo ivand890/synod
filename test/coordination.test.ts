@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -213,6 +213,21 @@ test("clips coordination calls and durations to the canonical task interval", as
   assert.deepEqual(report.completeness, {
     status: "incomplete", reasons: ["tool-call-output-missing"]
   });
+
+  const original = await readFile(rootPath, "utf8");
+  await writeFile(rootPath, `${original}${call("2026-08-12T12:04:20.000Z", "late-duplicate", "exec")}\n${call(
+    "2026-08-12T12:04:21.000Z",
+    "late-duplicate",
+    "exec"
+  )}\n`, "utf8");
+
+  const repeated = await collectUsage({
+    cwd: directory,
+    taskId: "SYN-COORD",
+    clientFactory: () => usageClient(root),
+    clock: () => "2026-08-12T12:06:00.000Z"
+  });
+  assert.deepEqual(repeated, report);
 });
 
 test("rejects duplicate and negative tool-call pairs in an exact interval", async () => {
