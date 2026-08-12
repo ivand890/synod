@@ -18,6 +18,7 @@ import {
   readOrchestration,
   reportProjectRotation,
   setRotationPolicy,
+  transitionTask,
   verifyProjectRotation
 } from "../src/orchestration.js";
 import { currentRotationPhase } from "../src/rotation.js";
@@ -194,6 +195,49 @@ test("reports every configured metric deterministically and missing context cann
   assert.equal(report.metrics.find(item => item.name === "supervisor-context-percent")?.triggered, false);
   assert.deepEqual(report.reasons, ["compactions", "wait-calls", "wait-duration-ms"]);
   assert.equal(report.recommended, true);
+
+  const nearThreshold = await reportProjectRotation({ directory }, {
+    clock: now,
+    usageCollector: collector(directory, now, { contextInput: 79_999, contextWindow: 100_000 })
+  });
+  const contextMetric = nearThreshold.metrics.find(item => item.name === "supervisor-context-percent");
+  assert.equal(contextMetric?.current, 79.999);
+  assert.equal(contextMetric?.triggered, false);
+});
+
+test("superseded tasks do not satisfy the completed-task threshold", async () => {
+  const directory = await project();
+  const start = (await readOrchestration(directory)).events[0]!;
+  await setRotationPolicy({
+    directory,
+    rootSessionId: "root-old",
+    startEvent: start.id,
+    thresholds: { completedTasks: 1 },
+    reason: "Rotate after completed work",
+    evidence: ["roadmap:SYN-093A"]
+  });
+  await addTask({
+    directory,
+    id: "SYN-ABANDONED",
+    objective: "Do not count abandonment as completion",
+    executor: "synod_implementer",
+    acceptance: ["Only DONE counts."],
+    verification: ["pnpm test"]
+  });
+  await transitionTask({
+    directory,
+    id: "SYN-ABANDONED",
+    to: "SUPERSEDED",
+    revision: 0,
+    reason: "Fixture abandonment"
+  });
+  const now = () => "2026-08-12T10:05:00.000Z";
+
+  const report = await reportProjectRotation({ directory }, { clock: now, usageCollector: collector(directory, now) });
+
+  assert.deepEqual(report.completedTaskIds, []);
+  assert.equal(report.metrics.find(item => item.name === "completed-tasks")?.current, 0);
+  assert.equal(report.recommended, false);
 });
 
 test("prepare and verify bind a new root while preserving tasks, Git, and exact phase boundaries", async () => {

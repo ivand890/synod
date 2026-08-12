@@ -365,7 +365,7 @@ export async function collectRotationReport({
   const metrics: RotationMetric[] = [];
   if (thresholds.supervisorContextPercent !== undefined) {
     const percent = context && context.modelContextWindow > 0
-      ? Math.round((context.inputTokens / context.modelContextWindow) * 10_000) / 100
+      ? (context.inputTokens / context.modelContextWindow) * 100
       : undefined;
     metrics.push(metric("supervisor-context-percent", thresholds.supervisorContextPercent, percent, "available",
       context ? { inputTokens: context.inputTokens, modelContextWindow: context.modelContextWindow } : undefined));
@@ -412,7 +412,14 @@ export async function collectRotationReport({
 }
 
 export function formatRotationReport(report: RotationReport): string {
-  const metrics = report.metrics.map(item => `- ${item.name}: ${item.current ?? "unavailable"}/${item.threshold} (${item.status})${item.triggered ? " TRIGGERED" : ""}`);
+  const metrics = report.metrics.map(item => {
+    const current = item.current === undefined
+      ? "unavailable"
+      : item.name === "supervisor-context-percent"
+        ? Math.round(item.current * 100) / 100
+        : item.current;
+    return `- ${item.name}: ${current}/${item.threshold} (${item.status})${item.triggered ? " TRIGGERED" : ""}`;
+  });
   return [
     `Phase rotation: ${report.recommended ? "recommended" : "not recommended"}`,
     `Policy revision: ${report.policy.revision}`,

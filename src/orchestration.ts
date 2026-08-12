@@ -3383,7 +3383,7 @@ function completedTasksSince(events: OrchestrationEvent[], startSequence: number
     .filter(event => event.sequence > startSequence
       && event.sequence <= endSequence
       && event.taskId
-      && (event.toState === "DONE" || event.toState === "SUPERSEDED"))
+      && event.toState === "DONE")
     .map(event => event.taskId!))].sort();
 }
 
