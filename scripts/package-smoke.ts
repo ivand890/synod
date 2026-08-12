@@ -270,7 +270,7 @@ try {
     || v08UpgradeData.templateVersion !== expectedVersion
     || upgradedManifest.templateVersion !== expectedVersion
     || upgradedRuntime.runtimeVersion !== expectedVersion
-    || upgradedState.schemaVersion !== 2
+    || upgradedState.schemaVersion !== 3
     || upgradedLeaseBaselines.schemaVersion !== 1
     || upgradedWorktrees.schemaVersion !== 1
   ) {
@@ -643,6 +643,22 @@ process.stdout.write(JSON.stringify({ notification: notification.mode, fallbackP
     || taskLastEvent.sequence < 3
   ) {
     throw new Error(`Installed CLI failed its orchestration task smoke: ${taskOutput}`);
+  }
+  const budgetOutput = runSynod([
+    "budget", "set", "T-001",
+    "--session", "thread:package-smoke",
+    "--since-event", "1",
+    "--hard-tokens", "1000",
+    "--reason", "Installed budget smoke",
+    "--evidence", "package:smoke",
+    "--cwd", targetDirectory,
+    "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  const budgetEnvelope = jsonRecord(budgetOutput, "budget envelope");
+  const budgetData = nestedRecord(budgetEnvelope, "data", "budget envelope");
+  const budgetPolicy = nestedRecord(budgetData, "policy", "budget envelope.data");
+  if (budgetEnvelope.ok !== true || budgetData.action !== "set" || budgetPolicy.revision !== 1) {
+    throw new Error(`Installed CLI failed its task-budget smoke: ${budgetOutput}`);
   }
   const upgradeOutput = runSynod(["upgrade", targetDirectory, "--dry-run", "--json"], {
     cwd: consumerDirectory,

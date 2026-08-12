@@ -186,6 +186,39 @@ export interface TaskSplitOptions extends TaskCommonOptions {
 
 export type TaskOptions = TaskAddOptions | TaskTransitionOptions | TaskOverrideOptions | TaskSplitOptions;
 
+interface BudgetCommonOptions {
+  id: string;
+  directory: string;
+  json: boolean;
+  actor: string;
+}
+
+export interface BudgetPolicyCommandOptions extends BudgetCommonOptions {
+  action: "set" | "replace";
+  rootSessionId: string;
+  startEvent: string;
+  softTotalTokens?: number;
+  hardTotalTokens?: number;
+  reason: string;
+  evidence: string[];
+  replace: boolean;
+}
+
+export interface BudgetReadCommandOptions extends BudgetCommonOptions {
+  action: "report" | "observe";
+}
+
+export interface BudgetDecisionCommandOptions extends BudgetCommonOptions {
+  action: "decide";
+  observation: string;
+  decision: "continue" | "split" | "supersede" | "rotate";
+  addedAllowance?: number;
+  reason: string;
+  evidence: string[];
+}
+
+export type BudgetCommandOptions = BudgetPolicyCommandOptions | BudgetReadCommandOptions | BudgetDecisionCommandOptions;
+
 function missingValue(option: string): SynodError {
   return new SynodError(ERROR_CODES.MISSING_OPTION_VALUE, `Missing value for ${option}.`, {
     details: { option }
@@ -752,4 +785,89 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   }
   if (!to) throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, "Task transition is missing a target state.");
   return { action: "transition", id, to, directory, json, actor, reason, revision, evidence };
+}
+
+export function parseBudgetArgs(args: string[]): BudgetCommandOptions | HelpOptions {
+  const action = args[0];
+  if (!action || action === "-h" || action === "--help") return { help: true };
+  if (!["set", "replace", "report", "observe", "decide"].includes(action)) {
+    throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown budget action: ${action}`, { details: { action } });
+  }
+  const id = args[1];
+  if (!id || id.startsWith("-")) throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Budget ${action} requires a task ID.`);
+  let directory = ".";
+  let json = false;
+  let actor = "supervisor";
+  let rootSessionId: string | undefined;
+  let startEvent: string | undefined;
+  let softTotalTokens: number | undefined;
+  let hardTotalTokens: number | undefined;
+  let observation: string | undefined;
+  let decision: BudgetDecisionCommandOptions["decision"] | undefined;
+  let addedAllowance: number | undefined;
+  let reason: string | undefined;
+  const evidence: string[] = [];
+  const seen = new Set<string>();
+  for (let index = 2; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) continue;
+    if (arg === "--json") { json = true; continue; }
+    const valueOptions = [
+      "--cwd", "--actor", "--session", "--since-event", "--soft-tokens", "--hard-tokens",
+      "--observation", "--decision", "--additional-tokens", "--reason", "--evidence"
+    ];
+    if (!valueOptions.includes(arg)) {
+      if (arg.startsWith("-")) throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
+      throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
+    }
+    if (arg !== "--evidence" && seen.has(arg)) {
+      throw new SynodError(ERROR_CODES.BUDGET_INVALID, `Budget option cannot be repeated: ${arg}.`, { details: { option: arg } });
+    }
+    seen.add(arg);
+    const value = optionValue(args, index, arg);
+    if (arg === "--cwd") directory = value;
+    else if (arg === "--actor") actor = value;
+    else if (arg === "--session") rootSessionId = value;
+    else if (arg === "--since-event") startEvent = value;
+    else if (arg === "--soft-tokens") softTotalTokens = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    else if (arg === "--hard-tokens") hardTotalTokens = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    else if (arg === "--observation") observation = value;
+    else if (arg === "--decision") decision = value as BudgetDecisionCommandOptions["decision"];
+    else if (arg === "--additional-tokens") addedAllowance = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    else if (arg === "--reason") reason = value;
+    else evidence.push(value);
+    index += 1;
+  }
+  const common = { id, directory, json, actor };
+  if (action === "report" || action === "observe") {
+    if (rootSessionId !== undefined || startEvent !== undefined || softTotalTokens !== undefined || hardTotalTokens !== undefined
+      || observation !== undefined || decision !== undefined || addedAllowance !== undefined || reason !== undefined || evidence.length > 0) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Budget ${action} received a mutation-only option.`);
+    }
+    return { action, ...common };
+  }
+  if (action === "set" || action === "replace") {
+    if (!rootSessionId || !startEvent || (softTotalTokens === undefined && hardTotalTokens === undefined)
+      || Number.isNaN(softTotalTokens) || Number.isNaN(hardTotalTokens) || !reason || evidence.length === 0
+      || observation !== undefined || decision !== undefined || addedAllowance !== undefined) {
+      throw new SynodError(ERROR_CODES.BUDGET_INVALID, `Budget ${action} requires --session, --since-event, a soft or hard token limit, --reason, and --evidence.`);
+    }
+    return {
+      action,
+      ...common,
+      rootSessionId,
+      startEvent,
+      ...(softTotalTokens === undefined ? {} : { softTotalTokens }),
+      ...(hardTotalTokens === undefined ? {} : { hardTotalTokens }),
+      reason,
+      evidence,
+      replace: action === "replace"
+    };
+  }
+  if (!observation || !decision || !(["continue", "split", "supersede", "rotate"] as string[]).includes(decision)
+    || !reason || evidence.length === 0 || (decision === "continue" ? !addedAllowance || Number.isNaN(addedAllowance) : addedAllowance !== undefined)
+    || rootSessionId !== undefined || startEvent !== undefined || softTotalTokens !== undefined || hardTotalTokens !== undefined) {
+    throw new SynodError(ERROR_CODES.BUDGET_INVALID, "Budget decide requires --observation, --decision, --reason, --evidence, and --additional-tokens only for continue.");
+  }
+  return { action: "decide", ...common, observation, decision, ...(addedAllowance === undefined ? {} : { addedAllowance }), reason, evidence };
 }

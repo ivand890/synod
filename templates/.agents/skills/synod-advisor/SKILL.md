@@ -54,6 +54,8 @@ Before any implementation, give the worker a stable task ID from `PLAN.md` and i
 - required evidence and output format;
 - instruction not to expand scope or declare the parent goal complete.
 
+If the task has a canonical token budget, run `__SYNOD_COMMAND__ budget report <task-id>` before granting execution authority. Reporting is read-only. Record usage only at an intentional checkpoint with `budget observe`; a recorded hard crossing requires one decision bound to that exact observation. A bounded `continue` adds allowance without resetting raw usage. `split`, `supersede`, and `rotate` preserve history and require their corresponding structural action before more execution begins.
+
 Use at most three concurrent subagents. Maintain one active writer per declared scope. Before a writer moves to `ACTIVE`, run `__SYNOD_COMMAND__ lease acquire <task-id> --owner-thread <thread-id>` with the narrowest repeatable `--write`, `--write-tree`, `--read`, and `--read-tree` scopes. Preserve the returned lease ID, generation, task revision, heartbeat timestamp, and owner together as the exact fence; use current returned values for heartbeat, release, worktree, revocation, and recovery commands instead of reconstructing them from chat.
 
 For parallel implementation, use disjoint leases or an explicit detached task worktree. Create it outside the control checkout with `__SYNOD_COMMAND__ worktree create`, let only the leased worker edit it, then inspect `worktree status`, seal the proposal, transactionally integrate it, and move the exact revision to `REVIEW`. `worktree cleanup` is non-force and must run only after the detached checkout is clean; the proposal and registry remain durable.

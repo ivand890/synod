@@ -115,7 +115,7 @@ test("initializes canonical state, a hash-chained log, and a Markdown projection
   const { state, events } = await readOrchestration(directory);
   const markdown = await readFile(path.join(directory, ORCHESTRATION_STATUS_PATH), "utf8");
 
-  assert.equal(state.schemaVersion, 2);
+  assert.equal(state.schemaVersion, 3);
   assert.equal(state.lastEvent.sequence, 1);
   assert.equal(events.length, 1);
   const initialEvent = events[0];
@@ -1677,14 +1677,14 @@ test("stale orchestration locks are reclaimed while live locks fail closed", asy
   })}\n`;
   await writeFile(lockPath, staleLock, "utf8");
 
-  assert.equal((await readOrchestration(directory)).state.schemaVersion, 2);
+  assert.equal((await readOrchestration(directory)).state.schemaVersion, 3);
   await assert.rejects(readFile(lockPath, "utf8"), { code: "ENOENT" });
 
   await writeFile(lockPath, staleLock, "utf8");
   const claimId = createHash("sha256").update(staleLock, "utf8").digest("hex");
   const claimPath = path.join(directory, `.synod/orchestration-reclaim-${claimId}.lock`);
   await link(lockPath, claimPath);
-  assert.equal((await readOrchestration(directory)).state.schemaVersion, 2);
+  assert.equal((await readOrchestration(directory)).state.schemaVersion, 3);
   await assert.rejects(readFile(claimPath, "utf8"), { code: "ENOENT" });
 
   const liveLock = `${JSON.stringify({
@@ -1708,7 +1708,7 @@ test("an interrupted unpublished lock candidate never blocks orchestration", asy
   const candidatePath = path.join(directory, ".synod/orchestration-candidate-interrupted.lock");
   await writeFile(candidatePath, "{", "utf8");
 
-  assert.equal((await readOrchestration(directory)).state.schemaVersion, 2);
+  assert.equal((await readOrchestration(directory)).state.schemaVersion, 3);
   assert.equal(await readFile(candidatePath, "utf8"), "{");
 });
 
@@ -1792,7 +1792,7 @@ test("recovery replaces a matching partial event suffix from the pending mutatio
   const pendingLine = nextEvents.subarray(previousEvents.length, nextEvents.length - 1);
   const event = JSON.parse(pendingLine.toString("utf8"));
   const pending = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     event,
     state: JSON.parse(nextStateContent),
     status: nextStatus,

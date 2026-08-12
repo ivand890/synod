@@ -14,6 +14,7 @@ import type {
   TaskState
 } from "./orchestration.js";
 import { verifyRecoveryBundle } from "./recovery.js";
+import { effectiveHardTotalTokens } from "./budgets.js";
 
 export interface HandoffOptions {
   directory?: string;
@@ -41,6 +42,7 @@ export interface HandoffTask {
   recovery: OrchestrationTask["recovery"] | null;
   recoveryHistory: NonNullable<OrchestrationTask["recoveryHistory"]>;
   correctionPolicy: OrchestrationTask["correctionPolicy"];
+  budget: OrchestrationTask["budget"] | null;
   split: OrchestrationTask["split"] | null;
   splitFrom: string | null;
   acceptance: OrchestrationTask["acceptance"] & { unresolved: boolean };
@@ -126,6 +128,7 @@ function handoffTask(
     recovery: task.recovery || null,
     recoveryHistory: task.recoveryHistory || [],
     correctionPolicy: task.correctionPolicy,
+    budget: task.budget || null,
     split: task.split || null,
     splitFrom: task.splitFrom || null,
     acceptance: { ...task.acceptance, unresolved: task.acceptance.status !== "accepted" },
@@ -234,6 +237,9 @@ export function formatHandoff(result: HandoffResult): string {
   lines.push(`Focus tasks: ${result.focusTaskIds.length > 0 ? result.focusTaskIds.join(", ") : "none"}`);
   lines.push(`Durable artifacts: ${result.artifacts.proposals.verifiedBundles} task proposal bundle(s); ${result.artifacts.worktrees.records} worktree record(s), ${result.artifacts.worktrees.sealedProposals} worktree proposal(s)`);
   for (const task of result.tasks) {
+    const currentBudgetObservation = task.budget?.observations
+      .filter(item => item.policyRevision === task.budget!.policy.revision)
+      .at(-1);
     lines.push(`${task.id}: ${task.state} r${task.revision}; executor ${task.executor}`);
     lines.push(`  Objective: ${task.objective}`);
     lines.push(`  Dependencies: ${task.dependencies.length === 0 ? "none" : task.dependencies.map(item => `${item.id}=${item.state}`).join(", ")}`);
@@ -242,6 +248,7 @@ export function formatHandoff(result: HandoffResult): string {
     lines.push(`  Sealed proposal: ${task.proposal ? `${task.proposal.bundleId}; ${task.proposal.path}; owned paths ${task.proposal.ownedPaths.length > 0 ? task.proposal.ownedPaths.join(", ") : "none"}; excluded foreign paths ${task.proposal.excludedForeignPaths.length > 0 ? task.proposal.excludedForeignPaths.join(", ") : "none"}` : "none"}`);
     lines.push(`  Abandoned-owner recovery: ${task.recovery ? `${task.recovery.status}; prior owner ${task.recovery.endedLease.ownerThread} generation ${task.recovery.endedLease.generation}; proposal ${task.recovery.proposal?.bundleId || "not sealed"}; choices ${task.recovery.status === "PENDING" ? "resume, reassign, supersede" : task.recovery.decision?.action}; prior recoveries ${task.recoveryHistory.length}` : "none"}`);
     lines.push(`  Correction policy: ${task.correctionPolicy.used}/${task.correctionPolicy.limit} used; overrides ${task.correctionPolicy.overrides.length}`);
+    lines.push(`  Token budget: ${task.budget ? `${task.budget.thresholdStatus}; policy r${task.budget.policy.revision}; raw ${currentBudgetObservation?.totalTokens ?? "unobserved"}; soft ${task.budget.policy.softTotalTokens ?? "none"}; hard ${effectiveHardTotalTokens(task.budget) ?? "none"}; session ${task.budget.policy.rootSessionId}` : "none"}`);
     lines.push(`  Split: ${task.split ? `${task.split.replacements.join(", ")} (${task.split.reason})` : task.splitFrom ? `replacement for ${task.splitFrom}` : "none"}`);
     lines.push(`  Acceptance criteria: ${task.acceptance.criteria.join("; ")}`);
     lines.push(`  Acceptance: ${task.acceptance.status}; evidence ${evidenceLabel(task.evidence.acceptance)}`);

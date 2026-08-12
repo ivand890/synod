@@ -144,6 +144,7 @@ export interface UsageReport {
   threads: UsageThreadRow[];
   attribution: UsageAttributionRow[];
   total: TokenUsage & { threads: number };
+  tokenCounters: { resets: number };
   completeness: UsageCompleteness;
   coordination: CoordinationReport;
   interval?: UsageInterval;
@@ -1134,6 +1135,7 @@ export async function collectUsage({
     const coordinationInputs: CoordinationThreadInput[] = [];
     const coordinationOutputs: Array<{ threadId: string; outputs: NormalizedToolOutput[] }> = [];
     const completenessReasons = new Set<string>();
+    let tokenCounterResets = 0;
     if (!interval?.complete) completenessReasons.add(interval ? "open-canonical-interval" : "session-snapshot");
 
     for (const thread of selectedThreads) {
@@ -1183,6 +1185,7 @@ export async function collectUsage({
         ].includes(issue.kind))) completenessReasons.add("invalid-tool-call-records");
       }
       const observations = selectedTokens(timeline, interval);
+      tokenCounterResets += observations.filter(item => item.reset).length;
       const metadata = timelineAttribution(timeline, interval);
       const role = thread.id === root.id ? "supervisor" : metadata.role;
       const source = metadata.source;
@@ -1300,6 +1303,7 @@ export async function collectUsage({
       threads: threadRows,
       attribution,
       total,
+      tokenCounters: { resets: tokenCounterResets },
       coordination,
       completeness: {
         status: completenessReasons.size === 0 ? "complete" : "incomplete",
