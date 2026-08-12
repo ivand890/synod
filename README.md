@@ -2,6 +2,12 @@
 
 Synod installs a persistent, reviewed advisor loop for Codex projects. The selected model profile assigns supervision, atomic implementation, exploration, review, verification, and mechanical work while keeping the primary agent responsible for integration and final evidence.
 
+## Interactive cycle map
+
+[![Synod orchestration loop](docs/synod/assets/synod-cycle-loop.gif)](https://htmlpreview.github.io/?https://github.com/ivand890/synod/blob/main/docs/synod/synod-cycle.html)
+
+[Open the interactive trace](https://htmlpreview.github.io/?https://github.com/ivand890/synod/blob/main/docs/synod/synod-cycle.html).
+
 ## Install
 
 The default and supported bootstrap path is `pnpm dlx`:
