@@ -252,6 +252,18 @@ export interface RolloutActivityObservation {
   kind: RolloutActivityKind;
 }
 
+export type RolloutIssueKind =
+  | "malformed-record"
+  | "invalid-token-record"
+  | "missing-timestamp"
+  | "timestamp-regression";
+
+export interface RolloutIssue {
+  kind: RolloutIssueKind;
+  bytes: number;
+  observedAtMs?: number;
+}
+
 export interface RolloutTimeline {
   source: string;
   role: string;
@@ -268,6 +280,7 @@ export interface RolloutTimeline {
   activities: RolloutActivityObservation[];
   contexts: NonNullable<UsageThreadRow["currentContext"]>[];
   currentContext?: UsageThreadRow["currentContext"];
+  issues: RolloutIssue[];
   malformedRecords: number;
   invalidTokenRecords: number;
   missingTimestamps: number;
@@ -340,6 +353,7 @@ export async function readRolloutTimeline(
   const markers: RolloutTimeline["markers"] = [];
   const activity = { turnsStarted: 0, turnsCompleted: 0, turnsAborted: 0, compactions: 0 };
   const activities: RolloutActivityObservation[] = [];
+  const issues: RolloutIssue[] = [];
   const hasher = createHash("sha256");
   let bytes = 0;
   let buffer = Buffer.alloc(0);
@@ -369,15 +383,20 @@ export async function readRolloutTimeline(
       event = parseJson(content);
     } catch {
       malformedRecords += 1;
+      issues.push({ kind: "malformed-record", bytes });
       return;
     }
     if (!isRecord(event)) {
       malformedRecords += 1;
+      issues.push({ kind: "malformed-record", bytes });
       return;
     }
     const observed = timestamp(event.timestamp);
     if (observed) {
-      if (observed.milliseconds < previousTimestamp) timestampRegressions += 1;
+      if (observed.milliseconds < previousTimestamp) {
+        timestampRegressions += 1;
+        issues.push({ kind: "timestamp-regression", bytes, observedAtMs: observed.milliseconds });
+      }
       previousTimestamp = Math.max(previousTimestamp, observed.milliseconds);
       lastObservedAt = observed.iso;
       markers.push({
@@ -387,7 +406,10 @@ export async function readRolloutTimeline(
         observedAt: observed.iso,
         observedAtMs: observed.milliseconds
       });
-    } else missingTimestamps += 1;
+    } else {
+      missingTimestamps += 1;
+      issues.push({ kind: "missing-timestamp", bytes });
+    }
 
     const payload = isRecord(event.payload) ? event.payload : undefined;
     if (event.type === "session_meta" && payload && !metadata) {
@@ -429,9 +451,21 @@ export async function readRolloutTimeline(
     const raw = isRecord(info?.total_token_usage) ? info.total_token_usage : undefined;
     if (!raw) {
       invalidTokenRecords += 1;
+      issues.push({
+        kind: "invalid-token-record",
+        bytes,
+        ...(observed ? { observedAtMs: observed.milliseconds } : {})
+      });
       return;
     }
-    if (!validUsageCounters(raw)) invalidTokenRecords += 1;
+    if (!validUsageCounters(raw)) {
+      invalidTokenRecords += 1;
+      issues.push({
+        kind: "invalid-token-record",
+        bytes,
+        ...(observed ? { observedAtMs: observed.milliseconds } : {})
+      });
+    }
     const current = normalizeUsage(raw);
     const delta = usageDelta(current, previous);
     previous = current;
@@ -486,6 +520,7 @@ export async function readRolloutTimeline(
     activities,
     contexts,
     ...(currentContext ? { currentContext } : {}),
+    issues,
     malformedRecords,
     invalidTokenRecords,
     missingTimestamps,
@@ -664,9 +699,15 @@ function sameCheckpoint(left: GitCheckpoint, right: GitCheckpoint): boolean {
 }
 
 function checkpointBoundary(event: OrchestrationEvent, checkpoint: GitCheckpoint): UsageBoundary {
+  const captured = timestamp(checkpoint.capturedAt);
+  if (!captured) {
+    throw new SynodError(ERROR_CODES.USAGE_INTERVAL_INVALID, "The acknowledged checkpoint has an invalid capture timestamp.", {
+      details: { capturedAt: checkpoint.capturedAt }
+    });
+  }
   return {
     kind: "checkpoint",
-    timestamp: eventTime(event),
+    timestamp: captured.iso,
     event: eventIdentity(event),
     checkpoint: {
       fingerprint: checkpoint.worktree.fingerprint,
@@ -788,7 +829,6 @@ function timelineIdentityAt(timeline: RolloutTimeline, endMs: number | undefined
   let selected: RolloutTimeline["markers"][number] | undefined;
   for (const marker of timeline.markers) {
     if (marker.observedAtMs <= endMs) selected = marker;
-    else break;
   }
   return selected
     ? { bytes: selected.bytes, sha256: selected.sha256, lastObservedAt: selected.observedAt }
@@ -797,19 +837,25 @@ function timelineIdentityAt(timeline: RolloutTimeline, endMs: number | undefined
 
 function selectedTokens(timeline: RolloutTimeline, interval: UsageInterval | undefined): RolloutTokenObservation[] {
   if (!interval) return timeline.tokens;
-  if (timeline.malformedRecords > 0 || timeline.invalidTokenRecords > 0 || timeline.missingTimestamps > 0
-    || timeline.timestampRegressions > 0) {
+  const endMs = Date.parse(interval.end.timestamp);
+  const prefix = timelineIdentityAt(timeline, endMs);
+  const issues = timeline.issues.filter(issue => issue.bytes <= prefix.bytes);
+  if ((prefix.bytes === 0 && timeline.identity.bytes > 0 && timeline.markers.length === 0) || issues.length > 0) {
+    const counts = {
+      malformedRecords: issues.filter(issue => issue.kind === "malformed-record").length,
+      invalidTokenRecords: issues.filter(issue => issue.kind === "invalid-token-record").length,
+      missingTimestamps: issues.filter(issue => issue.kind === "missing-timestamp").length,
+      timestampRegressions: issues.filter(issue => issue.kind === "timestamp-regression").length
+    };
     throw new SynodError(ERROR_CODES.ROLLOUT_INVALID, "An exact usage interval requires a complete, ordered rollout timeline.", {
       details: {
-        malformedRecords: timeline.malformedRecords,
-        invalidTokenRecords: timeline.invalidTokenRecords,
-        missingTimestamps: timeline.missingTimestamps,
-        timestampRegressions: timeline.timestampRegressions
+        ...counts,
+        prefixBytes: prefix.bytes,
+        rolloutBytes: timeline.identity.bytes
       }
     });
   }
   const startMs = Date.parse(interval.start.timestamp);
-  const endMs = Date.parse(interval.end.timestamp);
   return timeline.tokens.filter(item => item.observedAtMs !== undefined
     && item.observedAtMs > startMs && item.observedAtMs <= endMs);
 }

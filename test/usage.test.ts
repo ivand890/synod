@@ -283,7 +283,13 @@ test("reports an exact task interval with marginal reset usage and stable rollou
   assert.match(formatUsageReport(first), /Thread attribution:/);
 
   const original = await readFile(rootPath, "utf8");
-  await writeFile(rootPath, `${original}${timedEvent("2026-08-12T12:07:00.000Z", "session_meta", {
+  await writeFile(rootPath, `${original}${timedEvent("2026-08-12T12:07:00.000Z", "turn_context", {
+    model: "gpt-5.6-luna"
+  })}\n{not-json}\n${event("event_msg", { type: "task_complete" })}\n${timedEvent(
+    "2026-08-12T12:08:00.000Z",
+    "event_msg",
+    { type: "token_count", info: { total_token_usage: { input_tokens: "invalid" } } }
+  )}\n${timedEvent("2026-08-12T12:07:30.000Z", "session_meta", {
     source: "vscode", agent_role: "SECRET_AFTER_INTERVAL"
   })}\n`, "utf8");
   root.updatedAt = "2026-08-12T12:08:00.000Z";
@@ -386,6 +392,43 @@ test("resolves exact event and open checkpoint intervals against descendant crea
     status: "incomplete",
     reasons: ["open-canonical-interval"]
   });
+});
+
+test("starts checkpoint usage at the checkpoint capture time rather than its introducing event", async () => {
+  const directory = await temporaryDirectory();
+  const eventAt = "2026-08-12T12:00:00.000Z";
+  const checkpointAt = "2026-08-12T12:00:05.000Z";
+  const times = [eventAt, checkpointAt];
+  await initProject({ directory }, { clock: () => times.shift() || checkpointAt });
+  const canonical = await readOrchestration(directory);
+  assert.equal(canonical.events[0]?.timestamp, eventAt);
+  assert.equal(canonical.state.checkpoint.capturedAt, checkpointAt);
+  const rootPath = await rollout(directory, "checkpoint-boundary", [
+    timedEvent("2026-08-12T12:00:01.000Z", "turn_context", { model: "gpt-5.6-sol" }),
+    timedEvent("2026-08-12T12:00:03.000Z", "event_msg", { type: "token_count", info: { total_token_usage: {
+      input_tokens: 8, cached_input_tokens: 2, output_tokens: 2,
+      reasoning_output_tokens: 1, total_tokens: 10
+    } } }),
+    timedEvent("2026-08-12T12:00:06.000Z", "event_msg", { type: "token_count", info: { total_token_usage: {
+      input_tokens: 16, cached_input_tokens: 4, output_tokens: 4,
+      reasoning_output_tokens: 2, total_tokens: 20
+    } } })
+  ]);
+  const root = {
+    id: "checkpoint-root", parentThreadId: null, path: rootPath, cwd: directory,
+    createdAt: "2026-08-12T11:59:00.000Z", updatedAt: "2026-08-12T12:00:07.000Z"
+  };
+
+  const report = await collectUsage({
+    cwd: directory,
+    sinceCheckpoint: true,
+    clientFactory: () => usageClient(root),
+    clock: () => "2026-08-12T12:01:00.000Z"
+  });
+
+  assert.equal(report.interval?.start.kind, "checkpoint");
+  assert.equal(report.interval?.start.timestamp, checkpointAt);
+  assert.equal(report.total.totalTokens, 10);
 });
 
 test("labels historical timestamp gaps incomplete and fails closed for a canonical interval", async () => {
