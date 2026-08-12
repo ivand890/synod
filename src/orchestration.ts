@@ -2998,8 +2998,10 @@ export async function setTaskBudgetPolicy({
     const task = assertCanonicalState(state, expected, taskId);
     if (replace && !task.budget) throw new SynodError(ERROR_CODES.BUDGET_NOT_CONFIGURED, `Task ${taskId} has no budget to replace.`);
     if (!replace && task.budget) throw new SynodError(ERROR_CODES.BUDGET_INVALID, `Task ${taskId} already has a budget; use an explicit replacement.`);
-    const inheritedSplitResolution = Boolean(task.splitFrom && latestBudgetDecision(task)?.action === "split");
-    if (task.budget?.thresholdStatus === "decision-required" && !inheritedSplitResolution) {
+    const structuralDecision = latestBudgetDecision(task)?.action;
+    const authorizedPolicyReplacement = structuralDecision === "rotate"
+      || Boolean(task.splitFrom && structuralDecision === "split");
+    if (task.budget?.thresholdStatus === "decision-required" && !authorizedPolicyReplacement) {
       throw new SynodError(ERROR_CODES.BUDGET_DECISION_REQUIRED, `Task ${taskId} requires a decision for its latest hard-budget observation before policy replacement.`);
     }
     const prior = task.budget;

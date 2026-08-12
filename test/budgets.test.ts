@@ -321,6 +321,41 @@ test("records a hard crossing, gates execution, and resumes only through an exac
   );
 });
 
+test("a rotate decision authorizes policy and session replacement", async () => {
+  const directory = await project();
+  await task(directory);
+  const { start } = await configure(directory);
+  const observed = await observeTaskBudget({ directory, id: "T-BUDGET" }, {
+    usageCollector: collector(usageReport(start, 120))
+  });
+  await decideTaskBudget({
+    directory,
+    id: "T-BUDGET",
+    observation: observed.observation.event.id,
+    action: "rotate",
+    reason: "Continue in a fresh root session",
+    evidence: ["handoff:rotation"]
+  });
+  const rotationStart = (await readOrchestration(directory)).events.at(-1)!;
+  const replaced = await setTaskBudgetPolicy({
+    directory,
+    id: "T-BUDGET",
+    rootSessionId: "rotated-root-session",
+    startEvent: rotationStart.id,
+    hardTotalTokens: 100,
+    reason: "Bind the rotated execution phase",
+    evidence: ["handoff:rotation"],
+    replace: true
+  });
+
+  assert.equal(replaced.policy.revision, 2);
+  assert.equal(replaced.task.budget?.thresholdStatus, "within");
+  assert.equal(replaced.task.budget?.policyHistory[0]?.rootSessionId, "root-session");
+  assert.equal(replaced.task.budget?.observations[0]?.totalTokens, 120);
+  assert.equal(replaced.task.budget?.decisions[0]?.action, "rotate");
+  await transitionTask({ directory, id: "T-BUDGET", to: "READY", revision: 0 });
+});
+
 test("hard enforcement blocks lease renewal while preserving the delivery and review path", async () => {
   const directory = await project();
   await task(directory);
