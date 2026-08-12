@@ -105,6 +105,33 @@ test("attributes cumulative token deltas to the active model", async () => {
   });
 });
 
+test("does not let an invalid token record corrupt the next cumulative delta", async () => {
+  const directory = await temporaryDirectory();
+  const file = await rollout(directory, "invalid-middle", [
+    event("turn_context", { model: "gpt-5.6-sol" }),
+    event("event_msg", { type: "token_count", info: { total_token_usage: {
+      input_tokens: 100, cached_input_tokens: 20, output_tokens: 10,
+      reasoning_output_tokens: 4, total_tokens: 110
+    } } }),
+    event("event_msg", { type: "token_count", info: { total_token_usage: {
+      input_tokens: "invalid", cached_input_tokens: 25, output_tokens: 12,
+      reasoning_output_tokens: 5, total_tokens: 125
+    } } }),
+    event("event_msg", { type: "token_count", info: { total_token_usage: {
+      input_tokens: 150, cached_input_tokens: 30, output_tokens: 15,
+      reasoning_output_tokens: 5, total_tokens: 165
+    } } })
+  ]);
+
+  const timeline = await readRolloutTimeline(file);
+
+  assert.equal(timeline.invalidTokenRecords, 1);
+  assert.deepEqual(timeline.tokens.map(item => [item.epoch, item.reset, item.usage.totalTokens]), [
+    [0, false, 110],
+    [0, false, 55]
+  ]);
+});
+
 test("normalizes rollout role, reroutes, counter epochs, activity, and context without retaining content", async () => {
   const directory = await temporaryDirectory();
   const file = await rollout(directory, "normalized", [

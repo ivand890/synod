@@ -471,6 +471,7 @@ export async function readRolloutTimeline(
         bytes,
         ...(observed ? { observedAtMs: observed.milliseconds } : {})
       });
+      return;
     }
     const current = normalizeUsage(raw);
     const delta = usageDelta(current, previous);
