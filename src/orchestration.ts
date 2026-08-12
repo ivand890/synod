@@ -1168,7 +1168,7 @@ export async function createOrchestrationSchemaMigrationFiles(
     payload: {
       fromSchemaVersion: PREVIOUS_ORCHESTRATION_SCHEMA_VERSION,
       toSchemaVersion: ORCHESTRATION_SCHEMA_VERSION,
-      preservedEventCount: events.length + appended.length
+      preservedEventCount: events.length
     },
     previousHash: prior.eventHash,
     state: nextCore
@@ -1807,6 +1807,7 @@ function validateEventLog(events: unknown[]): OrchestrationEvent[] {
   let twoToThreeSeen = false;
   const emptyLeaseBaselines = leaseBaselinesReference(createLeaseBaselinesLedger());
   const validated: OrchestrationEvent[] = [];
+  const bySequence = new Map<number, OrchestrationEvent>();
   for (const [index, event] of events.entries()) {
     const legacy = isLegacyOrchestrationEvent(event);
     const schemaTwo = isSchemaTwoOrchestrationEvent(event);
@@ -1851,9 +1852,8 @@ function validateEventLog(events: unknown[]): OrchestrationEvent[] {
         lastEvent: { sequence: event.sequence, id: event.id, hash: event.eventHash }
       });
     }
+    bySequence.set(event.sequence, event as unknown as OrchestrationEvent);
     if (current) {
-      const knownEvents = [...validated, event as OrchestrationEvent];
-      const bySequence = new Map(knownEvents.map(item => [item.sequence, item]));
       for (const task of Object.values(event.state.tasks)) {
         if (!task.budget) continue;
         for (const policy of [...task.budget.policyHistory, task.budget.policy]) {
@@ -3133,7 +3133,7 @@ export async function observeTaskBudget({
         threadId: item.threadId,
         bytes: item.rollout.bytes,
         sha256: item.rollout.sha256
-      })).sort((left, right) => left.threadId.localeCompare(right.threadId))
+      })).sort((left, right) => left.threadId < right.threadId ? -1 : left.threadId > right.threadId ? 1 : 0)
     };
     currentBudget.observations.push(observation);
     currentBudget.thresholdStatus = observation.thresholdStatus;

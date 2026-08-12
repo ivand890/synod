@@ -728,6 +728,10 @@ test("upgrade preserves the schema-1 event prefix and fences migrated in-flight 
   const canonical = await readOrchestration(directory);
   assert.equal(canonical.state.schemaVersion, 3);
   assert.equal(canonical.events.at(-1)?.type, "orchestration.migrated");
+  assert.deepEqual(
+    canonical.events.slice(-2).map(event => event.payload.preservedEventCount),
+    [legacyEvents.length, legacyEvents.length]
+  );
   assert.equal(canonical.state.tasks["T-MIGRATE"]?.preLease, true);
   assert.equal(canonical.state.tasks["T-MIGRATE-REVIEW"]?.preLease, true);
   await assert.rejects(

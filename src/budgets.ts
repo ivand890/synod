@@ -241,7 +241,7 @@ function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
       .map(([key, item]) => `${JSON.stringify(key)}:${stable(item)}`)
       .join(",")}}`;
   }
@@ -256,7 +256,7 @@ export function budgetReportHash(report: UsageReport): string {
     total: report.total,
     tokenCounters: report.tokenCounters,
     rollouts: report.threads.map(item => ({ threadId: item.threadId, rollout: item.rollout }))
-      .sort((left, right) => left.threadId.localeCompare(right.threadId))
+      .sort((left, right) => left.threadId < right.threadId ? -1 : left.threadId > right.threadId ? 1 : 0)
   };
   return `sha256:${createHash("sha256").update(stable(normalized), "utf8").digest("hex")}`;
 }
