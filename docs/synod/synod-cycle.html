@@ -658,7 +658,7 @@
         .shell { width: 100%; padding: 0; }
         .orchestrator { box-shadow: none; }
         .trace-viewport { overflow: visible; }
-        .trace-board { min-width: 0; }
+        .trace-board { min-width: 0 !important; }
         .playhead { display: none; }
       }
 
@@ -805,7 +805,7 @@
           ["api-reviewed", "Accept", "API r1 is accepted", "UI remains active; test findings persist.", "ACCEPTED · API r1", "Preserve review and findings."],
           ["ui-delivery", "Delivery", "UI ships", "Initial workers end; their evidence remains.", "REVIEW · UI r1", "Receive UI r1."],
           ["ui-review", "Review", "Review UI r1", "Run an independent read-only review.", "REVIEW · UI r1", "Assign UI review."],
-          ["verify", "Verify", "Verify the integrated checkout", "Acceptance and verification are separate gates.", "VERIFIED · r1", "Integrate and verify."],
+          ["verify", "Verify", "Verify the integrated checkout", "Acceptance and verification are separate gates.", "ACCEPTED · r1", "Integrate and verify."],
           ["checkpoint", "Checkpoint", "Persist the cycle", "Threads end; evidence remains.", "DONE · r1", "Record Git state."]
         ];
 
@@ -814,10 +814,10 @@
           ["correction", "Correction", "API review finds an issue", "Preserve r1 and open one bounded correction.", "ACTIVE · correction 1", "Open correction round 1."],
           ["api-gen2", "Generation 2", "Spawn API generation 2", "UI continues while a new lease fences the fix.", "ACTIVE · API gen 2", "Assign the correction."],
           ["api-gen2-delivery", "Delivery", "API generation 2 ships r2", "Seal r2; keep r1 as history.", "REVIEW · API r2", "Receive API r2."],
-          ["api-review2", "Review", "Review API r2", "Validate the fix while UI continues.", "ACCEPTED · API r2", "Assign API r2 review."],
+          ["api-review2", "Review", "Review API r2", "Validate the fix while UI continues.", "REVIEW · API r2", "Assign API r2 review."],
           ["ui-delivery", "Delivery", "UI ships", "API r2 and findings are already preserved.", "REVIEW · UI r1", "Receive UI r1."],
           ["ui-review", "Review", "Review UI r1", "Review UI independently before integration.", "REVIEW · UI r1", "Assign UI review."],
-          ["verify", "Verify", "Verify the corrected checkout", "Check API r2, UI r1, and findings.", "VERIFIED · mixed revisions", "Integrate and verify."],
+          ["verify", "Verify", "Verify the corrected checkout", "Check API r2, UI r1, and findings.", "ACCEPTED · API r2 / UI r1", "Integrate and verify."],
           ["checkpoint", "Checkpoint", "Persist the full chain", "Keep historical r1 and corrected r2.", "DONE · API r2 / UI r1", "Record Git state."]
         ];
 
@@ -948,7 +948,7 @@
           const axis = $("#axis-track");
           axis.style.setProperty("--frame-count", current.frames.length);
           axis.innerHTML = current.frames.map((item, index) => `
-            <button class="axis-tick ${index === state.index ? "active" : ""} ${index < state.index ? "complete" : ""}" type="button" data-time="${index}" aria-current="${index === state.index ? "step" : "false"}">t=${String(index).padStart(2, "0")}</button>
+            <button class="axis-tick ${index === state.index ? "active" : ""} ${index < state.index ? "complete" : ""}" id="axis-${index}" type="button" data-time="${index}" aria-current="${index === state.index ? "step" : "false"}">t=${String(index).padStart(2, "0")}</button>
           `).join("");
           $$(".axis-tick", axis).forEach(button => button.addEventListener("click", () => setTime(Number(button.dataset.time), true)));
         }
@@ -1047,22 +1047,22 @@
           const slots = $("#mobile-slots");
           slots.innerHTML = ["slot1", "slot2", "slot3"].map((laneId, index) => {
             const item = displayNodeForLane(laneId);
-            if (!item) return `<button class="mobile-slot" type="button" disabled><span class="slot-number">${index + 1}</span><span><strong>Open slot</strong><small>Available for another agent</small></span><span class="slot-status">idle</span></button>`;
+            if (!item) return `<button class="mobile-slot" id="mobile-slot-${index + 1}" type="button" disabled><span class="slot-number">${index + 1}</span><span><strong>Open slot</strong><small>Available for another agent</small></span><span class="slot-status">idle</span></button>`;
             const status = nodeState(item);
-            return `<button class="mobile-slot ${status} ${item.correction ? "correction" : ""} ${changedNodes.has(item.id) ? "transitioning" : ""}" type="button" data-node="${item.id}"><span class="slot-number">${index + 1}</span><span><strong>${item.label}</strong><small>${item.subtitle}</small></span><span class="slot-status">${status === "active" ? "active" : "done"}</span></button>`;
+            return `<button class="mobile-slot ${status} ${item.correction ? "correction" : ""} ${changedNodes.has(item.id) ? "transitioning" : ""}" id="mobile-slot-${index + 1}" type="button" data-node="${item.id}"><span class="slot-number">${index + 1}</span><span><strong>${item.label}</strong><small>${item.subtitle}</small></span><span class="slot-status">${status === "active" ? "active" : "done"}</span></button>`;
           }).join("");
           $$(".mobile-slot[data-node]", slots).forEach(button => button.addEventListener("click", () => selectNode(button.dataset.node, true)));
 
           const artifacts = scenario().nodes.filter(item => item.lane === "durable" && state.index >= item.start);
           $("#artifact-count").textContent = `${artifacts.length} ${artifacts.length === 1 ? "artifact" : "artifacts"}`;
           $("#mobile-artifacts").innerHTML = artifacts.length
-            ? artifacts.map(item => `<button class="mobile-artifact ${changedNodes.has(item.id) ? "transitioning" : ""}" type="button" data-node="${item.id}">${item.label}</button>`).join("")
+            ? artifacts.map(item => `<button class="mobile-artifact ${changedNodes.has(item.id) ? "transitioning" : ""}" id="mobile-artifact-${item.id}" type="button" data-node="${item.id}">${item.label}</button>`).join("")
             : `<span class="mobile-artifact" style="border-color:var(--line);background:var(--surface);color:var(--ink-faint)">No evidence yet</span>`;
           $$(".mobile-artifact[data-node]").forEach(button => button.addEventListener("click", () => selectNode(button.dataset.node, true)));
 
           const timeline = $("#mobile-timeline");
           timeline.style.setProperty("--frame-count", scenario().frames.length);
-          timeline.innerHTML = scenario().frames.map((item, index) => `<button class="mobile-time ${index === state.index ? "active" : ""} ${index < state.index ? "complete" : ""}" type="button" data-time="${index}" aria-current="${index === state.index ? "step" : "false"}">t${String(index).padStart(2, "0")}</button>`).join("");
+          timeline.innerHTML = scenario().frames.map((item, index) => `<button class="mobile-time ${index === state.index ? "active" : ""} ${index < state.index ? "complete" : ""}" id="mobile-time-${index}" type="button" data-time="${index}" aria-current="${index === state.index ? "step" : "false"}">t${String(index).padStart(2, "0")}</button>`).join("");
           $$(".mobile-time", timeline).forEach(button => button.addEventListener("click", () => setTime(Number(button.dataset.time), true)));
           const active = $(".mobile-time.active", timeline);
           if (active) timeline.scrollTo({ left: Math.max(0, active.offsetLeft - (timeline.clientWidth - active.offsetWidth) / 2), behavior: reducedMotion.matches ? "auto" : "smooth" });
@@ -1096,6 +1096,7 @@
         }
 
         function render({ announce = false } = {}) {
+          const activeId = document.activeElement?.id;
           const current = scenario();
           state.index = Math.max(0, Math.min(state.index, current.frames.length - 1));
           const item = frame();
@@ -1133,6 +1134,10 @@
           renderInspector();
           renderRelationships();
           syncUrl();
+          if (activeId) {
+            const restored = document.getElementById(activeId);
+            if (restored && restored !== document.activeElement) restored.focus({ preventScroll: true });
+          }
           const eventPanel = $(".current-event");
           eventPanel.classList.remove("is-changing");
           if (stepChanged && !reducedMotion.matches) {
@@ -1166,16 +1171,22 @@
           render({ announce });
         }
 
+        function advance() {
+          state.index = state.index >= scenario().frames.length - 1 ? 0 : state.index + 1;
+          state.focus = suggestedFocus();
+          render({ announce: true });
+        }
+
+        function schedulePlayback({ advanceImmediately = true } = {}) {
+          if (state.timer) window.clearInterval(state.timer);
+          if (advanceImmediately) advance();
+          state.timer = window.setInterval(advance, reducedMotion.matches ? 3600 : 2400);
+        }
+
         function togglePlay() {
           if (state.playing) return pause();
           state.playing = true;
-          const advance = () => {
-            state.index = state.index >= scenario().frames.length - 1 ? 0 : state.index + 1;
-            state.focus = suggestedFocus();
-            render({ announce: true });
-          };
-          advance();
-          state.timer = window.setInterval(advance, reducedMotion.matches ? 3600 : 2400);
+          schedulePlayback();
         }
 
         $("#previous").addEventListener("click", () => { pause(false); setTime(state.index - 1, true); });
@@ -1198,10 +1209,18 @@
         });
 
         document.addEventListener("keydown", event => {
-          if (event.target.matches("button, input, select, textarea")) return;
+          if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+          const target = event.target instanceof Element ? event.target : null;
+          if (!target || target.matches("button, input, select, textarea")) return;
+          if (target.closest("#trace-viewport") && event.key !== " ") return;
           if (event.key === "ArrowLeft") $("#previous").click();
           if (event.key === "ArrowRight") $("#next").click();
           if (event.key === " ") { event.preventDefault(); $("#play").click(); }
+        });
+
+        reducedMotion.addEventListener("change", () => {
+          render();
+          if (state.playing) schedulePlayback({ advanceImmediately: false });
         });
 
         const resizeObserver = new ResizeObserver(() => window.requestAnimationFrame(() => {

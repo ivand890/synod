@@ -4,9 +4,9 @@ Synod installs a persistent, reviewed advisor loop for Codex projects. The selec
 
 ## Interactive cycle map
 
-[![Synod orchestration loop](docs/synod/assets/synod-cycle-loop.gif)](docs/synod/synod-cycle.html)
+[![Synod orchestration loop](docs/synod/assets/synod-cycle-loop.gif)](https://htmlpreview.github.io/?https://github.com/ivand890/synod/blob/main/docs/synod/synod-cycle.html)
 
-[Open the interactive trace](docs/synod/synod-cycle.html).
+[Open the interactive trace](https://htmlpreview.github.io/?https://github.com/ivand890/synod/blob/main/docs/synod/synod-cycle.html).
 
 ## Install
 
