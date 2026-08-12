@@ -182,6 +182,28 @@ synod task split T-001 --replacement T-001A --replacement T-001B \
 
 Replacement tasks must already exist. Split supersedes the exhausted parent and records the relationship without accepting either replacement.
 
+### Local token budgets
+
+Task budgets are optional, use raw total tokens, and bind enforcement to one root session plus one exact canonical start event:
+
+```bash
+synod budget set T-001 --session thread:019f... --since-event 12 \
+  --soft-tokens 100000 --hard-tokens 150000 \
+  --reason "bound this implementation phase" --evidence roadmap:SYN-092A
+synod budget report T-001
+synod budget observe T-001
+```
+
+`budget report` is read-only. `budget observe` records the normalized report and its rollout provenance. A soft crossing warns; a recorded hard crossing requires one exact supervisor decision without changing task state, acceptance, verification, or lease ownership:
+
+```bash
+synod budget decide T-001 --observation <event-id> --decision continue \
+  --additional-tokens 25000 --reason "finish the bounded correction" \
+  --evidence review:budget
+```
+
+While that decision is pending, Synod rejects new leases, heartbeats, resume/reassignment, correction approval, and transitions to `READY` or `ACTIVE`. Delivery, review, acceptance, verification, revocation, status, handoff, split, and supersession remain available. `split`, `supersede`, and `rotate` decisions do not grant more execution; the corresponding structural action must complete. Rebinding a policy uses `synod budget replace` and preserves every prior policy, observation, decision, and raw total.
+
 Task mutations do not move the canonical checkpoint, so they cannot silently accept repository drift. Only `synod checkpoint` changes the acknowledged branch, `HEAD`, and working-tree fingerprint.
 
 Read actual state and compare its last checkpoint with the current repository:

@@ -281,6 +281,27 @@ test("lease commands select the pinned runtime from their explicit project", asy
   assert.deepEqual(delegated, { version: packageVersion, args });
 });
 
+test("budget commands select the pinned runtime from their explicit project", async () => {
+  const callerDirectory = await temporaryProject();
+  const projectDirectory = await temporaryProject();
+  await installLocalRuntime(projectDirectory, { runPnpm: fakePnpmInstall });
+  let delegated;
+  const args = ["budget", "report", "T-001", "--cwd", projectDirectory, "--json"];
+
+  const result = await prepareLocalRuntime(args, {
+    cwd: callerDirectory,
+    currentRuntime: async () => false,
+    executor(localRuntime, delegatedArgs) {
+      delegated = { version: localRuntime.descriptor.runtimeVersion, args: delegatedArgs };
+      return 0;
+    }
+  });
+
+  assert.equal(result.action, "delegate");
+  assert.equal(result.targetDirectory, projectDirectory);
+  assert.deepEqual(delegated, { version: packageVersion, args });
+});
+
 test("worktree commands select the pinned runtime from their control project", async () => {
   const callerDirectory = await temporaryProject();
   const projectDirectory = await temporaryProject();

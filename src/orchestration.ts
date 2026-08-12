@@ -68,9 +68,24 @@ import {
   type TaskLease,
   type TaskProposalReference
 } from "./leases.js";
+import {
+  collectTaskBudgetReport,
+  effectiveHardTotalTokens,
+  isTaskBudget,
+  thresholdStatus,
+  type BudgetDecisionAction,
+  type BudgetMutationIdentity,
+  type CanonicalEventIdentity,
+  type TaskBudget,
+  type TaskBudgetObservation,
+  type TaskBudgetPolicy,
+  type TaskBudgetReport
+} from "./budgets.js";
+import type { UsageClient } from "./usage.js";
 
 export const LEGACY_ORCHESTRATION_SCHEMA_VERSION = 1;
-export const ORCHESTRATION_SCHEMA_VERSION = 2;
+export const PREVIOUS_ORCHESTRATION_SCHEMA_VERSION = 2;
+export const ORCHESTRATION_SCHEMA_VERSION = 3;
 export const ORCHESTRATION_STATE_PATH = ".synod/state.json";
 export const ORCHESTRATION_EVENTS_PATH = ".synod/events.jsonl";
 export const ORCHESTRATION_STATUS_PATH = "docs/synod/STATUS.md";
@@ -191,6 +206,7 @@ export interface OrchestrationTask {
   };
   splitFrom?: string;
   preLease?: true;
+  budget?: TaskBudget;
 }
 
 export interface OrchestrationLastEvent {
@@ -234,9 +250,45 @@ export interface OrchestrationEvent {
 }
 
 type LegacyOrchestrationTask = Omit<
-  OrchestrationTask,
+  SchemaTwoOrchestrationTask,
   "correctionPolicy" | "leaseGeneration" | "lease" | "proposal" | "recovery" | "recoveryHistory" | "split" | "splitFrom" | "preLease"
 >;
+
+type SchemaTwoOrchestrationTask = Omit<OrchestrationTask, "budget">;
+
+interface SchemaTwoOrchestrationStateCore {
+  schemaVersion: typeof PREVIOUS_ORCHESTRATION_SCHEMA_VERSION;
+  templateVersion: string;
+  createdAt: string;
+  updatedAt: string;
+  checkpoint: GitCheckpoint;
+  leaseBaselines: LeaseBaselineReference;
+  taskOrder: string[];
+  tasks: Record<string, SchemaTwoOrchestrationTask>;
+  evidenceCounter: number;
+}
+
+interface SchemaTwoOrchestrationState extends SchemaTwoOrchestrationStateCore {
+  lastEvent: OrchestrationLastEvent;
+}
+
+interface SchemaTwoOrchestrationEvent {
+  schemaVersion: typeof PREVIOUS_ORCHESTRATION_SCHEMA_VERSION;
+  sequence: number;
+  id: string;
+  timestamp: string;
+  type: string;
+  actor: string;
+  taskId?: string;
+  fromState?: TaskState;
+  toState?: TaskState;
+  revision?: number;
+  checkpoint: GitCheckpoint;
+  payload: Record<string, unknown>;
+  previousHash: string | null;
+  state: SchemaTwoOrchestrationStateCore;
+  eventHash: string;
+}
 
 interface LegacyOrchestrationStateCore {
   schemaVersion: typeof LEGACY_ORCHESTRATION_SCHEMA_VERSION;
@@ -278,6 +330,8 @@ export interface OrchestrationDependencies extends TransactionHooks, Record<stri
   clock?: Clock;
   gitRunner?: GitRunner;
   checkpointOverlay?: Map<string, string>;
+  usageClientFactory?: () => UsageClient;
+  usageCollector?: Parameters<typeof collectTaskBudgetReport>[0]["collector"];
 }
 
 interface EventMetadata {
@@ -297,6 +351,7 @@ interface MutationContext {
   acknowledgedSnapshot?: CheckpointSnapshot;
   leaseBaselines: LeaseBaselinesLedger;
   nextSequence: number;
+  event: BudgetMutationIdentity;
 }
 
 interface MutationResult<Result extends Record<string, unknown>> {
@@ -365,6 +420,36 @@ const TRANSITIONS: Readonly<Record<TaskState, ReadonlySet<TaskState>>> = Object.
   SUPERSEDED: new Set<TaskState>()
 });
 
+function latestBudgetDecision(task: OrchestrationTask): TaskBudget["decisions"][number] | undefined {
+  const budget = task.budget;
+  const observation = budget?.observations.filter(item => item.policyRevision === budget.policy.revision).at(-1);
+  if (!budget || !observation) return undefined;
+  return budget.decisions.find(item => item.observation.sequence === observation.event.sequence
+    && item.observation.id === observation.event.id);
+}
+
+function assertBudgetAllowsExecution(task: OrchestrationTask, action: string): void {
+  if (task.budget?.thresholdStatus !== "decision-required") return;
+  throw new SynodError(ERROR_CODES.BUDGET_DECISION_REQUIRED, `Task ${task.id} requires a supervisor decision before ${action}.`, {
+    details: {
+      taskId: task.id,
+      action,
+      policyRevision: task.budget.policy.revision,
+      observation: task.budget.observations.at(-1)?.event
+    }
+  });
+}
+
+function assertBudgetStructuralDecision(task: OrchestrationTask, action: "split" | "supersede"): void {
+  if (task.budget?.thresholdStatus !== "decision-required") return;
+  const decision = latestBudgetDecision(task);
+  if (decision?.action !== action) {
+    throw new SynodError(ERROR_CODES.BUDGET_DECISION_REQUIRED, `Task ${task.id} requires an exact ${action} budget decision before ${action}.`, {
+      details: { taskId: task.id, action, actualDecision: decision?.action }
+    });
+  }
+}
+
 export function legalTaskTransitions(
   task: OrchestrationTask,
   tasks: Readonly<Record<string, OrchestrationTask>>
@@ -380,6 +465,12 @@ export function legalTaskTransitions(
   if (task.correctionPolicy.used >= task.correctionPolicy.limit
     && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)) {
     allowed = allowed.filter(target => target !== "ACTIVE");
+  }
+  if (task.budget?.thresholdStatus === "decision-required") {
+    allowed = allowed.filter(target => !["READY", "ACTIVE"].includes(target));
+    if (latestBudgetDecision(task)?.action !== "supersede") {
+      allowed = allowed.filter(target => target !== "SUPERSEDED");
+    }
   }
   return allowed;
 }
@@ -821,13 +912,14 @@ function buildEvent(
   previousState: OrchestrationState | undefined,
   nextCore: OrchestrationStateCore,
   type: string,
-  metadata: EventMetadata
+  metadata: EventMetadata,
+  identity?: { id: string }
 ): { event: OrchestrationEvent; state: OrchestrationState } {
   const sequence = (previousState?.lastEvent.sequence || 0) + 1;
   const unsignedEvent: Omit<OrchestrationEvent, "eventHash"> = {
     schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
     sequence,
-    id: randomUUID(),
+    id: identity?.id || randomUUID(),
     timestamp: nextCore.updatedAt,
     type,
     actor: metadata.actor,
@@ -930,6 +1022,7 @@ export function renderStatusMarkdown(
         `- Revision: ${task.revision}`,
         `- Correction round: ${task.correctionRound}`,
         `- Correction policy: ${task.correctionPolicy.used}/${task.correctionPolicy.limit} used; ${task.correctionPolicy.overrides.length} override(s)`,
+        `- Token budget: ${task.budget ? `${task.budget.thresholdStatus}; policy r${task.budget.policy.revision}; soft ${task.budget.policy.softTotalTokens ?? "—"}; hard ${effectiveHardTotalTokens(task.budget) ?? "—"}; session ${markdownCell(task.budget.policy.rootSessionId)}; ${task.budget.observations.length} observation(s); ${task.budget.decisions.length} decision(s)` : "—"}`,
         `- Writer lease: ${task.lease ? `${task.lease.id} generation ${task.lease.generation}; owner ${markdownCell(task.lease.ownerThread)}; expires ${task.lease.expiresAt}` : task.preLease ? "migration required before further progress" : "—"}`,
         `- Sealed proposal: ${task.proposal ? `${task.proposal.bundleId}; lease ${task.proposal.leaseId} generation ${task.proposal.generation}; revision ${task.proposal.revision}; ${task.proposal.path}` : "—"}`,
         `- Proposal-owned paths: ${task.proposal && task.proposal.ownedPaths.length > 0 ? task.proposal.ownedPaths.map(markdownCell).join(", ") : "—"}`,
@@ -1003,9 +1096,9 @@ export async function createOrchestrationSchemaMigrationFiles(
     validateOrchestrationState(rawState);
     return { status: "current" };
   }
-  if (!isLegacyOrchestrationStateShape(rawState)) {
-    invalidState("Legacy Synod state is not a valid schema-1 orchestration record.");
-  }
+  const legacyState = isLegacyOrchestrationStateShape(rawState) ? rawState : undefined;
+  const schemaTwoState = isSchemaTwoOrchestrationStateShape(rawState) ? rawState : undefined;
+  if (!legacyState && !schemaTwoState) invalidState("Synod state is not a valid schema-1 or schema-2 orchestration record.");
 
   const rawEvents = await readRecord(targetDirectory, ORCHESTRATION_EVENTS_PATH);
   let parsedEvents: unknown[];
@@ -1017,54 +1110,84 @@ export async function createOrchestrationSchemaMigrationFiles(
   const events = validateEventLog(parsedEvents);
   const last = events.at(-1);
   const rawLast = parsedEvents.at(-1);
-  if (!last || !isLegacyOrchestrationEvent(rawLast)) {
-    throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "Schema-1 migration requires a legacy-only event log.");
+  if (!last || (legacyState && !isLegacyOrchestrationEvent(rawLast)) || (schemaTwoState && !isSchemaTwoOrchestrationEvent(rawLast))) {
+    throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "Orchestration migration requires a log ending in the same schema as canonical state.");
   }
-  const expectedLegacyState: LegacyOrchestrationState = {
+  const expectedState = isLegacyOrchestrationEvent(rawLast) || isSchemaTwoOrchestrationEvent(rawLast) ? {
     ...rawLast.state,
     lastEvent: { sequence: rawLast.sequence, id: rawLast.id, hash: rawLast.eventHash }
-  };
-  if (stableStringify(rawState) !== stableStringify(expectedLegacyState)) {
-    throw new SynodError(ERROR_CODES.STATE_LOG_MISMATCH, "Legacy canonical state does not match its last append-only event.", {
-      details: { stateSequence: rawState.lastEvent.sequence, eventSequence: rawLast.sequence }
+  } : undefined;
+  if (!expectedState || stableStringify(rawState) !== stableStringify(expectedState)) {
+    throw new SynodError(ERROR_CODES.STATE_LOG_MISMATCH, "Canonical state does not match the last append-only event before migration.", {
+      details: { stateSequence: isRecord(rawState) && isRecord(rawState.lastEvent) ? rawState.lastEvent.sequence : undefined, eventSequence: isRecord(rawLast) ? rawLast.sequence : undefined }
     });
   }
 
-  const leaseBaselines = createLeaseBaselinesLedger();
-  const checkpointSnapshot = await readCheckpointSnapshot(targetDirectory, rawState.checkpoint);
   const timestamp = nowIso(dependencies.clock);
-  const nextCore = migrateLegacyStateCore(rawState, leaseBaselinesReference(leaseBaselines), timestamp);
+  const appended: Array<SchemaTwoOrchestrationEvent | OrchestrationEvent> = [];
+  let leaseBaselines: LeaseBaselinesLedger | undefined;
+  let checkpointSnapshot: CheckpointSnapshot | undefined;
+  let schemaTwoCore: SchemaTwoOrchestrationStateCore;
+  if (legacyState) {
+    leaseBaselines = createLeaseBaselinesLedger();
+    checkpointSnapshot = await readCheckpointSnapshot(targetDirectory, legacyState.checkpoint);
+    schemaTwoCore = migrateLegacyStateCore(legacyState, leaseBaselinesReference(leaseBaselines), timestamp);
+    const unsignedSchemaTwo: Omit<SchemaTwoOrchestrationEvent, "eventHash"> = {
+      schemaVersion: PREVIOUS_ORCHESTRATION_SCHEMA_VERSION,
+      sequence: last.sequence + 1,
+      id: randomUUID(),
+      timestamp,
+      type: "orchestration.migrated",
+      actor: "synod",
+      checkpoint: schemaTwoCore.checkpoint,
+      payload: {
+        fromSchemaVersion: LEGACY_ORCHESTRATION_SCHEMA_VERSION,
+        toSchemaVersion: PREVIOUS_ORCHESTRATION_SCHEMA_VERSION,
+        preservedEventCount: events.length,
+        preLeaseTasks: schemaTwoCore.taskOrder.filter(id => schemaTwoCore.tasks[id]?.preLease)
+      },
+      previousHash: last.eventHash,
+      state: schemaTwoCore
+    };
+    appended.push({ ...unsignedSchemaTwo, eventHash: eventHash(unsignedSchemaTwo) });
+  } else {
+    const { lastEvent: _lastEvent, ...core } = schemaTwoState!;
+    schemaTwoCore = core;
+  }
+
+  const prior = appended.at(-1) || rawLast as SchemaTwoOrchestrationEvent;
+  const nextCore = migrateSchemaTwoStateCore(schemaTwoCore, timestamp);
   const unsignedEvent: Omit<OrchestrationEvent, "eventHash"> = {
     schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
-    sequence: last.sequence + 1,
+    sequence: prior.sequence + 1,
     id: randomUUID(),
     timestamp,
     type: "orchestration.migrated",
     actor: "synod",
     checkpoint: nextCore.checkpoint,
     payload: {
-      fromSchemaVersion: LEGACY_ORCHESTRATION_SCHEMA_VERSION,
+      fromSchemaVersion: PREVIOUS_ORCHESTRATION_SCHEMA_VERSION,
       toSchemaVersion: ORCHESTRATION_SCHEMA_VERSION,
-      preservedEventCount: events.length,
-      preLeaseTasks: nextCore.taskOrder.filter(id => nextCore.tasks[id]?.preLease)
+      preservedEventCount: events.length + appended.length
     },
-    previousHash: last.eventHash,
+    previousHash: prior.eventHash,
     state: nextCore
   };
   const event: OrchestrationEvent = { ...unsignedEvent, eventHash: eventHash(unsignedEvent) };
+  appended.push(event);
   const state = validateOrchestrationState({
     ...nextCore,
     lastEvent: { sequence: event.sequence, id: event.id, hash: event.eventHash }
   });
-  validateEventLog([...parsedEvents, event]);
+  validateEventLog([...parsedEvents, ...appended]);
   const separator = rawEvents.endsWith("\n") ? "" : "\n";
   return {
     status: "migrated",
     files: new Map([
       [ORCHESTRATION_STATE_PATH, serializeJson(state)],
-      [ORCHESTRATION_EVENTS_PATH, `${rawEvents}${separator}${JSON.stringify(event)}\n`],
+      [ORCHESTRATION_EVENTS_PATH, `${rawEvents}${separator}${appended.map(item => JSON.stringify(item)).join("\n")}\n`],
       [ORCHESTRATION_STATUS_PATH, renderStatusMarkdown(state)],
-      [LEASE_BASELINES_PATH, serializeLeaseBaselinesLedger(leaseBaselines)],
+      ...(leaseBaselines ? [[LEASE_BASELINES_PATH, serializeLeaseBaselinesLedger(leaseBaselines)] as const] : []),
       ...(checkpointSnapshot ? [[CHECKPOINT_SNAPSHOT_PATH, serializeCheckpointSnapshot(checkpointSnapshot)] as const] : [])
     ])
   };
@@ -1230,6 +1353,7 @@ function isOrchestrationTask(value: unknown): value is OrchestrationTask {
       && value.recoveryHistory.every(item => isTaskRecovery(item) && item.status !== "PENDING")))
     && (value.split === undefined || isTaskSplit(value.split))
     && (value.splitFrom === undefined || typeof value.splitFrom === "string")
+    && (value.budget === undefined || isTaskBudget(value.budget))
     && isStringArray(value.acceptance.criteria)
     && value.acceptance.criteria.length > 0
     && value.acceptance.criteria.every(item => item.length > 0)
@@ -1252,6 +1376,10 @@ function isOrchestrationTask(value: unknown): value is OrchestrationTask {
     && (value.preLease === undefined || value.preLease === true);
 }
 
+function isSchemaTwoOrchestrationTask(value: unknown): value is SchemaTwoOrchestrationTask {
+  return isRecord(value) && value.budget === undefined && isOrchestrationTask(value);
+}
+
 function isLegacyOrchestrationTask(value: unknown): value is LegacyOrchestrationTask {
   if (!isRecord(value) || !isNonNegativeInteger(value.correctionRound)) return false;
   return value.correctionPolicy === undefined
@@ -1263,6 +1391,7 @@ function isLegacyOrchestrationTask(value: unknown): value is LegacyOrchestration
     && value.split === undefined
     && value.splitFrom === undefined
     && value.preLease === undefined
+    && value.budget === undefined
     && isOrchestrationTask({
       ...value,
       correctionPolicy: correctionPolicyForRound(value.correctionRound),
@@ -1308,7 +1437,7 @@ function correctionPolicyForRound(correctionRound: number): CorrectionPolicy {
   return { limit: Math.max(2, correctionRound), used: correctionRound, overrides: [] };
 }
 
-function migrateLegacyTask(task: LegacyOrchestrationTask): OrchestrationTask {
+function migrateLegacyTask(task: LegacyOrchestrationTask): SchemaTwoOrchestrationTask {
   return {
     ...task,
     correctionPolicy: correctionPolicyForRound(task.correctionRound),
@@ -1321,9 +1450,9 @@ function migrateLegacyStateCore(
   state: LegacyOrchestrationStateCore,
   leaseBaselines: LeaseBaselineReference,
   timestamp = state.updatedAt
-): OrchestrationStateCore {
+): SchemaTwoOrchestrationStateCore {
   return {
-    schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+    schemaVersion: PREVIOUS_ORCHESTRATION_SCHEMA_VERSION,
     templateVersion: packageVersion,
     createdAt: state.createdAt,
     updatedAt: timestamp,
@@ -1333,6 +1462,45 @@ function migrateLegacyStateCore(
     tasks: Object.fromEntries(state.taskOrder.map(id => [id, migrateLegacyTask(state.tasks[id]!)])),
     evidenceCounter: state.evidenceCounter
   };
+}
+
+function migrateSchemaTwoStateCore(
+  state: SchemaTwoOrchestrationStateCore,
+  timestamp = state.updatedAt
+): OrchestrationStateCore {
+  return {
+    ...state,
+    schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+    templateVersion: packageVersion,
+    updatedAt: timestamp,
+    tasks: Object.fromEntries(state.taskOrder.map(id => [id, { ...state.tasks[id]! }]))
+  };
+}
+
+function isSchemaTwoOrchestrationStateCoreShape(value: unknown): value is SchemaTwoOrchestrationStateCore {
+  return isRecord(value)
+    && value.schemaVersion === PREVIOUS_ORCHESTRATION_SCHEMA_VERSION
+    && typeof value.templateVersion === "string"
+    && typeof value.createdAt === "string"
+    && typeof value.updatedAt === "string"
+    && isGitCheckpoint(value.checkpoint)
+    && isLeaseBaselineReference(value.leaseBaselines)
+    && isStringArray(value.taskOrder)
+    && isRecord(value.tasks)
+    && new Set(value.taskOrder).size === value.taskOrder.length
+    && Object.keys(value.tasks).length === value.taskOrder.length
+    && value.taskOrder.every(id => Object.hasOwn(value.tasks as object, id))
+    && Object.values(value.tasks).every(isSchemaTwoOrchestrationTask)
+    && isNonNegativeInteger(value.evidenceCounter);
+}
+
+function isSchemaTwoOrchestrationStateShape(value: unknown): value is SchemaTwoOrchestrationState {
+  return isSchemaTwoOrchestrationStateCoreShape(value)
+    && isRecord(value)
+    && isRecord(value.lastEvent)
+    && isNonNegativeInteger(value.lastEvent.sequence)
+    && typeof value.lastEvent.id === "string"
+    && typeof value.lastEvent.hash === "string";
 }
 
 function isOrchestrationStateCoreShape(value: unknown): value is OrchestrationStateCore {
@@ -1384,6 +1552,36 @@ export function validateOrchestrationState(value: unknown): OrchestrationState {
     }
     if (task.state === "BLOCKED" && !isTaskState(task.blockedFrom)) {
       invalidState(`Blocked task ${id} is missing its prior state.`, { taskId: id });
+    }
+    if (task.budget) {
+      const policies = [...task.budget.policyHistory, task.budget.policy];
+      const byRevision = new Map(policies.map(policy => [policy.revision, policy]));
+      let priorObservationSequence = 0;
+      const totals = new Map<number, number>();
+      for (const observation of task.budget.observations) {
+        const policy = byRevision.get(observation.policyRevision);
+        if (!policy
+          || observation.rootSessionId !== policy.rootSessionId
+          || stableStringify(observation.startEvent) !== stableStringify(policy.startEvent)
+          || observation.event.sequence <= priorObservationSequence
+          || Date.parse(observation.capturedAt) < Date.parse(policy.recordedAt)
+          || observation.totalTokens < (totals.get(observation.policyRevision) || 0)) {
+          invalidState(`Task ${id} budget observation history is invalid.`, { taskId: id });
+        }
+        priorObservationSequence = observation.event.sequence;
+        totals.set(observation.policyRevision, observation.totalTokens);
+      }
+      for (const decision of task.budget.decisions) {
+        const observation = task.budget.observations.find(item =>
+          item.event.sequence === decision.observation.sequence && item.event.id === decision.observation.id
+        );
+        if (!observation
+          || decision.policyRevision !== observation.policyRevision
+          || decision.event.sequence <= observation.event.sequence
+          || Date.parse(decision.recordedAt) < Date.parse(observation.capturedAt)) {
+          invalidState(`Task ${id} budget decision history is invalid.`, { taskId: id });
+        }
+      }
     }
     if (task.lease && (
       task.lease.generation !== task.leaseGeneration
@@ -1561,6 +1759,25 @@ function isOrchestrationEvent(value: unknown): value is OrchestrationEvent {
     && typeof value.eventHash === "string";
 }
 
+function isSchemaTwoOrchestrationEvent(value: unknown): value is SchemaTwoOrchestrationEvent {
+  return isRecord(value)
+    && value.schemaVersion === PREVIOUS_ORCHESTRATION_SCHEMA_VERSION
+    && isNonNegativeInteger(value.sequence)
+    && typeof value.id === "string"
+    && typeof value.timestamp === "string"
+    && typeof value.type === "string"
+    && typeof value.actor === "string"
+    && (value.taskId === undefined || typeof value.taskId === "string")
+    && (value.fromState === undefined || isTaskState(value.fromState))
+    && (value.toState === undefined || isTaskState(value.toState))
+    && (value.revision === undefined || isNonNegativeInteger(value.revision))
+    && isGitCheckpoint(value.checkpoint)
+    && isRecord(value.payload)
+    && isNullableString(value.previousHash)
+    && isSchemaTwoOrchestrationStateCoreShape(value.state)
+    && typeof value.eventHash === "string";
+}
+
 function isLegacyOrchestrationEvent(value: unknown): value is LegacyOrchestrationEvent {
   return isRecord(value)
     && value.schemaVersion === LEGACY_ORCHESTRATION_SCHEMA_VERSION
@@ -1582,41 +1799,99 @@ function isLegacyOrchestrationEvent(value: unknown): value is LegacyOrchestratio
 
 function validateEventLog(events: unknown[]): OrchestrationEvent[] {
   let previousHash = null;
-  let legacySeen = false;
-  let migrationSeen = false;
-  let schemaTwoStarted = false;
+  let activeSchema = 1;
+  let schemaOneSeen = false;
+  let schemaTwoSeen = false;
+  let schemaThreeSeen = false;
+  let oneToTwoSeen = false;
+  let twoToThreeSeen = false;
   const emptyLeaseBaselines = leaseBaselinesReference(createLeaseBaselinesLedger());
   const validated: OrchestrationEvent[] = [];
   for (const [index, event] of events.entries()) {
     const legacy = isLegacyOrchestrationEvent(event);
+    const schemaTwo = isSchemaTwoOrchestrationEvent(event);
     const current = isOrchestrationEvent(event);
-    if (
-      (!legacy && !current) || event.sequence !== index + 1
+    const schema = legacy ? 1 : schemaTwo ? 2 : current ? 3 : 0;
+    const migrated = isRecord(event) && event.type === "orchestration.migrated" && isRecord(event.payload);
+    const migrationPayload = migrated ? event.payload as Record<string, unknown> : undefined;
+    if (index === 0 && !migrated && schema > 0) activeSchema = schema;
+    const validBoundary = migrated && (
+      (schema === 2 && activeSchema === 1 && migrationPayload?.fromSchemaVersion === 1 && migrationPayload.toSchemaVersion === 2 && !oneToTwoSeen)
+      || (schema === 3 && activeSchema === 2 && migrationPayload?.fromSchemaVersion === 2 && migrationPayload.toSchemaVersion === 3 && !twoToThreeSeen)
+    );
+    const validContinuation = schema === activeSchema && !migrated;
+    if ((!legacy && !schemaTwo && !current) || event.sequence !== index + 1
       || event.previousHash !== previousHash || event.eventHash !== eventHash(event)
-      || (legacy && schemaTwoStarted)
-      || (current && legacySeen && !schemaTwoStarted && event.type !== "orchestration.migrated")
-      || (current && event.type === "orchestration.migrated" && (!legacySeen || migrationSeen || schemaTwoStarted))
-    ) {
+      || (!validBoundary && !validContinuation)) {
       throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "Synod event log failed sequence or hash-chain validation.", {
         details: { sequence: isRecord(event) ? event.sequence : undefined, expectedSequence: index + 1 }
       });
     }
+    if (validBoundary) {
+      if (schema === 2) oneToTwoSeen = true;
+      if (schema === 3) twoToThreeSeen = true;
+      activeSchema = schema;
+    }
     if (current) {
-      if (event.type === "orchestration.migrated") migrationSeen = true;
-      schemaTwoStarted = true;
+      schemaThreeSeen = true;
       validateOrchestrationState({
         ...event.state,
         lastEvent: { sequence: event.sequence, id: event.id, hash: event.eventHash }
       });
-    } else {
-      legacySeen = true;
+    } else if (schemaTwo) {
+      schemaTwoSeen = true;
       validateOrchestrationState({
-        ...migrateLegacyStateCore(event.state, emptyLeaseBaselines),
+        ...migrateSchemaTwoStateCore(event.state),
+        lastEvent: { sequence: event.sequence, id: event.id, hash: event.eventHash }
+      });
+    } else {
+      schemaOneSeen = true;
+      validateOrchestrationState({
+        ...migrateSchemaTwoStateCore(migrateLegacyStateCore(event.state, emptyLeaseBaselines)),
         lastEvent: { sequence: event.sequence, id: event.id, hash: event.eventHash }
       });
     }
+    if (current) {
+      const knownEvents = [...validated, event as OrchestrationEvent];
+      const bySequence = new Map(knownEvents.map(item => [item.sequence, item]));
+      for (const task of Object.values(event.state.tasks)) {
+        if (!task.budget) continue;
+        for (const policy of [...task.budget.policyHistory, task.budget.policy]) {
+          const start = bySequence.get(policy.startEvent.sequence);
+          if (!start || start.id !== policy.startEvent.id || start.eventHash !== policy.startEvent.hash
+            || policy.startEvent.sequence >= event.sequence) {
+            throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "A task budget references a stale or non-canonical start event.", {
+              details: { taskId: task.id, policyRevision: policy.revision }
+            });
+          }
+        }
+        for (const observation of task.budget.observations) {
+          const observedEvent = bySequence.get(observation.event.sequence);
+          if (!observedEvent || observedEvent.id !== observation.event.id
+            || observedEvent.previousHash !== observation.event.previousHash
+            || observedEvent.type !== "task.budget-observed") {
+            throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "A task budget observation identity is not canonical.", {
+              details: { taskId: task.id, sequence: observation.event.sequence }
+            });
+          }
+        }
+        for (const decision of task.budget.decisions) {
+          const decisionEvent = bySequence.get(decision.event.sequence);
+          if (!decisionEvent || decisionEvent.id !== decision.event.id
+            || decisionEvent.previousHash !== decision.event.previousHash
+            || decisionEvent.type !== "task.budget-decided") {
+            throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "A task budget decision identity is not canonical.", {
+              details: { taskId: task.id, sequence: decision.event.sequence }
+            });
+          }
+        }
+      }
+    }
     previousHash = event.eventHash;
     validated.push(event as unknown as OrchestrationEvent);
+  }
+  if (schemaOneSeen && schemaThreeSeen && !schemaTwoSeen) {
+    throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "Synod event log skipped orchestration schema 2.");
   }
   if (events.length === 0) throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "Synod event log is empty.");
   return validated;
@@ -2414,13 +2689,19 @@ async function commitMutation<Result extends Record<string, unknown>>(
     const captured = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
     const checkpoint = captured.checkpoint;
     const draft = structuredClone(current);
+    const mutationIdentity: BudgetMutationIdentity = {
+      sequence: current.lastEvent.sequence + 1,
+      id: randomUUID(),
+      previousHash: current.lastEvent.hash
+    };
     const reducerResult = await reducer(draft, {
       timestamp,
       checkpoint,
       snapshot: captured.snapshot,
       ...(acknowledgedSnapshot ? { acknowledgedSnapshot } : {}),
       leaseBaselines: currentLeaseBaselines,
-      nextSequence: current.lastEvent.sequence + 1
+      nextSequence: mutationIdentity.sequence,
+      event: mutationIdentity
     }) || {};
     draft.updatedAt = timestamp;
     if (reducerResult.updateCheckpoint) draft.checkpoint = checkpoint;
@@ -2442,7 +2723,7 @@ async function commitMutation<Result extends Record<string, unknown>>(
         }
       }
     };
-    const { event, state } = buildEvent(current, stateCore(draft), type, eventMetadata);
+    const { event, state } = buildEvent(current, stateCore(draft), type, eventMetadata, { id: mutationIdentity.id });
     const stateInspected = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_STATE_PATH));
     const statusInspected = await inspectPath(resolveProjectPath(targetDirectory, ORCHESTRATION_STATUS_PATH));
     if (stateInspected.type !== "file" || statusInspected.type !== "file") {
@@ -2622,6 +2903,345 @@ export async function addTask({
   }, dependencies);
 }
 
+function budgetEventIdentity(events: OrchestrationEvent[], selector: string): CanonicalEventIdentity {
+  const normalized = String(selector || "").trim();
+  const sequence = /^[1-9]\d*$/.test(normalized) ? Number(normalized) : undefined;
+  const matches = events.filter(event => sequence === undefined ? event.id === normalized : event.sequence === sequence);
+  if (matches.length !== 1) {
+    throw new SynodError(ERROR_CODES.BUDGET_INVALID, `Budget start event did not resolve exactly once: ${normalized}.`, {
+      details: { selector: normalized, matches: matches.length }
+    });
+  }
+  const event = matches[0]!;
+  return { sequence: event.sequence, id: event.id, hash: event.eventHash };
+}
+
+function budgetEvidence(values: unknown[]): string[] {
+  const evidence = [...new Set(values.map(value => String(value).trim()).filter(Boolean))];
+  if (evidence.length === 0) throw new SynodError(ERROR_CODES.BUDGET_INVALID, "Budget changes require at least one evidence reference.");
+  return evidence;
+}
+
+function budgetLimit(value: unknown, name: string): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new SynodError(ERROR_CODES.BUDGET_INVALID, `${name} must be a positive integer.`);
+  }
+  return parsed;
+}
+
+function assertCanonicalState(
+  state: OrchestrationState,
+  expected: OrchestrationLastEvent,
+  taskId: string,
+  policyRevision?: number
+): OrchestrationTask {
+  if (state.lastEvent.sequence !== expected.sequence || state.lastEvent.id !== expected.id || state.lastEvent.hash !== expected.hash) {
+    throw new SynodError(ERROR_CODES.BUDGET_STALE, `Task ${taskId} budget input was computed from stale canonical state.`, {
+      details: { taskId, expected, actual: state.lastEvent }
+    });
+  }
+  const task = state.tasks[taskId];
+  if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+  if (policyRevision !== undefined && task.budget?.policy.revision !== policyRevision) {
+    throw new SynodError(ERROR_CODES.BUDGET_STALE, `Task ${taskId} budget policy changed before the operation committed.`, {
+      details: { taskId, expectedPolicyRevision: policyRevision, actualPolicyRevision: task.budget?.policy.revision }
+    });
+  }
+  return task;
+}
+
+export interface SetTaskBudgetPolicyOptions {
+  directory?: string;
+  id?: string;
+  rootSessionId?: string;
+  startEvent?: string;
+  softTotalTokens?: number;
+  hardTotalTokens?: number;
+  reason?: string;
+  evidence?: unknown[];
+  actor?: string;
+  replace?: boolean;
+}
+
+export async function setTaskBudgetPolicy({
+  directory = ".",
+  id,
+  rootSessionId,
+  startEvent,
+  softTotalTokens,
+  hardTotalTokens,
+  reason,
+  evidence = [],
+  actor = "supervisor",
+  replace = false
+}: SetTaskBudgetPolicyOptions = {}, dependencies: OrchestrationDependencies = {}) {
+  const targetDirectory = path.resolve(directory);
+  const taskId = taskIdValue(id);
+  const session = String(rootSessionId || "").trim();
+  const explanation = String(reason || "").trim();
+  const principal = String(actor || "").trim();
+  const soft = budgetLimit(softTotalTokens, "Soft token limit");
+  const hard = budgetLimit(hardTotalTokens, "Hard token limit");
+  const evidenceReferences = budgetEvidence(evidence);
+  if (!session || !String(startEvent || "").trim() || !explanation || !principal || (soft === undefined && hard === undefined)
+    || (soft !== undefined && hard !== undefined && soft >= hard)) {
+    throw new SynodError(ERROR_CODES.BUDGET_INVALID, "Budget policy requires a session, exact start event, actor, reason, evidence, and valid soft/hard limits.");
+  }
+  const canonical = await readOrchestration(targetDirectory);
+  if (!canonical.state.tasks[taskId]) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+  const start = budgetEventIdentity(canonical.events, String(startEvent));
+  const expected = canonical.state.lastEvent;
+  const type = replace ? "task.budget-replaced" : "task.budget-set";
+  return commitMutation(targetDirectory, type, { actor: principal, taskId }, (state, context) => {
+    const task = assertCanonicalState(state, expected, taskId);
+    if (replace && !task.budget) throw new SynodError(ERROR_CODES.BUDGET_NOT_CONFIGURED, `Task ${taskId} has no budget to replace.`);
+    if (!replace && task.budget) throw new SynodError(ERROR_CODES.BUDGET_INVALID, `Task ${taskId} already has a budget; use an explicit replacement.`);
+    const inheritedSplitResolution = Boolean(task.splitFrom && latestBudgetDecision(task)?.action === "split");
+    if (task.budget?.thresholdStatus === "decision-required" && !inheritedSplitResolution) {
+      throw new SynodError(ERROR_CODES.BUDGET_DECISION_REQUIRED, `Task ${taskId} requires a decision for its latest hard-budget observation before policy replacement.`);
+    }
+    const prior = task.budget;
+    const policy: TaskBudgetPolicy = {
+      revision: (prior?.policy.revision || 0) + 1,
+      rootSessionId: session,
+      startEvent: start,
+      ...(soft === undefined ? {} : { softTotalTokens: soft }),
+      ...(hard === undefined ? {} : { hardTotalTokens: hard }),
+      actor: principal,
+      reason: explanation,
+      evidence: evidenceReferences,
+      recordedAt: context.timestamp
+    };
+    task.budget = {
+      policy,
+      policyHistory: prior ? [...prior.policyHistory, prior.policy] : [],
+      observations: prior ? [...prior.observations] : [],
+      decisions: prior ? [...prior.decisions] : [],
+      thresholdStatus: "within"
+    };
+    task.updatedAt = context.timestamp;
+    return {
+      metadata: {
+        revision: task.revision,
+        payload: { policy, replacedRevision: prior?.policy.revision }
+      },
+      result: { task, policy }
+    };
+  }, dependencies);
+}
+
+export async function reportTaskBudget({
+  directory = ".",
+  id
+}: { directory?: string; id?: string } = {}, dependencies: OrchestrationDependencies = {}): Promise<TaskBudgetReport> {
+  const targetDirectory = path.resolve(directory);
+  const taskId = taskIdValue(id);
+  const canonical = await readOrchestration(targetDirectory);
+  const budget = canonical.state.tasks[taskId]?.budget;
+  if (!canonical.state.tasks[taskId]) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+  if (!budget) throw new SynodError(ERROR_CODES.BUDGET_NOT_CONFIGURED, `Task ${taskId} has no token budget.`);
+  return collectTaskBudgetReport({
+    cwd: targetDirectory,
+    taskId,
+    budget,
+    ...(dependencies.usageClientFactory ? { clientFactory: dependencies.usageClientFactory } : {}),
+    ...(dependencies.clock ? { clock: dependencies.clock } : {}),
+    ...(dependencies.usageCollector ? { collector: dependencies.usageCollector } : {})
+  });
+}
+
+export async function observeTaskBudget({
+  directory = ".",
+  id,
+  actor = "supervisor"
+}: { directory?: string; id?: string; actor?: string } = {}, dependencies: OrchestrationDependencies = {}) {
+  const targetDirectory = path.resolve(directory);
+  const taskId = taskIdValue(id);
+  const canonical = await readOrchestration(targetDirectory);
+  const budget = canonical.state.tasks[taskId]?.budget;
+  if (!canonical.state.tasks[taskId]) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+  if (!budget) throw new SynodError(ERROR_CODES.BUDGET_NOT_CONFIGURED, `Task ${taskId} has no token budget.`);
+  if (budget.thresholdStatus === "decision-required") {
+    throw new SynodError(ERROR_CODES.BUDGET_DECISION_REQUIRED, `Task ${taskId} already requires a decision for its latest hard-budget observation.`);
+  }
+  const expected = canonical.state.lastEvent;
+  const policyRevision = budget.policy.revision;
+  const report = await collectTaskBudgetReport({
+    cwd: targetDirectory,
+    taskId,
+    budget,
+    ...(dependencies.usageClientFactory ? { clientFactory: dependencies.usageClientFactory } : {}),
+    ...(dependencies.clock ? { clock: dependencies.clock } : {}),
+    ...(dependencies.usageCollector ? { collector: dependencies.usageCollector } : {})
+  });
+  const afterReport = await readOrchestration(targetDirectory);
+  const afterTask = afterReport.state.tasks[taskId];
+  if (afterReport.state.lastEvent.sequence !== expected.sequence
+    || afterReport.state.lastEvent.id !== expected.id
+    || afterReport.state.lastEvent.hash !== expected.hash
+    || afterTask?.budget?.policy.revision !== policyRevision) {
+    throw new SynodError(ERROR_CODES.BUDGET_STALE, `Task ${taskId} changed while its budget report was being collected.`);
+  }
+  const rechecked = await collectTaskBudgetReport({
+    cwd: targetDirectory,
+    taskId,
+    budget: afterTask.budget,
+    ...(dependencies.usageClientFactory ? { clientFactory: dependencies.usageClientFactory } : {}),
+    clock: () => report.usage.capturedAt,
+    ...(dependencies.usageCollector ? { collector: dependencies.usageCollector } : {})
+  });
+  if (rechecked.reportHash !== report.reportHash || rechecked.thresholdStatus !== report.thresholdStatus) {
+    throw new SynodError(ERROR_CODES.BUDGET_STALE, `Task ${taskId} rollout provenance changed while its budget observation was being prepared.`, {
+      details: { taskId, firstReportHash: report.reportHash, secondReportHash: rechecked.reportHash }
+    });
+  }
+  return commitMutation(targetDirectory, "task.budget-observed", { actor, taskId }, (state, context) => {
+    const task = assertCanonicalState(state, expected, taskId, policyRevision);
+    const currentBudget = task.budget!;
+    const prior = currentBudget.observations.filter(item => item.policyRevision === policyRevision).at(-1);
+    if (prior && report.usage.total.totalTokens < prior.totalTokens) {
+      throw new SynodError(ERROR_CODES.BUDGET_STALE, `Task ${taskId} budget usage moved behind its prior canonical observation.`, {
+        details: { taskId, priorTotalTokens: prior.totalTokens, actualTotalTokens: report.usage.total.totalTokens }
+      });
+    }
+    const observation: TaskBudgetObservation = {
+      policyRevision,
+      event: context.event,
+      reportHash: report.reportHash,
+      rootSessionId: report.usage.session.threadId,
+      startEvent: currentBudget.policy.startEvent,
+      capturedAt: report.usage.capturedAt,
+      totalTokens: report.usage.total.totalTokens,
+      thresholdStatus: report.thresholdStatus,
+      rollouts: report.usage.threads.map(item => ({
+        threadId: item.threadId,
+        bytes: item.rollout.bytes,
+        sha256: item.rollout.sha256
+      })).sort((left, right) => left.threadId.localeCompare(right.threadId))
+    };
+    currentBudget.observations.push(observation);
+    currentBudget.thresholdStatus = observation.thresholdStatus;
+    task.updatedAt = context.timestamp;
+    return {
+      metadata: {
+        revision: task.revision,
+        payload: { observation }
+      },
+      result: { task, observation, report }
+    };
+  }, dependencies);
+}
+
+export interface DecideTaskBudgetOptions {
+  directory?: string;
+  id?: string;
+  observation?: string;
+  action?: BudgetDecisionAction;
+  addedAllowance?: number;
+  reason?: string;
+  evidence?: unknown[];
+  actor?: string;
+}
+
+function selectedBudgetObservation(budget: TaskBudget, selector: string): TaskBudgetObservation {
+  const normalized = String(selector || "").trim();
+  const sequence = /^[1-9]\d*$/.test(normalized) ? Number(normalized) : undefined;
+  const matches = budget.observations.filter(item => sequence === undefined ? item.event.id === normalized : item.event.sequence === sequence);
+  if (matches.length !== 1) {
+    throw new SynodError(ERROR_CODES.BUDGET_STALE, `Budget observation did not resolve exactly once: ${normalized}.`, {
+      details: { selector: normalized, matches: matches.length }
+    });
+  }
+  return matches[0]!;
+}
+
+export async function decideTaskBudget({
+  directory = ".",
+  id,
+  observation,
+  action,
+  addedAllowance,
+  reason,
+  evidence = [],
+  actor = "supervisor"
+}: DecideTaskBudgetOptions = {}, dependencies: OrchestrationDependencies = {}) {
+  const targetDirectory = path.resolve(directory);
+  const taskId = taskIdValue(id);
+  const choice = String(action || "") as BudgetDecisionAction;
+  const explanation = String(reason || "").trim();
+  const principal = String(actor || "").trim();
+  const evidenceReferences = budgetEvidence(evidence);
+  const allowance = addedAllowance === undefined ? undefined : budgetLimit(addedAllowance, "Additional token allowance");
+  if (!(["continue", "split", "supersede", "rotate"] as string[]).includes(choice)
+    || !String(observation || "").trim() || !explanation || !principal
+    || (choice === "continue" ? allowance === undefined : allowance !== undefined)) {
+    throw new SynodError(ERROR_CODES.BUDGET_INVALID, "Budget decision requires an exact observation, action, actor, reason, evidence, and an allowance only for continue.");
+  }
+  const canonical = await readOrchestration(targetDirectory);
+  const budget = canonical.state.tasks[taskId]?.budget;
+  if (!canonical.state.tasks[taskId]) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+  if (!budget) throw new SynodError(ERROR_CODES.BUDGET_NOT_CONFIGURED, `Task ${taskId} has no token budget.`);
+  const selected = selectedBudgetObservation(budget, String(observation));
+  const latest = budget.observations.filter(item => item.policyRevision === budget.policy.revision).at(-1);
+  if (!latest || selected.event.sequence !== latest.event.sequence || selected.event.id !== latest.event.id
+    || selected.policyRevision !== budget.policy.revision || selected.thresholdStatus !== "decision-required"
+    || budget.decisions.some(item => item.observation.sequence === selected.event.sequence && item.observation.id === selected.event.id)) {
+    throw new SynodError(ERROR_CODES.BUDGET_STALE, `Task ${taskId} decision must target the latest unresolved hard-budget observation.`);
+  }
+  if (choice === "continue") {
+    const effectiveHard = effectiveHardTotalTokens(budget);
+    if (effectiveHard === undefined || effectiveHard + allowance! <= selected.totalTokens) {
+      throw new SynodError(ERROR_CODES.BUDGET_INVALID, "Continuation allowance must raise the effective hard limit above the observed raw total.", {
+        details: { observedTotalTokens: selected.totalTokens, effectiveHardTotalTokens: effectiveHard, addedAllowance: allowance }
+      });
+    }
+  }
+  const expected = canonical.state.lastEvent;
+  const policyRevision = budget.policy.revision;
+  return commitMutation(targetDirectory, "task.budget-decided", { actor: principal, taskId }, (state, context) => {
+    const task = assertCanonicalState(state, expected, taskId, policyRevision);
+    const currentBudget = task.budget!;
+    const current = selectedBudgetObservation(currentBudget, String(observation));
+    const decision = {
+      policyRevision,
+      event: context.event,
+      observation: current.event,
+      action: choice,
+      actor: principal,
+      reason: explanation,
+      evidence: evidenceReferences,
+      recordedAt: context.timestamp,
+      ...(choice === "continue" ? { addedAllowance: allowance! } : {})
+    };
+    currentBudget.decisions.push(decision);
+    currentBudget.thresholdStatus = choice === "continue"
+      ? thresholdStatus(current.totalTokens, currentBudget.policy, effectiveHardTotalTokens(currentBudget))
+      : "decision-required";
+    task.updatedAt = context.timestamp;
+    return {
+      metadata: { revision: task.revision, payload: { decision } },
+      result: { task, decision }
+    };
+  }, dependencies);
+}
+
+export function formatTaskBudgetReport(report: TaskBudgetReport): string {
+  const soft = report.policy.softTotalTokens ?? "—";
+  const hard = report.effectiveHardTotalTokens ?? "—";
+  return [
+    `Task budget: ${report.taskId}`,
+    `Status: ${report.thresholdStatus}`,
+    `Raw total tokens: ${report.usage.total.totalTokens}`,
+    `Soft limit: ${soft}`,
+    `Effective hard limit: ${hard}`,
+    `Session: ${report.policy.rootSessionId}`,
+    `Start event: ${report.policy.startEvent.sequence}:${report.policy.startEvent.id}`,
+    `Report: ${report.reportHash}`
+  ].join("\n");
+}
+
 export interface OverrideCorrectionOptions {
   directory?: string;
   id?: string;
@@ -2655,6 +3275,7 @@ export async function overrideCorrectionPolicy({
   return commitMutation(path.resolve(directory), "task.correction-overridden", { actor, taskId }, (state, context) => {
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    assertBudgetAllowsExecution(task, "ordinary correction approval");
     if (TERMINAL_STATES.has(task.state) || task.correctionPolicy.used < task.correctionPolicy.limit) {
       throw new SynodError(ERROR_CODES.CORRECTION_EXHAUSTED, `Task ${taskId} is not eligible for an exhausted-policy override.`, {
         details: { taskId, state: task.state, used: task.correctionPolicy.used, limit: task.correctionPolicy.limit }
@@ -2708,7 +3329,9 @@ export async function splitTask({
   return commitMutation(path.resolve(directory), "task.split", { actor, taskId }, (state, context) => {
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
-    if (task.correctionPolicy.used < task.correctionPolicy.limit || TERMINAL_STATES.has(task.state) || task.lease) {
+    assertBudgetStructuralDecision(task, "split");
+    const budgetSplit = task.budget?.thresholdStatus === "decision-required" && latestBudgetDecision(task)?.action === "split";
+    if ((!budgetSplit && task.correctionPolicy.used < task.correctionPolicy.limit) || TERMINAL_STATES.has(task.state) || task.lease) {
       throw new SynodError(ERROR_CODES.CORRECTION_EXHAUSTED, `Task ${taskId} is not eligible for an exhausted-policy split.`, {
         details: { taskId, state: task.state, used: task.correctionPolicy.used, limit: task.correctionPolicy.limit }
       });
@@ -2768,6 +3391,7 @@ export async function splitTask({
       const replacement = state.tasks[replacementId]!;
       replacement.dependsOn = rewrittenDependencies.get(replacementId) || replacementDependencies.get(replacementId)!;
       replacement.splitFrom = taskId;
+      if (task.budget) replacement.budget = structuredClone(task.budget);
       replacement.updatedAt = context.timestamp;
     }
     for (const [dependentId, dependencies] of rewrittenDependencies) {
@@ -3269,6 +3893,7 @@ export async function acquireTaskLease({
     await validateLeaseScopeFilesystemPaths(targetDirectory, scopes);
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    assertBudgetAllowsExecution(task, "writer lease acquisition");
     const eligible = task.state === "READY"
       || (task.state === "ACTIVE" && task.preLease)
       || ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)
@@ -3428,6 +4053,7 @@ export async function heartbeatTaskLease({
   return commitMutation(path.resolve(directory), "lease.heartbeat", { actor, taskId }, (state, context) => {
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    assertBudgetAllowsExecution(task, "writer lease heartbeat");
     const lease = requireLeaseIdentity(task, { leaseId, generation, revision, expectedHeartbeatAt, ownerThread });
     if (Date.parse(context.timestamp) >= Date.parse(lease.expiresAt)) {
       throw new SynodError(ERROR_CODES.LEASE_STALE, "The writer lease has expired and cannot be renewed by its former owner.", {
@@ -3578,6 +4204,8 @@ export async function recoverTaskLease({
   const attemptRecovery = () => commitMutation(targetDirectory, recoveryEventType, { actor, taskId }, async (state, context) => {
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    if (action === "resume" || action === "reassign") assertBudgetAllowsExecution(task, `lease ${action}`);
+    if (action === "supersede") assertBudgetStructuralDecision(task, "supersede");
     const fromState = task.state;
     const recovery = task.recovery;
     if (!recovery || recovery.status !== "PENDING") {
@@ -3830,6 +4458,8 @@ export async function transitionTask({
   return commitMutation(targetDirectory, "task.transitioned", { actor, taskId }, async (state, context) => {
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    if (["READY", "ACTIVE"].includes(targetState)) assertBudgetAllowsExecution(task, `transition to ${targetState}`);
+    if (targetState === "SUPERSEDED") assertBudgetStructuralDecision(task, "supersede");
     if (task.recovery?.status === "PENDING") {
       throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} requires an explicit abandoned-owner recovery decision before any transition.`, {
         details: { taskId, leaseId: task.recovery.endedLease.id, generation: task.recovery.endedLease.generation }

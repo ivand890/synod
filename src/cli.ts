@@ -1,6 +1,6 @@
 import { errorEnvelope, successEnvelope } from "./contracts.js";
 import type { Warning } from "./contracts.js";
-import { parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs, parseWorktreeArgs } from "./command-options.js";
+import { parseBudgetArgs, parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs, parseWorktreeArgs } from "./command-options.js";
 import type { HelpOptions, LifecycleOptions } from "./command-options.js";
 import { doctorProject } from "./doctor.js";
 import type { DoctorClient, DoctorDependencies } from "./doctor.js";
@@ -22,6 +22,11 @@ import {
   revokeTaskLease,
   overrideCorrectionPolicy,
   splitTask,
+  decideTaskBudget,
+  formatTaskBudgetReport,
+  observeTaskBudget,
+  reportTaskBudget,
+  setTaskBudgetPolicy,
   transitionTask,
   orchestrationStatusWithArtifacts
 } from "./orchestration.js";
@@ -54,6 +59,11 @@ Usage:
   synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
   synod task override <task-id> --additional-rounds <n> --approver <id> --reference <ref> --reason <text> --evidence <ref> [--cwd <directory>] [--json]
   synod task split <task-id> --replacement <task-id> --replacement <task-id> --reason <text> --evidence <ref> [--cwd <directory>] [--json]
+  synod budget set <task-id> --session <thread-id> --since-event <sequence|id> [--soft-tokens <n>] [--hard-tokens <n>] --reason <text> --evidence <ref> [--actor <id>] [--cwd <directory>] [--json]
+  synod budget replace <task-id> --session <thread-id> --since-event <sequence|id> [--soft-tokens <n>] [--hard-tokens <n>] --reason <text> --evidence <ref> [--actor <id>] [--cwd <directory>] [--json]
+  synod budget report <task-id> [--cwd <directory>] [--json]
+  synod budget observe <task-id> [--actor <id>] [--cwd <directory>] [--json]
+  synod budget decide <task-id> --observation <sequence|id> --decision <continue|split|supersede|rotate> [--additional-tokens <n>] --reason <text> --evidence <ref> [--actor <id>] [--cwd <directory>] [--json]
   synod lease acquire <task-id> --owner-thread <thread-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
   synod lease heartbeat <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
   synod lease release <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
@@ -82,6 +92,7 @@ Commands:
   checkpoint  Accept the current Git/worktree checkpoint in canonical state.
   bundle      Export, verify, or transactionally restore a recovery bundle.
   task        Add tasks and apply validated, revision-aware state transitions.
+  budget      Report and enforce explicit task-local raw-token budgets.
   lease       Acquire and mutate fenced durable writer leases.
   worktree    Create and inspect explicit detached task worktrees at an exact lease base.
   doctor      Probe Codex version, App Server, model, and reasoning capabilities.
@@ -104,6 +115,14 @@ Options:
   --task      Select the canonical lifetime of one task.
   --until-event
               Close a marginal interval at an exact canonical event.
+  --soft-tokens
+              Warn when a task's recorded raw total reaches this positive limit.
+  --hard-tokens
+              Require an exact supervisor decision at this positive raw-token limit.
+  --observation
+              Select the exact canonical budget observation being decided.
+  --additional-tokens
+              Add a bounded hard allowance for a continue decision.
   --thread    Add a Codex thread ID to a bounded status wait.
   --revision  Require the exact task revision for a transition.
   --evidence  Attach evidence to the exact task revision and current checkpoint.
@@ -267,6 +286,41 @@ export async function run(
         output.log(formatUsageReport(report));
         printWarnings(report.warnings, output);
       }
+      return 0;
+    }
+
+    if (command === "budget") {
+      const options = parseBudgetArgs(args.slice(1));
+      if (isHelpOptions(options)) { output.log(HELP); return 0; }
+      const budgetDependencies: OrchestrationDependencies = {
+        ...dependencies,
+        ...(dependencies.clientFactory ? { usageClientFactory: () => dependencies.clientFactory!() } : {})
+      };
+      if (options.action === "set" || options.action === "replace") {
+        const result = await setTaskBudgetPolicy(options, budgetDependencies);
+        const data = { action: options.action, task: result.task, policy: result.policy, lastEvent: result.state.lastEvent };
+        if (options.json) output.log(JSON.stringify(successEnvelope("budget", data), null, 2));
+        else output.log(`${options.action === "set" ? "Set" : "Replaced"} token budget for ${result.task.id} at policy revision ${result.policy.revision}.`);
+      } else if (options.action === "report") {
+        const report = await reportTaskBudget(options, budgetDependencies);
+        const warnings: Warning[] = [...report.usage.warnings, ...report.warnings];
+        if (options.json) output.log(JSON.stringify(successEnvelope("budget", { action: "report", report }, { warnings, diagnostics: report.usage.diagnostics }), null, 2));
+        else { output.log(formatTaskBudgetReport(report)); printWarnings(warnings, output); }
+      } else if (options.action === "observe") {
+        const result = await observeTaskBudget(options, budgetDependencies);
+        const warnings: Warning[] = [...result.report.usage.warnings, ...result.report.warnings];
+        const data = { action: "observe", task: result.task, observation: result.observation, report: result.report, lastEvent: result.state.lastEvent };
+        if (options.json) output.log(JSON.stringify(successEnvelope("budget", data, { warnings, diagnostics: result.report.usage.diagnostics }), null, 2));
+        else { output.log(`Observed ${result.observation.totalTokens} raw tokens for ${result.task.id}: ${result.observation.thresholdStatus}.`); printWarnings(warnings, output); }
+      } else if (options.action === "decide") {
+        const result = await decideTaskBudget({
+          ...options,
+          action: options.decision
+        }, budgetDependencies);
+        const data = { action: "decide", task: result.task, decision: result.decision, lastEvent: result.state.lastEvent };
+        if (options.json) output.log(JSON.stringify(successEnvelope("budget", data), null, 2));
+        else output.log(`Recorded ${result.decision.action} for ${result.task.id} observation ${result.decision.observation.sequence}.`);
+      } else throw new SynodError(ERROR_CODES.INTERNAL, "Budget action was not parsed.");
       return 0;
     }
 
