@@ -18,6 +18,10 @@ export interface UsageOptions {
   cwd: string;
   json: boolean;
   threadId?: string;
+  sinceEvent?: string;
+  sinceCheckpoint?: boolean;
+  taskId?: string;
+  untilEvent?: string;
 }
 
 export interface WaitCommandOptions {
@@ -241,14 +245,46 @@ export function parseUsageArgs(
     if (arg === "-h" || arg === "--help") return { help: true };
     if (arg === "--json") options.json = true;
     else if (arg === "--by-model") continue;
-    else if (arg === "--session" || arg === "--cwd") {
+    else if (arg === "--since-checkpoint") {
+      if (options.sinceCheckpoint) {
+        throw new SynodError(ERROR_CODES.USAGE_INTERVAL_INVALID, "Usage selectors cannot be repeated.");
+      }
+      options.sinceCheckpoint = true;
+    } else if (["--session", "--cwd", "--since-event", "--task", "--until-event"].includes(arg)) {
       const value = optionValue(args, index, arg);
       if (arg === "--session") options.threadId = value;
-      else options.cwd = value;
+      else if (arg === "--cwd") options.cwd = value;
+      else if (arg === "--since-event") {
+        if (options.sinceEvent !== undefined) {
+          throw new SynodError(ERROR_CODES.USAGE_INTERVAL_INVALID, "Usage selectors cannot be repeated.");
+        }
+        options.sinceEvent = value;
+      } else if (arg === "--task") {
+        if (options.taskId !== undefined) {
+          throw new SynodError(ERROR_CODES.USAGE_INTERVAL_INVALID, "Usage selectors cannot be repeated.");
+        }
+        options.taskId = value;
+      } else {
+        if (options.untilEvent !== undefined) {
+          throw new SynodError(ERROR_CODES.USAGE_INTERVAL_INVALID, "Usage selectors cannot be repeated.");
+        }
+        options.untilEvent = value;
+      }
       index += 1;
     } else {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
     }
+  }
+  const selectors = [options.sinceEvent !== undefined, options.sinceCheckpoint === true, options.taskId !== undefined]
+    .filter(Boolean).length;
+  if (selectors > 1) {
+    throw new SynodError(
+      ERROR_CODES.USAGE_INTERVAL_INVALID,
+      "Usage accepts exactly one of --since-event, --since-checkpoint, or --task."
+    );
+  }
+  if (options.untilEvent && selectors === 0) {
+    throw new SynodError(ERROR_CODES.USAGE_INTERVAL_INVALID, "--until-event requires one usage start selector.");
   }
   return options;
 }

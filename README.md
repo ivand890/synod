@@ -269,7 +269,7 @@ Verification parses external JSON fail-closed, requires canonical serialization,
 
 Restore requires a destination checkout at the bundle's exact base `HEAD` with no relevant staged, unstaged, or untracked changes. It derives the expected normalized checkpoint fingerprint before mutation, writes required content-addressed blobs without changing commits or refs, constructs a private temporary index, and journals the exact prior index bytes and every affected filesystem path inside the destination Git directory. It holds Git's standard `index.lock` across final index installation so another Git writer cannot be overwritten. The operation commits only after a fresh capture exactly matches the bundled fingerprint. Any ordinary failure restores the prior index and worktree; a killed process leaves the durable journal, and the next restore invocation safely rolls it back before retrying. If a journaled path, index, or index lock changed outside Synod, rollback fails closed with `SYNOD_RECOVERY_ROLLBACK_FAILED` and preserves the journal instead of overwriting concurrent content.
 
-## Token usage by model
+## Token usage and canonical intervals
 
 Report the latest Codex session tree for the current project, including every delegated subagent. Synod compares active and archived root sessions and selects the one with the newest `updatedAt` value:
 
@@ -284,7 +284,25 @@ synod usage --session 019f... --by-model
 synod usage --json
 ```
 
-Synod reads Codex's local session metadata through the App Server and reconstructs deltas from the persisted rollout counters. Input includes cached input, and output includes reasoning output; the total therefore does not add those subsets twice. This command requires a locally installed `codex` executable with App Server support. Startup performs a minimal `thread/list` capability probe. Cleanup sends `SIGTERM`, waits up to two seconds, uses a bounded `SIGKILL` fallback, and detaches unresponsive process handles when exit still cannot be confirmed.
+Measure marginal usage after one validated canonical boundary, optionally closing it at a second exact event:
+
+```bash
+synod usage --since-event 12
+synod usage --since-event 12 --until-event 18
+synod usage --since-event 019f-event-id --until-event 019f-event-id
+synod usage --since-checkpoint
+synod usage --task SYN-090A
+```
+
+The three start selectors are mutually exclusive. Event selectors accept one exact canonical sequence or ID. `--since-checkpoint` binds the report to the currently acknowledged checkpoint and the canonical event that introduced it. `--task` starts at the task's first canonical event and closes at its first `DONE` or `SUPERSEDED` event; a live task ends at local capture time. Every interval uses `(start, end]`, so an observation at the start is excluded and one at the end is included. Canonical boundaries with indistinguishable timestamps are rejected instead of guessing sub-timestamp ordering.
+
+Synod validates the complete state/event chain read-only, then reads Codex's local session metadata through the App Server and reconstructs deltas from the complete persisted counter stream before clipping observations to the interval. Counter decreases start a new epoch. Later model reroutes affect only later observations. A closed report excludes descendants created after its end and records the included byte length and SHA-256 rollout prefix for each thread. JSON adds interval provenance, completeness, per-thread rows, per-role totals, and the thread/model/role cross-product while retaining the existing `models` and `total` fields.
+
+Whole-session and live canonical reports are explicitly `incomplete` persisted snapshots. A closed exact interval is `complete` only when every required rollout and timestamp is readable and ordered. Missing rollout paths, malformed required counters, timestamp regressions, ambiguous selectors, conflicting thread identities, and insufficient descendant creation evidence fail closed for exact reports.
+
+Usage reporting never writes canonical records, acknowledges a checkpoint, changes Git, or uploads telemetry. Normalized facts and reports do not retain prompts, messages, reasoning text, tool arguments, or tool outputs. Input includes cached input, and output includes reasoning output; the total therefore does not add those subsets twice. Token counts are usage evidence rather than billing data.
+
+This command requires a locally installed `codex` executable with App Server support. Startup performs a minimal `thread/list` capability probe. Cleanup sends `SIGTERM`, waits up to two seconds, uses a bounded `SIGKILL` fallback, and detaches unresponsive process handles when exit still cannot be confirmed.
 
 For a session that is still running, the report is a persisted snapshot: the active request appears after Codex emits its next token counter update.
 
