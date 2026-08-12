@@ -8,6 +8,7 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
 import { run } from "../src/cli.js";
+import { formatHandoff, generateHandoff } from "../src/handoff.js";
 import { initProject } from "../src/lifecycle.js";
 import {
   ORCHESTRATION_EVENTS_PATH,
@@ -337,6 +338,32 @@ test("a rotate decision authorizes policy and session replacement", async () => 
     evidence: ["handoff:rotation"]
   });
   const rotationStart = (await readOrchestration(directory)).events.at(-1)!;
+  await assert.rejects(
+    setTaskBudgetPolicy({
+      directory,
+      id: "T-BUDGET",
+      rootSessionId: "root-session",
+      startEvent: rotationStart.id,
+      hardTotalTokens: 100,
+      reason: "Attempt to clear the gate without a new session",
+      evidence: ["handoff:rotation"],
+      replace: true
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.BUDGET_INVALID
+  );
+  await assert.rejects(
+    setTaskBudgetPolicy({
+      directory,
+      id: "T-BUDGET",
+      rootSessionId: "rotated-root-session",
+      startEvent: start.id,
+      hardTotalTokens: 100,
+      reason: "Attempt to reuse the old phase boundary",
+      evidence: ["handoff:rotation"],
+      replace: true
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.BUDGET_INVALID
+  );
   const replaced = await setTaskBudgetPolicy({
     directory,
     id: "T-BUDGET",
@@ -353,6 +380,7 @@ test("a rotate decision authorizes policy and session replacement", async () => 
   assert.equal(replaced.task.budget?.policyHistory[0]?.rootSessionId, "root-session");
   assert.equal(replaced.task.budget?.observations[0]?.totalTokens, 120);
   assert.equal(replaced.task.budget?.decisions[0]?.action, "rotate");
+  assert.match(formatHandoff(await generateHandoff({ directory })), /Token budget: within; policy r2; raw unobserved;/);
   await transitionTask({ directory, id: "T-BUDGET", to: "READY", revision: 0 });
 });
 

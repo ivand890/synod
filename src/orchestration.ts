@@ -2998,11 +2998,23 @@ export async function setTaskBudgetPolicy({
     const task = assertCanonicalState(state, expected, taskId);
     if (replace && !task.budget) throw new SynodError(ERROR_CODES.BUDGET_NOT_CONFIGURED, `Task ${taskId} has no budget to replace.`);
     if (!replace && task.budget) throw new SynodError(ERROR_CODES.BUDGET_INVALID, `Task ${taskId} already has a budget; use an explicit replacement.`);
-    const structuralDecision = latestBudgetDecision(task)?.action;
-    const authorizedPolicyReplacement = structuralDecision === "rotate"
-      || Boolean(task.splitFrom && structuralDecision === "split");
+    const structuralDecision = latestBudgetDecision(task);
+    const authorizedPolicyReplacement = structuralDecision?.action === "rotate"
+      || Boolean(task.splitFrom && structuralDecision?.action === "split");
     if (task.budget?.thresholdStatus === "decision-required" && !authorizedPolicyReplacement) {
       throw new SynodError(ERROR_CODES.BUDGET_DECISION_REQUIRED, `Task ${taskId} requires a decision for its latest hard-budget observation before policy replacement.`);
+    }
+    if (task.budget?.thresholdStatus === "decision-required" && structuralDecision?.action === "rotate"
+      && (session === task.budget.policy.rootSessionId || start.sequence < structuralDecision.event.sequence)) {
+      throw new SynodError(ERROR_CODES.BUDGET_INVALID, "A rotate decision requires a new root session and a canonical start event at or after the decision.", {
+        details: {
+          taskId,
+          priorRootSessionId: task.budget.policy.rootSessionId,
+          requestedRootSessionId: session,
+          decisionEvent: structuralDecision.event,
+          requestedStartEvent: start
+        }
+      });
     }
     const prior = task.budget;
     const policy: TaskBudgetPolicy = {
