@@ -150,6 +150,8 @@ test("normalizes rollout role, reroutes, counter epochs, activity, and context w
 
   assert.equal(timeline.source, "subagent");
   assert.equal(timeline.role, "synod_implementer");
+  assert.equal(timeline.timestampedRecords, 12);
+  assert.equal(Object.hasOwn(timeline, "markers"), false);
   assert.deepEqual(timeline.tokens.map(item => [item.model, item.epoch, item.reset, item.usage.totalTokens]), [
     ["gpt-5.6-sol", 0, false, 110],
     ["gpt-5.6-luna", 0, false, 55],
@@ -519,6 +521,12 @@ test("usage CLI rejects ambiguous, repeated, and end-only interval selectors bef
     const envelope = JSON.parse(messages[0] ?? "");
     assert.equal(status, 1);
     assert.equal(envelope.error.code, ERROR_CODES.USAGE_INTERVAL_INVALID);
+  }
+  for (const options of [{ sinceEvent: "" }, { untilEvent: "" }]) {
+    await assert.rejects(
+      collectUsage({ ...options, clientFactory: () => fakeClient }),
+      (error: unknown) => error instanceof SynodError && error.code === ERROR_CODES.USAGE_INTERVAL_INVALID
+    );
   }
   assert.equal(starts, 0);
 });

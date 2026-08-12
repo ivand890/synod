@@ -283,7 +283,7 @@ export function parseUsageArgs(
       "Usage accepts exactly one of --since-event, --since-checkpoint, or --task."
     );
   }
-  if (options.untilEvent && selectors === 0) {
+  if (options.untilEvent !== undefined && selectors === 0) {
     throw new SynodError(ERROR_CODES.USAGE_INTERVAL_INVALID, "--until-event requires one usage start selector.");
   }
   return options;

@@ -275,7 +275,8 @@ export interface RolloutTimeline {
   };
   tokens: RolloutTokenObservation[];
   identity: RolloutIdentity;
-  markers: Array<RolloutIdentity & { observedAt: string; observedAtMs: number }>;
+  prefix?: { endMs: number; identity: RolloutIdentity };
+  timestampedRecords: number;
   activity: UsageThreadRow["activity"];
   activities: RolloutActivityObservation[];
   contexts: NonNullable<UsageThreadRow["currentContext"]>[];
@@ -347,10 +348,12 @@ function incrementActivity(activity: UsageThreadRow["activity"], kind: RolloutAc
 
 export async function readRolloutTimeline(
   rolloutPath: string,
-  { openStream = createReadStream }: { openStream?: (path: string) => NodeJS.ReadableStream } = {}
+  { openStream = createReadStream, identityEndMs }: {
+    openStream?: (path: string) => NodeJS.ReadableStream;
+    identityEndMs?: number;
+  } = {}
 ): Promise<RolloutTimeline> {
   const tokens: RolloutTokenObservation[] = [];
-  const markers: RolloutTimeline["markers"] = [];
   const activity = { turnsStarted: 0, turnsCompleted: 0, turnsAborted: 0, compactions: 0 };
   const activities: RolloutActivityObservation[] = [];
   const issues: RolloutIssue[] = [];
@@ -368,6 +371,8 @@ export async function readRolloutTimeline(
   let missingTimestamps = 0;
   let timestampRegressions = 0;
   let previousTimestamp = Number.NEGATIVE_INFINITY;
+  let timestampedRecords = 0;
+  let prefixIdentity: RolloutIdentity | undefined;
   let lastObservedAt: string | undefined;
   let currentContext: UsageThreadRow["currentContext"] | undefined;
   const contexts: NonNullable<UsageThreadRow["currentContext"]>[] = [];
@@ -393,19 +398,20 @@ export async function readRolloutTimeline(
     }
     const observed = timestamp(event.timestamp);
     if (observed) {
+      timestampedRecords += 1;
       if (observed.milliseconds < previousTimestamp) {
         timestampRegressions += 1;
         issues.push({ kind: "timestamp-regression", bytes, observedAtMs: observed.milliseconds });
       }
       previousTimestamp = Math.max(previousTimestamp, observed.milliseconds);
       lastObservedAt = observed.iso;
-      markers.push({
-        bytes,
-        sha256: `sha256:${hasher.copy().digest("hex")}`,
-        lastObservedAt: observed.iso,
-        observedAt: observed.iso,
-        observedAtMs: observed.milliseconds
-      });
+      if (identityEndMs !== undefined && observed.milliseconds <= identityEndMs) {
+        prefixIdentity = {
+          bytes,
+          sha256: `sha256:${hasher.copy().digest("hex")}`,
+          lastObservedAt: observed.iso
+        };
+      }
     } else {
       missingTimestamps += 1;
       issues.push({ kind: "missing-timestamp", bytes });
@@ -515,7 +521,16 @@ export async function readRolloutTimeline(
       sha256: `sha256:${hasher.digest("hex")}`,
       ...(lastObservedAt ? { lastObservedAt } : {})
     },
-    markers,
+    ...(identityEndMs !== undefined ? {
+      prefix: {
+        endMs: identityEndMs,
+        identity: prefixIdentity || {
+          bytes: 0,
+          sha256: `sha256:${createHash("sha256").digest("hex")}`
+        }
+      }
+    } : {}),
+    timestampedRecords,
     activity,
     activities,
     contexts,
@@ -730,6 +745,15 @@ export async function resolveUsageInterval(
   options: UsageIntervalOptions,
   capturedAt: string
 ): Promise<UsageInterval | undefined> {
+  for (const [option, value] of [
+    ["sinceEvent", options.sinceEvent],
+    ["taskId", options.taskId],
+    ["untilEvent", options.untilEvent]
+  ] as const) {
+    if (value !== undefined && value.trim().length === 0) {
+      throw new SynodError(ERROR_CODES.USAGE_INTERVAL_INVALID, `Usage interval ${option} cannot be empty.`);
+    }
+  }
   const selectors = [options.sinceEvent !== undefined, options.sinceCheckpoint === true, options.taskId !== undefined]
     .filter(Boolean).length;
   if (selectors === 0) {
@@ -750,7 +774,7 @@ export async function resolveUsageInterval(
   let start: UsageBoundary;
   let defaultEnd: OrchestrationEvent | undefined;
 
-  if (options.sinceEvent) {
+  if (options.sinceEvent !== undefined) {
     const event = selectedEvent(events, options.sinceEvent);
     start = { kind: "event", timestamp: eventTime(event), event: eventIdentity(event) };
   } else if (options.sinceCheckpoint) {
@@ -776,7 +800,7 @@ export async function resolveUsageInterval(
     defaultEnd = terminalTaskEvent(events, taskId, event.sequence);
   }
 
-  const endEvent = options.untilEvent ? selectedEvent(events, options.untilEvent) : defaultEnd;
+  const endEvent = options.untilEvent !== undefined ? selectedEvent(events, options.untilEvent) : defaultEnd;
   const end: UsageInterval["end"] = endEvent
     ? { kind: "event", timestamp: eventTime(endEvent), event: eventIdentity(endEvent) }
     : { kind: "capture", timestamp: capturedAt };
@@ -826,13 +850,12 @@ function threadsForInterval(threads: ThreadRecord[], rootId: string, interval: U
 
 function timelineIdentityAt(timeline: RolloutTimeline, endMs: number | undefined): RolloutIdentity {
   if (endMs === undefined) return timeline.identity;
-  let selected: RolloutTimeline["markers"][number] | undefined;
-  for (const marker of timeline.markers) {
-    if (marker.observedAtMs <= endMs) selected = marker;
+  if (!timeline.prefix || timeline.prefix.endMs !== endMs) {
+    throw new SynodError(ERROR_CODES.INTERNAL, "Rollout prefix identity was not collected for the requested interval.", {
+      details: { requestedEndMs: endMs, collectedEndMs: timeline.prefix?.endMs }
+    });
   }
-  return selected
-    ? { bytes: selected.bytes, sha256: selected.sha256, lastObservedAt: selected.observedAt }
-    : { bytes: 0, sha256: `sha256:${createHash("sha256").digest("hex")}` };
+  return timeline.prefix.identity;
 }
 
 function selectedTokens(timeline: RolloutTimeline, interval: UsageInterval | undefined): RolloutTokenObservation[] {
@@ -840,7 +863,7 @@ function selectedTokens(timeline: RolloutTimeline, interval: UsageInterval | und
   const endMs = Date.parse(interval.end.timestamp);
   const prefix = timelineIdentityAt(timeline, endMs);
   const issues = timeline.issues.filter(issue => issue.bytes <= prefix.bytes);
-  if ((prefix.bytes === 0 && timeline.identity.bytes > 0 && timeline.markers.length === 0) || issues.length > 0) {
+  if ((prefix.bytes === 0 && timeline.identity.bytes > 0 && timeline.timestampedRecords === 0) || issues.length > 0) {
     const counts = {
       malformedRecords: issues.filter(issue => issue.kind === "malformed-record").length,
       invalidTokenRecords: issues.filter(issue => issue.kind === "invalid-token-record").length,
@@ -966,7 +989,10 @@ export async function collectUsage({
         );
       }
 
-      const timeline = await readRolloutTimeline(thread.path);
+      const intervalEndMs = interval ? Date.parse(interval.end.timestamp) : undefined;
+      const timeline = await readRolloutTimeline(thread.path, {
+        ...(intervalEndMs !== undefined ? { identityEndMs: intervalEndMs } : {})
+      });
       if (!interval) {
         if (timeline.malformedRecords > 0) completenessReasons.add("malformed-rollout-records");
         if (timeline.invalidTokenRecords > 0) completenessReasons.add("invalid-token-records");
@@ -1006,7 +1032,6 @@ export async function collectUsage({
         addUsage(attribution, observation.usage);
         attributionAggregate.set(key, attribution);
       }
-      const intervalEndMs = interval ? Date.parse(interval.end.timestamp) : undefined;
       const selectedContext = [...timeline.contexts].reverse().find(item => {
         const observedAt = Date.parse(item.observedAt);
         return interval
