@@ -239,7 +239,13 @@ test("rejects duplicate and negative tool-call pairs in an exact interval", asyn
       clock: () => "2026-08-12T12:02:00.000Z"
     }),
     (error: unknown) => error instanceof SynodError && error.code === ERROR_CODES.ROLLOUT_INVALID
-      && (error.details as { coordinationIssues?: number } | undefined)?.coordinationIssues === 3
+      && (error.details as { duplicateStarts?: number } | undefined)?.duplicateStarts === 1
+  );
+  await assert.rejects(
+    collectUsage({ cwd: directory, clientFactory: () => usageClient(root) }),
+    (error: unknown) => error instanceof SynodError && error.code === ERROR_CODES.ROLLOUT_INVALID
+      && (error.details as { duplicateOutputs?: number; negativeDurations?: number } | undefined)?.duplicateOutputs === 1
+      && (error.details as { negativeDurations?: number } | undefined)?.negativeDurations === 1
   );
 });
 

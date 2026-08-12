@@ -1139,6 +1139,21 @@ export async function collectUsage({
       const timeline = await readRolloutTimeline(thread.path, {
         ...(intervalEndMs !== undefined ? { identityEndMs: intervalEndMs } : {})
       });
+      const pairingIssues = timeline.issues.filter(issue => [
+        "duplicate-tool-call-start",
+        "duplicate-tool-call-output",
+        "negative-tool-call-duration"
+      ].includes(issue.kind));
+      if (pairingIssues.length > 0) {
+        throw new SynodError(ERROR_CODES.ROLLOUT_INVALID, "Tool calls require unique, non-negative call_id pairs.", {
+          details: {
+            threadId: thread.id,
+            duplicateStarts: pairingIssues.filter(issue => issue.kind === "duplicate-tool-call-start").length,
+            duplicateOutputs: pairingIssues.filter(issue => issue.kind === "duplicate-tool-call-output").length,
+            negativeDurations: pairingIssues.filter(issue => issue.kind === "negative-tool-call-duration").length
+          }
+        });
+      }
       if (!interval) {
         if (timeline.malformedRecords > 0) completenessReasons.add("malformed-rollout-records");
         if (timeline.invalidTokenRecords > 0) completenessReasons.add("invalid-token-records");
