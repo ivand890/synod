@@ -82,6 +82,19 @@ import {
   type TaskBudgetReport
 } from "./budgets.js";
 import type { UsageClient } from "./usage.js";
+import { resolveUsageRootSession } from "./usage.js";
+import {
+  collectRotationReport,
+  currentRotationPhase,
+  isProjectRotation,
+  isRotationThresholds,
+  type ProjectRotation,
+  type RotationHandoffIdentity,
+  type RotationPolicy,
+  type RotationRecommendation,
+  type RotationReport,
+  type RotationThresholds
+} from "./rotation.js";
 
 export const LEGACY_ORCHESTRATION_SCHEMA_VERSION = 1;
 export const PREVIOUS_ORCHESTRATION_SCHEMA_VERSION = 2;
@@ -225,6 +238,7 @@ export interface OrchestrationStateCore {
   taskOrder: string[];
   tasks: Record<string, OrchestrationTask>;
   evidenceCounter: number;
+  rotation?: ProjectRotation;
 }
 
 export interface OrchestrationState extends OrchestrationStateCore {
@@ -332,6 +346,7 @@ export interface OrchestrationDependencies extends TransactionHooks, Record<stri
   checkpointOverlay?: Map<string, string>;
   usageClientFactory?: () => UsageClient;
   usageCollector?: Parameters<typeof collectTaskBudgetReport>[0]["collector"];
+  usageSessionResolver?: typeof resolveUsageRootSession;
 }
 
 interface EventMetadata {
@@ -388,6 +403,7 @@ export interface OrchestrationStatusResult {
   drift: CheckpointDrift;
   taskCounts: Record<TaskState, number>;
   tasks: OrchestrationTask[];
+  rotation: ProjectRotation | null;
   leaseExpiryCandidates: Array<{
     taskId: string;
     leaseId: string;
@@ -998,6 +1014,7 @@ export function renderStatusMarkdown(
     `Last event: ${state.lastEvent.sequence} (${state.lastEvent.hash})`,
     `Checkpoint: ${checkpointLabel(state.checkpoint)}`,
     `Live drift: ${drift.detected ? "DETECTED" : `run ${synodCommand} status to compare the recorded checkpoint with the current worktree`}`,
+    `Phase rotation: ${state.rotation ? `policy r${state.rotation.policy.revision}; session ${markdownCell(currentRotationPhase(state.rotation).rootSessionId)}; ${state.rotation.recommendations.length} recommendation(s); ${state.rotation.verifications.length} verified rotation(s)` : "not configured"}`,
     "",
     "## Tasks",
     "",
@@ -1514,7 +1531,8 @@ function isOrchestrationStateCoreShape(value: unknown): value is OrchestrationSt
     && isStringArray(value.taskOrder)
     && isRecord(value.tasks)
     && Object.values(value.tasks).every(isOrchestrationTask)
-    && isNonNegativeInteger(value.evidenceCounter);
+    && isNonNegativeInteger(value.evidenceCounter)
+    && (value.rotation === undefined || isProjectRotation(value.rotation));
 }
 
 function isOrchestrationStateShape(value: unknown): value is OrchestrationState {
@@ -1539,6 +1557,29 @@ export function validateOrchestrationState(value: unknown): OrchestrationState {
   }
   if (!isOrchestrationStateShape(value)) invalidState("Synod state is missing required canonical fields.");
   const state = value;
+
+  if (state.rotation) {
+    const policies = [...state.rotation.policyHistory, state.rotation.policy];
+    let priorRecordedAt = 0;
+    for (const policy of policies) {
+      const recordedAt = Date.parse(policy.recordedAt);
+      if (recordedAt < priorRecordedAt) invalidState("Project rotation policies are not chronologically ordered.");
+      priorRecordedAt = recordedAt;
+    }
+    const verified = new Set(state.rotation.verifications.map(item => `${item.recommendation.sequence}:${item.recommendation.id}`));
+    const pending = state.rotation.recommendations.filter(item => !verified.has(`${item.event.sequence}:${item.event.id}`));
+    if (pending.length > 1 || (pending[0] && pending[0].policyRevision !== state.rotation.policy.revision)) {
+      invalidState("Project rotation has an invalid pending recommendation history.");
+    }
+    for (const recommendation of state.rotation.recommendations) {
+      if (recommendation.metrics.some(metric => metric.triggered !== recommendation.reasons.includes(metric.name))) {
+        invalidState("Project rotation recommendation reasons do not match their triggering metrics.");
+      }
+      if (recommendation.completedTaskIds.some((id, index) => index > 0 && id <= recommendation.completedTaskIds[index - 1]!)) {
+        invalidState("Project rotation completed-task evidence is not uniquely ordered.");
+      }
+    }
+  }
 
   if (new Set(state.taskOrder).size !== state.taskOrder.length || Object.keys(state.tasks).length !== state.taskOrder.length) {
     invalidState("Task order and task map do not describe the same unique tasks.");
@@ -1854,6 +1895,51 @@ function validateEventLog(events: unknown[]): OrchestrationEvent[] {
     }
     bySequence.set(event.sequence, event as unknown as OrchestrationEvent);
     if (current) {
+      if (event.state.rotation) {
+        for (const policy of [...event.state.rotation.policyHistory, event.state.rotation.policy]) {
+          const start = bySequence.get(policy.startEvent.sequence);
+          if (!start || start.id !== policy.startEvent.id || start.eventHash !== policy.startEvent.hash
+            || policy.startEvent.sequence >= event.sequence) {
+            throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "A rotation policy references a stale or non-canonical start event.", {
+              details: { policyRevision: policy.revision }
+            });
+          }
+        }
+        for (const recommendation of event.state.rotation.recommendations) {
+          const prepared = bySequence.get(recommendation.event.sequence);
+          const handoff = bySequence.get(recommendation.handoff.event.sequence);
+          const phaseStart = bySequence.get(recommendation.startEvent.sequence);
+          const phaseMatches = phaseStart && phaseStart.id === recommendation.startEvent.id
+            && ("hash" in recommendation.startEvent
+              ? phaseStart.eventHash === recommendation.startEvent.hash
+              : phaseStart.previousHash === recommendation.startEvent.previousHash);
+          if (!prepared || prepared.id !== recommendation.event.id
+            || prepared.previousHash !== recommendation.event.previousHash
+            || prepared.type !== "project.rotation-prepared"
+            || !handoff || handoff.id !== recommendation.handoff.event.id
+            || handoff.eventHash !== recommendation.handoff.event.hash
+            || recommendation.handoff.event.sequence >= recommendation.event.sequence
+            || !phaseMatches) {
+            throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "A phase-rotation recommendation identity is not canonical.", {
+              details: { sequence: recommendation.event.sequence }
+            });
+          }
+        }
+        for (const verification of event.state.rotation.verifications) {
+          const verifiedEvent = bySequence.get(verification.event.sequence);
+          const recommendation = bySequence.get(verification.recommendation.sequence);
+          if (!verifiedEvent || verifiedEvent.id !== verification.event.id
+            || verifiedEvent.previousHash !== verification.event.previousHash
+            || verifiedEvent.type !== "project.rotation-verified"
+            || !recommendation || recommendation.id !== verification.recommendation.id
+            || recommendation.previousHash !== verification.recommendation.previousHash
+            || recommendation.type !== "project.rotation-prepared") {
+            throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "A phase-rotation verification identity is not canonical.", {
+              details: { sequence: verification.event.sequence }
+            });
+          }
+        }
+      }
       for (const task of Object.values(event.state.tasks)) {
         if (!task.budget) continue;
         for (const policy of [...task.budget.policyHistory, task.budget.policy]) {
@@ -3270,6 +3356,287 @@ export function formatTaskBudgetReport(report: TaskBudgetReport): string {
     `Start event: ${report.policy.startEvent.sequence}:${report.policy.startEvent.id}`,
     `Report: ${report.reportHash}`
   ].join("\n");
+}
+
+function rotationEvidence(values: unknown[]): string[] {
+  const evidence = [...new Set(values.map(value => String(value).trim()).filter(Boolean))];
+  if (evidence.length === 0) throw new SynodError(ERROR_CODES.ROTATION_INVALID, "Rotation changes require at least one evidence reference.");
+  return evidence;
+}
+
+function rotationHandoffIdentity(state: OrchestrationState): RotationHandoffIdentity {
+  return {
+    event: { sequence: state.lastEvent.sequence, id: state.lastEvent.id, hash: state.lastEvent.hash },
+    checkpoint: {
+      capturedAt: state.checkpoint.capturedAt,
+      branch: state.checkpoint.branch,
+      head: state.checkpoint.head,
+      worktreeFingerprint: state.checkpoint.worktree.fingerprint,
+      ...(state.checkpoint.worktree.snapshot ? { snapshotHash: state.checkpoint.worktree.snapshot.contentHash } : {})
+    }
+  };
+}
+
+function completedTasksSince(events: OrchestrationEvent[], startSequence: number, endSequence: number): string[] {
+  return [...new Set(events
+    .filter(event => event.sequence > startSequence
+      && event.sequence <= endSequence
+      && event.taskId
+      && (event.toState === "DONE" || event.toState === "SUPERSEDED"))
+    .map(event => event.taskId!))].sort();
+}
+
+function pendingRotationRecommendation(rotation: ProjectRotation): RotationRecommendation | undefined {
+  const verified = new Set(rotation.verifications.map(item => `${item.recommendation.sequence}:${item.recommendation.id}`));
+  return rotation.recommendations.find(item => !verified.has(`${item.event.sequence}:${item.event.id}`));
+}
+
+export interface SetRotationPolicyOptions {
+  directory?: string;
+  rootSessionId?: string;
+  startEvent?: string;
+  thresholds?: RotationThresholds;
+  reason?: string;
+  evidence?: unknown[];
+  actor?: string;
+  replace?: boolean;
+}
+
+export async function setRotationPolicy({
+  directory = ".",
+  rootSessionId,
+  startEvent,
+  thresholds,
+  reason,
+  evidence = [],
+  actor = "supervisor",
+  replace = false
+}: SetRotationPolicyOptions = {}, dependencies: OrchestrationDependencies = {}) {
+  const targetDirectory = path.resolve(directory);
+  const session = String(rootSessionId || "").trim();
+  const explanation = String(reason || "").trim();
+  const principal = String(actor || "").trim();
+  const evidenceReferences = rotationEvidence(evidence);
+  if (!session || !String(startEvent || "").trim() || !isRotationThresholds(thresholds) || !explanation || !principal) {
+    throw new SynodError(ERROR_CODES.ROTATION_INVALID, "Rotation policy requires a root session, exact start event, at least one valid threshold, actor, reason, and evidence.");
+  }
+  const canonical = await readOrchestration(targetDirectory);
+  const start = budgetEventIdentity(canonical.events, String(startEvent));
+  const expected = canonical.state.lastEvent;
+  return commitMutation(targetDirectory, replace ? "project.rotation-policy-replaced" : "project.rotation-policy-set", { actor: principal }, (state, context) => {
+    if (state.lastEvent.sequence !== expected.sequence || state.lastEvent.id !== expected.id || state.lastEvent.hash !== expected.hash) {
+      throw new SynodError(ERROR_CODES.ROTATION_STALE, "Rotation policy input was computed from stale canonical state.");
+    }
+    if (replace && !state.rotation) throw new SynodError(ERROR_CODES.ROTATION_NOT_CONFIGURED, "No project rotation policy is configured.");
+    if (!replace && state.rotation) throw new SynodError(ERROR_CODES.ROTATION_INVALID, "A project rotation policy already exists; use an explicit replacement.");
+    if (state.rotation && pendingRotationRecommendation(state.rotation)) {
+      throw new SynodError(ERROR_CODES.ROTATION_STALE, "The pending phase-rotation recommendation must be verified before replacing its policy.");
+    }
+    const prior = state.rotation;
+    const policy: RotationPolicy = {
+      revision: (prior?.policy.revision || 0) + 1,
+      rootSessionId: session,
+      startEvent: start,
+      thresholds: structuredClone(thresholds),
+      actor: principal,
+      reason: explanation,
+      evidence: evidenceReferences,
+      recordedAt: context.timestamp
+    };
+    state.rotation = {
+      policy,
+      policyHistory: prior ? [...prior.policyHistory, prior.policy] : [],
+      recommendations: prior ? [...prior.recommendations] : [],
+      verifications: prior ? [...prior.verifications] : []
+    };
+    return {
+      metadata: { payload: { policy, replacedRevision: prior?.policy.revision } },
+      result: { policy, rotation: state.rotation }
+    };
+  }, dependencies);
+}
+
+async function rotationReportFromCanonical(
+  targetDirectory: string,
+  canonical: Awaited<ReturnType<typeof readOrchestration>>,
+  dependencies: OrchestrationDependencies
+): Promise<RotationReport> {
+  const rotation = canonical.state.rotation;
+  if (!rotation) throw new SynodError(ERROR_CODES.ROTATION_NOT_CONFIGURED, "No project rotation policy is configured.");
+  const phase = currentRotationPhase(rotation);
+  return collectRotationReport({
+    cwd: targetDirectory,
+    rotation,
+    handoff: rotationHandoffIdentity(canonical.state),
+    completedTaskIds: completedTasksSince(canonical.events, phase.startEvent.sequence, canonical.state.lastEvent.sequence),
+    ...(dependencies.usageClientFactory ? { clientFactory: dependencies.usageClientFactory } : {}),
+    ...(dependencies.clock ? { clock: dependencies.clock } : {}),
+    ...(dependencies.usageCollector ? { collector: dependencies.usageCollector } : {})
+  });
+}
+
+export async function reportProjectRotation(
+  { directory = "." }: { directory?: string } = {},
+  dependencies: OrchestrationDependencies = {}
+): Promise<RotationReport> {
+  const targetDirectory = path.resolve(directory);
+  return rotationReportFromCanonical(targetDirectory, await readOrchestration(targetDirectory), dependencies);
+}
+
+export async function prepareProjectRotation(
+  { directory = ".", actor = "supervisor" }: { directory?: string; actor?: string } = {},
+  dependencies: OrchestrationDependencies = {}
+) {
+  const targetDirectory = path.resolve(directory);
+  const canonical = await readOrchestration(targetDirectory);
+  if (!canonical.state.rotation) throw new SynodError(ERROR_CODES.ROTATION_NOT_CONFIGURED, "No project rotation policy is configured.");
+  if (pendingRotationRecommendation(canonical.state.rotation)) {
+    throw new SynodError(ERROR_CODES.ROTATION_STALE, "A phase-rotation recommendation is already waiting for verification.");
+  }
+  const expected = canonical.state.lastEvent;
+  const policyRevision = canonical.state.rotation.policy.revision;
+  const report = await rotationReportFromCanonical(targetDirectory, canonical, dependencies);
+  if (!report.recommended) {
+    throw new SynodError(ERROR_CODES.ROTATION_NOT_RECOMMENDED, "No configured phase-rotation threshold has been reached.", {
+      details: { metrics: report.metrics }
+    });
+  }
+  const afterReport = await readOrchestration(targetDirectory);
+  if (afterReport.state.lastEvent.sequence !== expected.sequence
+    || afterReport.state.lastEvent.id !== expected.id
+    || afterReport.state.lastEvent.hash !== expected.hash
+    || afterReport.state.rotation?.policy.revision !== policyRevision) {
+    throw new SynodError(ERROR_CODES.ROTATION_STALE, "Canonical state changed while the rotation recommendation was being collected.");
+  }
+  const rechecked = await rotationReportFromCanonical(targetDirectory, afterReport, {
+    ...dependencies,
+    clock: () => report.usage.capturedAt
+  });
+  if (rechecked.reportHash !== report.reportHash) {
+    throw new SynodError(ERROR_CODES.ROTATION_STALE, "Rollout provenance changed while the rotation recommendation was being prepared.", {
+      details: { firstReportHash: report.reportHash, secondReportHash: rechecked.reportHash }
+    });
+  }
+  return commitMutation(targetDirectory, "project.rotation-prepared", { actor }, (state, context) => {
+    if (state.lastEvent.sequence !== expected.sequence || state.lastEvent.id !== expected.id || state.lastEvent.hash !== expected.hash
+      || state.rotation?.policy.revision !== policyRevision) {
+      throw new SynodError(ERROR_CODES.ROTATION_STALE, "Rotation recommendation input is stale.");
+    }
+    if (checkpointDrift(state.checkpoint, context.checkpoint).detected) {
+      throw new SynodError(ERROR_CODES.ROTATION_STALE, "Checkpoint drift prevents a canonical phase-rotation handoff.", {
+        details: checkpointDrift(state.checkpoint, context.checkpoint)
+      });
+    }
+    if (pendingRotationRecommendation(state.rotation)) {
+      throw new SynodError(ERROR_CODES.ROTATION_STALE, "A phase-rotation recommendation is already pending.");
+    }
+    const recommendation: RotationRecommendation = {
+      policyRevision,
+      event: context.event,
+      reportHash: report.reportHash,
+      usageReportHash: report.usageReportHash,
+      rootSessionId: report.phase.rootSessionId,
+      startEvent: report.phase.startEvent,
+      capturedAt: report.usage.capturedAt,
+      handoff: report.handoff,
+      metrics: report.metrics,
+      reasons: report.reasons,
+      completeness: report.usage.completeness,
+      completedTaskIds: report.completedTaskIds,
+      rollouts: report.usage.threads.map(item => ({
+        threadId: item.threadId,
+        bytes: item.rollout.bytes,
+        sha256: item.rollout.sha256
+      })).sort((left, right) => left.threadId < right.threadId ? -1 : left.threadId > right.threadId ? 1 : 0)
+    };
+    state.rotation.recommendations.push(recommendation);
+    return {
+      metadata: { payload: { recommendation } },
+      result: { recommendation, report, rotation: state.rotation }
+    };
+  }, dependencies);
+}
+
+function selectedRotationRecommendation(rotation: ProjectRotation, selector: string): RotationRecommendation {
+  const normalized = String(selector || "").trim();
+  const sequence = /^[1-9]\d*$/.test(normalized) ? Number(normalized) : undefined;
+  const matches = rotation.recommendations.filter(item => sequence === undefined ? item.event.id === normalized : item.event.sequence === sequence);
+  if (matches.length !== 1) {
+    throw new SynodError(ERROR_CODES.ROTATION_STALE, `Rotation recommendation did not resolve exactly once: ${normalized}.`, {
+      details: { selector: normalized, matches: matches.length }
+    });
+  }
+  return matches[0]!;
+}
+
+export async function verifyProjectRotation({
+  directory = ".",
+  recommendation,
+  rootSessionId,
+  actor = "supervisor"
+}: {
+  directory?: string;
+  recommendation?: string;
+  rootSessionId?: string;
+  actor?: string;
+} = {}, dependencies: OrchestrationDependencies = {}) {
+  const targetDirectory = path.resolve(directory);
+  const selectedSession = String(rootSessionId || "").trim();
+  const canonical = await readOrchestration(targetDirectory);
+  const rotation = canonical.state.rotation;
+  if (!rotation) throw new SynodError(ERROR_CODES.ROTATION_NOT_CONFIGURED, "No project rotation policy is configured.");
+  const selected = selectedRotationRecommendation(rotation, String(recommendation || ""));
+  const pending = pendingRotationRecommendation(rotation);
+  if (!pending || pending.event.sequence !== selected.event.sequence || pending.event.id !== selected.event.id
+    || selected.policyRevision !== rotation.policy.revision
+    || canonical.state.lastEvent.sequence !== selected.event.sequence || canonical.state.lastEvent.id !== selected.event.id
+    || selectedSession === selected.rootSessionId) {
+    throw new SynodError(ERROR_CODES.ROTATION_STALE, "Rotation verification must target the latest pending recommendation from a different root session.");
+  }
+  const expected = canonical.state.lastEvent;
+  const resolver = dependencies.usageSessionResolver || resolveUsageRootSession;
+  const session = await resolver({
+    cwd: targetDirectory,
+    threadId: selectedSession,
+    ...(dependencies.usageClientFactory ? { clientFactory: dependencies.usageClientFactory } : {})
+  });
+  if (session.threadId !== selectedSession || session.threadId === selected.rootSessionId) {
+    throw new SynodError(ERROR_CODES.ROTATION_SESSION_INVALID, "The verified session does not establish a new root identity.");
+  }
+  const afterSession = await readOrchestration(targetDirectory);
+  if (afterSession.state.lastEvent.sequence !== expected.sequence || afterSession.state.lastEvent.id !== expected.id
+    || afterSession.state.lastEvent.hash !== expected.hash) {
+    throw new SynodError(ERROR_CODES.ROTATION_STALE, "Canonical state changed while the new root session was being verified.");
+  }
+  return commitMutation(targetDirectory, "project.rotation-verified", { actor }, (state, context) => {
+    if (state.lastEvent.sequence !== expected.sequence || state.lastEvent.id !== expected.id || state.lastEvent.hash !== expected.hash
+      || !state.rotation || state.rotation.policy.revision !== selected.policyRevision) {
+      throw new SynodError(ERROR_CODES.ROTATION_STALE, "Rotation verification input is stale.");
+    }
+    const currentPending = pendingRotationRecommendation(state.rotation);
+    if (!currentPending || currentPending.event.sequence !== selected.event.sequence || currentPending.event.id !== selected.event.id) {
+      throw new SynodError(ERROR_CODES.ROTATION_STALE, "Rotation recommendation is no longer pending.");
+    }
+    const drift = checkpointDrift(state.checkpoint, context.checkpoint);
+    if (drift.detected || stableStringify(rotationHandoffIdentity(state).checkpoint) !== stableStringify(selected.handoff.checkpoint)) {
+      throw new SynodError(ERROR_CODES.ROTATION_STALE, "Checkpoint drift or a stale handoff prevents rotation verification.", { details: { drift } });
+    }
+    const verification = {
+      policyRevision: selected.policyRevision,
+      event: context.event,
+      recommendation: selected.event,
+      oldRootSessionId: selected.rootSessionId,
+      newRootSessionId: session.threadId,
+      priorStartEvent: selected.startEvent,
+      handoff: selected.handoff,
+      verifiedAt: context.timestamp
+    };
+    state.rotation.verifications.push(verification);
+    return {
+      metadata: { payload: { verification } },
+      result: { verification, session, rotation: state.rotation }
+    };
+  }, dependencies);
 }
 
 export interface OverrideCorrectionOptions {
@@ -4793,6 +5160,7 @@ async function orchestrationStatusFromCanonical(
     drift,
     taskCounts: counts,
     tasks: taskList(state),
+    rotation: state.rotation || null,
     leaseExpiryCandidates,
     markdownView: ORCHESTRATION_STATUS_PATH,
     ...(delta ? { delta } : {})
@@ -4920,6 +5288,7 @@ export function formatOrchestrationStatus(result: OrchestrationStatusResult): st
   lines.push(`State schema: ${result.stateSchemaVersion}; events: ${result.eventCount}`);
   lines.push(`Checkpoint: ${checkpointLabel(result.checkpoint)}`);
   lines.push(`Current: ${checkpointLabel(result.currentCheckpoint)}`);
+  lines.push(`Phase rotation: ${result.rotation ? `policy r${result.rotation.policy.revision}; session ${currentRotationPhase(result.rotation).rootSessionId}; ${result.rotation.recommendations.length} recommendation(s); ${result.rotation.verifications.length} verified` : "not configured"}`);
   for (const task of result.tasks) {
     const lease = task.lease
       ? `lease ${task.lease.id} g${task.lease.generation} owner ${task.lease.ownerThread} expires ${task.lease.expiresAt}`

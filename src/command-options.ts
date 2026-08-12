@@ -22,6 +22,7 @@ export interface UsageOptions {
   sinceCheckpoint?: boolean;
   taskId?: string;
   untilEvent?: string;
+  priceFile?: string;
 }
 
 export interface WaitCommandOptions {
@@ -219,6 +220,40 @@ export interface BudgetDecisionCommandOptions extends BudgetCommonOptions {
 
 export type BudgetCommandOptions = BudgetPolicyCommandOptions | BudgetReadCommandOptions | BudgetDecisionCommandOptions;
 
+interface RotationCommonOptions {
+  directory: string;
+  json: boolean;
+  actor: string;
+}
+
+export interface RotationPolicyCommandOptions extends RotationCommonOptions {
+  action: "set" | "replace";
+  rootSessionId: string;
+  startEvent: string;
+  thresholds: {
+    supervisorContextPercent?: number;
+    compactions?: number;
+    waitCalls?: number;
+    waitDurationMs?: number;
+    completedTasks?: number;
+  };
+  reason: string;
+  evidence: string[];
+  replace: boolean;
+}
+
+export interface RotationReadCommandOptions extends RotationCommonOptions {
+  action: "report" | "prepare";
+}
+
+export interface RotationVerifyCommandOptions extends RotationCommonOptions {
+  action: "verify";
+  recommendation: string;
+  rootSessionId: string;
+}
+
+export type RotationCommandOptions = RotationPolicyCommandOptions | RotationReadCommandOptions | RotationVerifyCommandOptions;
+
 function missingValue(option: string): SynodError {
   return new SynodError(ERROR_CODES.MISSING_OPTION_VALUE, `Missing value for ${option}.`, {
     details: { option }
@@ -283,7 +318,7 @@ export function parseUsageArgs(
         throw new SynodError(ERROR_CODES.USAGE_INTERVAL_INVALID, "Usage selectors cannot be repeated.");
       }
       options.sinceCheckpoint = true;
-    } else if (["--session", "--cwd", "--since-event", "--task", "--until-event"].includes(arg)) {
+    } else if (["--session", "--cwd", "--since-event", "--task", "--until-event", "--price-file"].includes(arg)) {
       const value = optionValue(args, index, arg);
       if (arg === "--session") options.threadId = value;
       else if (arg === "--cwd") options.cwd = value;
@@ -297,11 +332,14 @@ export function parseUsageArgs(
           throw new SynodError(ERROR_CODES.USAGE_INTERVAL_INVALID, "Usage selectors cannot be repeated.");
         }
         options.taskId = value;
-      } else {
+      } else if (arg === "--until-event") {
         if (options.untilEvent !== undefined) {
           throw new SynodError(ERROR_CODES.USAGE_INTERVAL_INVALID, "Usage selectors cannot be repeated.");
         }
         options.untilEvent = value;
+      } else {
+        if (options.priceFile !== undefined) throw new SynodError(ERROR_CODES.COST_PRICE_INVALID, "Usage price files cannot be repeated.");
+        options.priceFile = value;
       }
       index += 1;
     } else {
@@ -870,4 +908,77 @@ export function parseBudgetArgs(args: string[]): BudgetCommandOptions | HelpOpti
     throw new SynodError(ERROR_CODES.BUDGET_INVALID, "Budget decide requires --observation, --decision, --reason, --evidence, and --additional-tokens only for continue.");
   }
   return { action: "decide", ...common, observation, decision, ...(addedAllowance === undefined ? {} : { addedAllowance }), reason, evidence };
+}
+
+export function parseRotationArgs(args: string[]): RotationCommandOptions | HelpOptions {
+  const action = args[0];
+  if (!action || action === "-h" || action === "--help") return { help: true };
+  if (!["set", "replace", "report", "prepare", "verify"].includes(action)) {
+    throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown rotation action: ${action}`, { details: { action } });
+  }
+  let directory = ".";
+  let json = false;
+  let actor = "supervisor";
+  let rootSessionId: string | undefined;
+  let startEvent: string | undefined;
+  let recommendation: string | undefined;
+  let reason: string | undefined;
+  const evidence: string[] = [];
+  const thresholds: RotationPolicyCommandOptions["thresholds"] = {};
+  const seen = new Set<string>();
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) continue;
+    if (arg === "--json") { json = true; continue; }
+    const valueOptions = [
+      "--cwd", "--actor", "--session", "--since-event", "--recommendation", "--reason", "--evidence",
+      "--context-percent", "--compactions", "--wait-calls", "--wait-duration-ms", "--completed-tasks"
+    ];
+    if (!valueOptions.includes(arg)) {
+      if (arg.startsWith("-")) throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
+      throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
+    }
+    if (arg !== "--evidence" && seen.has(arg)) {
+      throw new SynodError(ERROR_CODES.ROTATION_INVALID, `Rotation option cannot be repeated: ${arg}.`, { details: { option: arg } });
+    }
+    seen.add(arg);
+    const value = optionValue(args, index, arg);
+    if (arg === "--cwd") directory = value;
+    else if (arg === "--actor") actor = value;
+    else if (arg === "--session") rootSessionId = value;
+    else if (arg === "--since-event") startEvent = value;
+    else if (arg === "--recommendation") recommendation = value;
+    else if (arg === "--reason") reason = value;
+    else if (arg === "--evidence") evidence.push(value);
+    else {
+      const numeric = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+      if (arg === "--context-percent") thresholds.supervisorContextPercent = numeric;
+      else if (arg === "--compactions") thresholds.compactions = numeric;
+      else if (arg === "--wait-calls") thresholds.waitCalls = numeric;
+      else if (arg === "--wait-duration-ms") thresholds.waitDurationMs = numeric;
+      else thresholds.completedTasks = numeric;
+    }
+    index += 1;
+  }
+  const common = { directory, json, actor };
+  if (action === "report" || action === "prepare") {
+    if (rootSessionId !== undefined || startEvent !== undefined || recommendation !== undefined || reason !== undefined
+      || evidence.length > 0 || Object.keys(thresholds).length > 0) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Rotation ${action} received a mutation-only option.`);
+    }
+    return { action, ...common };
+  }
+  if (action === "verify") {
+    if (!recommendation || !rootSessionId || startEvent !== undefined || reason !== undefined || evidence.length > 0 || Object.keys(thresholds).length > 0) {
+      throw new SynodError(ERROR_CODES.ROTATION_INVALID, "Rotation verify requires --recommendation and --session only.");
+    }
+    return { action, ...common, recommendation, rootSessionId };
+  }
+  if (!rootSessionId || !startEvent || !reason || evidence.length === 0 || Object.keys(thresholds).length === 0
+    || Object.values(thresholds).some(value => !Number.isSafeInteger(value) || value <= 0)
+    || (thresholds.supervisorContextPercent !== undefined && thresholds.supervisorContextPercent > 100)
+    || recommendation !== undefined) {
+    throw new SynodError(ERROR_CODES.ROTATION_INVALID, `Rotation ${action} requires --session, --since-event, at least one positive threshold, --reason, and --evidence.`);
+  }
+  return { action: action as "set" | "replace", ...common, rootSessionId, startEvent, thresholds, reason, evidence, replace: action === "replace" };
 }

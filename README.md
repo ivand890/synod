@@ -204,6 +204,29 @@ synod budget decide T-001 --observation <event-id> --decision continue \
 
 While that decision is pending, Synod rejects new leases, heartbeats, resume/reassignment, correction approval, and transitions to `READY` or `ACTIVE`. Delivery, review, acceptance, verification, revocation, status, handoff, split, and supersession remain available. `split`, `supersede`, and `rotate` decisions do not grant more execution; the corresponding structural action must complete. Rebinding a policy uses `synod budget replace` and preserves every prior policy, observation, decision, and raw total.
 
+### Explicit phase rotation
+
+Project-level rotation is opt-in. A policy binds the initial root session and canonical start event, then enables only the thresholds supplied by the caller:
+
+```bash
+synod rotation set --session thread:old-root --since-event 12 \
+  --context-percent 80 --compactions 3 --wait-calls 5 \
+  --wait-duration-ms 600000 --completed-tasks 2 \
+  --reason "bound the supervision phase" --evidence roadmap:SYN-093A
+synod rotation report
+```
+
+The report is read-only and lists every configured metric, its current value, threshold, availability/completeness, exact phase interval, and deterministic report hash. Supervisor context uses the latest root-thread context observation rather than cumulative input; missing context-window evidence is `unavailable` and cannot trigger. No threshold is enabled by default.
+
+Rotation is a two-step canonical handshake. `prepare` records the recommendation, rollout-prefix provenance, checkpoint, and handoff identity without changing tasks, Git, or Codex threads. Start the next root session outside Synod, then verify its exact identity:
+
+```bash
+synod rotation prepare
+synod rotation verify --recommendation <event-id> --session thread:new-root
+```
+
+Verification rejects the old root, descendant IDs, another project directory, checkpoint drift, a stale handoff, a reused recommendation, or any intervening canonical event. The verification event becomes the next phase's exact start boundary. `status`, handoff text/JSON, upgrade, and uninstall preserve the full policy, recommendation, and verification history.
+
 Task mutations do not move the canonical checkpoint, so they cannot silently accept repository drift. Only `synod checkpoint` changes the acknowledged branch, `HEAD`, and working-tree fingerprint.
 
 Read actual state and compare its last checkpoint with the current repository:
@@ -325,6 +348,14 @@ Coordination is derived only from normalized tool-call records. `spawn_agent`, `
 Whole-session and live canonical reports are explicitly `incomplete` persisted snapshots. A closed exact interval is `complete` only when every required rollout and timestamp is readable and ordered. Missing rollout paths, malformed required counters, timestamp regressions, ambiguous selectors, conflicting thread identities, and insufficient descendant creation evidence fail closed for exact reports.
 
 Usage reporting never writes canonical records, acknowledges a checkpoint, changes Git, or uploads telemetry. Normalized facts and reports do not retain prompts, messages, reasoning text, tool arguments, or tool outputs. Input includes cached input, and output includes reasoning output; the total therefore does not add those subsets twice. Token counts are usage evidence rather than billing data.
+
+For an optional local estimate, pass a dated caller-owned price file to a complete closed usage report:
+
+```bash
+synod usage --since-event 12 --until-event 18 --price-file ./prices-2026-08.json
+```
+
+Price-file schema 1 contains `currency`, `asOf`, optional `validUntil`, a `source` reference, and an exact `models` map with `uncachedInputPerMillion`, `cachedInputPerMillion`, and `outputPerMillion`. Synod computes uncached input as input minus cached input and charges output once; reasoning remains visible as raw evidence because it is already included in output. Unknown models produce an explicit partial report with no grand total. Invalid currency/date/rates, stale validity, incomplete usage, or inconsistent inclusive counters fail closed. Without `--price-file`, text and JSON contain no monetary fields. Synod never fetches prices, converts currency, applies tax or credits, or contacts a billing provider.
 
 This command requires a locally installed `codex` executable with App Server support. Startup performs a minimal `thread/list` capability probe. Cleanup sends `SIGTERM`, waits up to two seconds, uses a bounded `SIGKILL` fallback, and detaches unresponsive process handles when exit still cannot be confirmed.
 

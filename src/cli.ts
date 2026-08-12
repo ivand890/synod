@@ -1,6 +1,6 @@
 import { errorEnvelope, successEnvelope } from "./contracts.js";
 import type { Warning } from "./contracts.js";
-import { parseBudgetArgs, parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs, parseWorktreeArgs } from "./command-options.js";
+import { parseBudgetArgs, parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseRotationArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs, parseWorktreeArgs } from "./command-options.js";
 import type { HelpOptions, LifecycleOptions } from "./command-options.js";
 import { doctorProject } from "./doctor.js";
 import type { DoctorClient, DoctorDependencies } from "./doctor.js";
@@ -25,10 +25,14 @@ import {
   decideTaskBudget,
   formatTaskBudgetReport,
   observeTaskBudget,
+  prepareProjectRotation,
+  reportProjectRotation,
   reportTaskBudget,
+  setRotationPolicy,
   setTaskBudgetPolicy,
   transitionTask,
-  orchestrationStatusWithArtifacts
+  orchestrationStatusWithArtifacts,
+  verifyProjectRotation
 } from "./orchestration.js";
 import type { OrchestrationDependencies } from "./orchestration.js";
 import type { UsageClient } from "./usage.js";
@@ -40,6 +44,8 @@ import { formatWaitReport, waitForThreads } from "./wait.js";
 import type { ThreadStatusAdapter, WaitClient } from "./wait.js";
 import { cleanupTaskWorktree, createTaskWorktree, integrateTaskWorktreeProposal, sealTaskWorktreeProposal, taskWorktreeStatus } from "./worktrees.js";
 import type { TaskWorktreeDependencies } from "./worktrees.js";
+import { formatRotationReport } from "./rotation.js";
+import { formatCostReport, projectUsageCost, readPriceFile } from "./costs.js";
 
 const HELP = `Synod ${packageVersion}
 
@@ -64,6 +70,11 @@ Usage:
   synod budget report <task-id> [--cwd <directory>] [--json]
   synod budget observe <task-id> [--actor <id>] [--cwd <directory>] [--json]
   synod budget decide <task-id> --observation <sequence|id> --decision <continue|split|supersede|rotate> [--additional-tokens <n>] --reason <text> --evidence <ref> [--actor <id>] [--cwd <directory>] [--json]
+  synod rotation set --session <thread-id> --since-event <sequence|id> [--context-percent <n>] [--compactions <n>] [--wait-calls <n>] [--wait-duration-ms <n>] [--completed-tasks <n>] --reason <text> --evidence <ref> [--actor <id>] [--cwd <directory>] [--json]
+  synod rotation replace --session <thread-id> --since-event <sequence|id> [thresholds...] --reason <text> --evidence <ref> [--actor <id>] [--cwd <directory>] [--json]
+  synod rotation report [--cwd <directory>] [--json]
+  synod rotation prepare [--actor <id>] [--cwd <directory>] [--json]
+  synod rotation verify --recommendation <sequence|id> --session <new-root-thread-id> [--actor <id>] [--cwd <directory>] [--json]
   synod lease acquire <task-id> --owner-thread <thread-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
   synod lease heartbeat <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
   synod lease release <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
@@ -78,7 +89,7 @@ Usage:
   synod doctor [directory] [--json]
   synod uninstall [directory] [--dry-run] [--force] [--json]
   synod profiles [--json]
-  synod usage [--session <thread-id>] [--cwd <directory>] [--since-event <sequence|id> | --since-checkpoint | --task <task-id>] [--until-event <sequence|id>] [--by-model] [--json]
+  synod usage [--session <thread-id>] [--cwd <directory>] [--since-event <sequence|id> | --since-checkpoint | --task <task-id>] [--until-event <sequence|id>] [--price-file <path>] [--by-model] [--json]
   synod wait --thread <thread-id> [--thread <thread-id>] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
   synod --help
   synod --version
@@ -93,6 +104,7 @@ Commands:
   bundle      Export, verify, or transactionally restore a recovery bundle.
   task        Add tasks and apply validated, revision-aware state transitions.
   budget      Report and enforce explicit task-local raw-token budgets.
+  rotation    Recommend, prepare, and verify explicit root-session phase rotation.
   lease       Acquire and mutate fenced durable writer leases.
   worktree    Create and inspect explicit detached task worktrees at an exact lease base.
   doctor      Probe Codex version, App Server, model, and reasoning capabilities.
@@ -123,6 +135,8 @@ Options:
               Select the exact canonical budget observation being decided.
   --additional-tokens
               Add a bounded hard allowance for a continue decision.
+  --price-file
+              Project a complete usage report using an explicit dated local price file.
   --thread    Add a Codex thread ID to a bounded status wait.
   --revision  Require the exact task revision for a transition.
   --evidence  Attach evidence to the exact task revision and current checkpoint.
@@ -275,15 +289,17 @@ export async function run(
     if (command === "usage") {
       const options = parseUsageArgs(args.slice(1));
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
+      const { priceFile, ...usageOptions } = options;
       const report = await collectUsage({
-        ...options,
+        ...usageOptions,
         ...(dependencies.clientFactory ? { clientFactory: dependencies.clientFactory } : {})
       });
+      const cost = priceFile ? projectUsageCost(report, await readPriceFile(priceFile, options.cwd)) : undefined;
       if (options.json) {
         const { warnings, diagnostics, ...data } = report;
-        output.log(JSON.stringify(successEnvelope("usage", data, { warnings, diagnostics }), null, 2));
+        output.log(JSON.stringify(successEnvelope("usage", { ...data, ...(cost ? { cost } : {}) }, { warnings, diagnostics }), null, 2));
       } else {
-        output.log(formatUsageReport(report));
+        output.log(`${formatUsageReport(report)}${cost ? `\n\n${formatCostReport(cost)}` : ""}`);
         printWarnings(report.warnings, output);
       }
       return 0;
@@ -321,6 +337,38 @@ export async function run(
         if (options.json) output.log(JSON.stringify(successEnvelope("budget", data), null, 2));
         else output.log(`Recorded ${result.decision.action} for ${result.task.id} observation ${result.decision.observation.sequence}.`);
       } else throw new SynodError(ERROR_CODES.INTERNAL, "Budget action was not parsed.");
+      return 0;
+    }
+
+    if (command === "rotation") {
+      const options = parseRotationArgs(args.slice(1));
+      if (isHelpOptions(options)) { output.log(HELP); return 0; }
+      const rotationDependencies: OrchestrationDependencies = {
+        ...dependencies,
+        ...(dependencies.clientFactory ? { usageClientFactory: () => dependencies.clientFactory!() } : {})
+      };
+      if (options.action === "set" || options.action === "replace") {
+        const result = await setRotationPolicy(options, rotationDependencies);
+        const data = { action: options.action, policy: result.policy, rotation: result.rotation, lastEvent: result.state.lastEvent };
+        if (options.json) output.log(JSON.stringify(successEnvelope("rotation", data), null, 2));
+        else output.log(`${options.action === "set" ? "Set" : "Replaced"} phase-rotation policy revision ${result.policy.revision}.`);
+      } else if (options.action === "report") {
+        const report = await reportProjectRotation(options, rotationDependencies);
+        if (options.json) {
+          const { warnings, diagnostics, ...usage } = report.usage;
+          output.log(JSON.stringify(successEnvelope("rotation", { action: "report", report: { ...report, usage } }, { warnings, diagnostics }), null, 2));
+        } else { output.log(formatRotationReport(report)); printWarnings(report.usage.warnings, output); }
+      } else if (options.action === "prepare") {
+        const result = await prepareProjectRotation(options, rotationDependencies);
+        const data = { action: "prepare", recommendation: result.recommendation, report: result.report, lastEvent: result.state.lastEvent };
+        if (options.json) output.log(JSON.stringify(successEnvelope("rotation", data, { warnings: result.report.usage.warnings, diagnostics: result.report.usage.diagnostics }), null, 2));
+        else output.log(`Prepared phase rotation ${result.recommendation.event.sequence}:${result.recommendation.event.id} for ${result.recommendation.reasons.join(", ")}.`);
+      } else if (options.action === "verify") {
+        const result = await verifyProjectRotation(options, rotationDependencies);
+        const data = { action: "verify", verification: result.verification, session: result.session, lastEvent: result.state.lastEvent };
+        if (options.json) output.log(JSON.stringify(successEnvelope("rotation", data, { warnings: result.session.warnings, diagnostics: result.session.diagnostics }), null, 2));
+        else output.log(`Verified phase rotation from ${result.verification.oldRootSessionId} to ${result.verification.newRootSessionId}.`);
+      } else throw new SynodError(ERROR_CODES.INTERNAL, "Rotation action was not parsed.");
       return 0;
     }
 

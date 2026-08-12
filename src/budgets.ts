@@ -248,7 +248,7 @@ function stable(value: unknown): string {
   return JSON.stringify(value);
 }
 
-export function budgetReportHash(report: UsageReport): string {
+export function usageReportHash(report: UsageReport): string {
   const normalized = {
     session: report.session.threadId,
     capturedAt: report.capturedAt,
@@ -260,6 +260,8 @@ export function budgetReportHash(report: UsageReport): string {
   };
   return `sha256:${createHash("sha256").update(stable(normalized), "utf8").digest("hex")}`;
 }
+
+export const budgetReportHash = usageReportHash;
 
 export async function collectTaskBudgetReport({
   cwd,

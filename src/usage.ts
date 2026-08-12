@@ -168,6 +168,15 @@ export interface UsageClient {
   getWarnings?(): Warning[];
 }
 
+export interface UsageRootSession {
+  threadId: string;
+  cwd: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+  warnings: Warning[];
+  diagnostics: AppServerDiagnostics | Record<string, unknown>;
+}
+
 function requestClient(
   client: UsageClient,
   method: string,
@@ -179,6 +188,58 @@ function requestClient(
     });
   }
   return client.request(method, params);
+}
+
+export async function resolveUsageRootSession({
+  cwd = process.cwd(),
+  threadId,
+  clientFactory = () => new CodexAppServerClient()
+}: {
+  cwd?: string;
+  threadId?: string;
+  clientFactory?: () => UsageClient;
+} = {}): Promise<UsageRootSession> {
+  const selected = String(threadId || "").trim();
+  if (!selected) throw new SynodError(ERROR_CODES.ROTATION_SESSION_INVALID, "Rotation verification requires an explicit new root session ID.");
+  const resolvedCwd = path.resolve(cwd);
+  const client = clientFactory();
+  let root: ThreadRecord | undefined;
+  let failure: SynodError | undefined;
+  try {
+    await client.start();
+    if (typeof client.probeCapabilities === "function") await client.probeCapabilities();
+    root = await findRoot(client, selected);
+    if (!root) {
+      throw new SynodError(ERROR_CODES.SESSION_NOT_FOUND, `No Codex session found for ${selected}.`, { details: { threadId: selected } });
+    }
+    if (root.id !== selected) {
+      throw new SynodError(ERROR_CODES.ROTATION_SESSION_INVALID, "Rotation verification requires the root session ID, not a descendant thread.", {
+        details: { selectedThreadId: selected, rootSessionId: root.id }
+      });
+    }
+    if (!root.cwd || path.resolve(root.cwd) !== resolvedCwd) {
+      throw new SynodError(ERROR_CODES.ROTATION_SESSION_INVALID, "The new root session is not bound to the selected project directory.", {
+        details: { threadId: root.id, expectedCwd: resolvedCwd, actualCwd: root.cwd }
+      });
+    }
+  } catch (error) {
+    failure = asSynodError(error);
+  } finally {
+    try {
+      await client.close();
+    } catch (error) {
+      if (!failure) failure = asSynodError(error);
+    }
+  }
+  if (failure) throw failure;
+  return {
+    threadId: root!.id,
+    cwd: path.resolve(root!.cwd!),
+    ...(root!.createdAt === undefined ? {} : { createdAt: root!.createdAt }),
+    ...(root!.updatedAt === undefined ? {} : { updatedAt: root!.updatedAt }),
+    warnings: typeof client.getWarnings === "function" ? client.getWarnings() : [],
+    diagnostics: typeof client.getDiagnostics === "function" ? client.getDiagnostics() : {}
+  };
 }
 
 function isThreadRecord(value: unknown): value is ThreadRecord {

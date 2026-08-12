@@ -3,7 +3,8 @@ import { formatCheckpointDelta } from "./checkpoint.js";
 import type { CheckpointDelta } from "./checkpoint.js";
 import {
   legalTaskTransitions,
-  orchestrationStatusWithArtifacts
+  orchestrationStatusWithArtifacts,
+  reportProjectRotation
 } from "./orchestration.js";
 import type {
   GitCheckpoint,
@@ -15,6 +16,8 @@ import type {
 } from "./orchestration.js";
 import { verifyRecoveryBundle } from "./recovery.js";
 import { effectiveHardTotalTokens } from "./budgets.js";
+import { formatRotationReport } from "./rotation.js";
+import type { RotationReport } from "./rotation.js";
 
 export interface HandoffOptions {
   directory?: string;
@@ -82,6 +85,7 @@ export interface HandoffResult {
     proposals: Awaited<ReturnType<typeof orchestrationStatusWithArtifacts>>["artifacts"]["proposals"];
     worktrees: Awaited<ReturnType<typeof orchestrationStatusWithArtifacts>>["artifacts"]["worktrees"];
   };
+  rotation: RotationReport | null;
 }
 
 function gateEvidence(task: OrchestrationTask, evidenceIds: readonly string[]): TaskEvidence[] {
@@ -200,6 +204,11 @@ export async function generateHandoff(
   const focusTaskIds = tasks
     .filter(task => ["ACTIVE", "REVIEW", "ACCEPTED", "VERIFIED", "BLOCKED"].includes(task.state))
     .map(task => task.id);
+  const rotation = status.rotation ? await reportProjectRotation({ directory: status.targetDirectory }, dependencies) : null;
+  if (rotation && (rotation.handoff.event.sequence !== status.lastEvent.sequence || rotation.handoff.event.id !== status.lastEvent.id
+    || rotation.handoff.event.hash !== status.lastEvent.hash)) {
+    throw new SynodError(ERROR_CODES.ROTATION_STALE, "Canonical state changed while the rotation-aware handoff was being generated.");
+  }
   return {
     targetDirectory: status.targetDirectory,
     lastEvent: status.lastEvent,
@@ -211,6 +220,7 @@ export async function generateHandoff(
     },
     focusTaskIds,
     tasks,
+    rotation,
     artifacts: status.artifacts,
     recoveryBundle: verification
       ? verifiedBundleMatches(verification, status.checkpoint, status.lastEvent)
@@ -236,6 +246,8 @@ export function formatHandoff(result: HandoffResult): string {
   lines.push(...formatCheckpointDelta(result.checkpoint.delta));
   lines.push(`Focus tasks: ${result.focusTaskIds.length > 0 ? result.focusTaskIds.join(", ") : "none"}`);
   lines.push(`Durable artifacts: ${result.artifacts.proposals.verifiedBundles} task proposal bundle(s); ${result.artifacts.worktrees.records} worktree record(s), ${result.artifacts.worktrees.sealedProposals} worktree proposal(s)`);
+  if (result.rotation) lines.push("", formatRotationReport(result.rotation), "");
+  else lines.push("Phase rotation: not configured");
   for (const task of result.tasks) {
     const currentBudgetObservation = task.budget?.observations
       .filter(item => item.policyRevision === task.budget!.policy.revision)
