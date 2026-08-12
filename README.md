@@ -4,13 +4,9 @@ Synod installs a persistent, reviewed advisor loop for Codex projects. The selec
 
 ## Interactive cycle map
 
-Open [`docs/synod/synod-cycle.html`](docs/synod/synod-cycle.html) in a browser to play through a complete Synod cycle. The visualizer follows the repository's real concepts — task state transitions, role-specialized forks, writer leases, scoped proposals, correction rounds, acceptance, verification, checkpoints, and handoffs — and includes a toggle for the bounded correction path plus explicit recovery/worktree branches. The Play button advances to the next step immediately and then continues every 2.6 seconds.
+[![Synod orchestration loop](docs/synod/assets/synod-cycle-loop.gif)](docs/synod/synod-cycle.html)
 
-GitHub's file and raw views show HTML as source/text and do not execute its JavaScript. Download the file and open it locally, or serve the repository with `python3 -m http.server` from its root before opening the HTML.
-
-For a phone-friendly preview, use the [interactive web preview](https://htmlpreview.github.io/?https://github.com/ivand890/synod/blob/agent/interactive-synod-cycle-map/docs/synod/synod-cycle.html).
-
-The token bars are an educational scale for showing how a fresh agent receives a bounded context packet and how evidence accumulates. They are not a runtime token counter; the actual context window depends on the Codex surface and selected model profile.
+[Open the interactive trace](docs/synod/synod-cycle.html).
 
 ## Install
 
