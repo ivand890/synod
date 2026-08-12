@@ -525,6 +525,10 @@ test("usage command supports JSON output", async () => {
   assert.equal(envelope.data.roles[0].role, "supervisor");
   assert.equal(envelope.data.threads[0].threadId, "root");
   assert.equal(envelope.data.attribution[0].model, "gpt-5.6-sol");
+  assert.equal(envelope.data.coordination.total.counts.totalCalls, 0);
+  assert.equal(envelope.data.coordination.total.callDuration.status, "unavailable");
+  assert.equal(envelope.data.coordination.total.retries.available, false);
+  assert.equal(Object.hasOwn(envelope.data.coordination.threads[0], "calls"), false);
   assert.equal(envelope.data.completeness.status, "incomplete");
   assert.deepEqual(envelope.warnings, []);
   assert.equal(typeof envelope.diagnostics.synodVersion, "string");

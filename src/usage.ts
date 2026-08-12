@@ -3,6 +3,20 @@ import { createReadStream } from "node:fs";
 import path from "node:path";
 import { CodexAppServerClient } from "./app-server.js";
 import type { AppServerDiagnostics } from "./app-server.js";
+import {
+  coordinationReport,
+  isToolCallOutputPayload,
+  isToolCallStartPayload,
+  normalizeToolCallOutput,
+  normalizeToolCallStart,
+  pairToolCall
+} from "./coordination.js";
+import type {
+  CoordinationReport,
+  CoordinationThreadInput,
+  NormalizedToolCall,
+  NormalizedToolOutput
+} from "./coordination.js";
 import type { Warning } from "./contracts.js";
 import { ERROR_CODES, SynodError, asSynodError } from "./errors.js";
 import { validateOrchestrationReadOnly } from "./orchestration.js";
@@ -131,6 +145,7 @@ export interface UsageReport {
   attribution: UsageAttributionRow[];
   total: TokenUsage & { threads: number };
   completeness: UsageCompleteness;
+  coordination: CoordinationReport;
   interval?: UsageInterval;
   warnings: Warning[];
   diagnostics: AppServerDiagnostics | Record<string, unknown>;
@@ -256,7 +271,11 @@ export type RolloutIssueKind =
   | "malformed-record"
   | "invalid-token-record"
   | "missing-timestamp"
-  | "timestamp-regression";
+  | "timestamp-regression"
+  | "invalid-tool-call"
+  | "duplicate-tool-call-start"
+  | "duplicate-tool-call-output"
+  | "negative-tool-call-duration";
 
 export interface RolloutIssue {
   kind: RolloutIssueKind;
@@ -282,6 +301,8 @@ export interface RolloutTimeline {
   activities: RolloutActivityObservation[];
   contexts: NonNullable<UsageThreadRow["currentContext"]>[];
   currentContext?: UsageThreadRow["currentContext"];
+  toolCalls: NormalizedToolCall[];
+  toolOutputs: NormalizedToolOutput[];
   issues: RolloutIssue[];
   malformedRecords: number;
   invalidTokenRecords: number;
@@ -357,6 +378,11 @@ export async function readRolloutTimeline(
   const tokens: RolloutTokenObservation[] = [];
   const activity = { turnsStarted: 0, turnsCompleted: 0, turnsAborted: 0, compactions: 0 };
   const activities: RolloutActivityObservation[] = [];
+  const toolCalls: NormalizedToolCall[] = [];
+  const toolOutputs: NormalizedToolOutput[] = [];
+  const toolCallIndexes = new Map<string, number>();
+  const toolOutputIndexes = new Map<string, number>();
+  const toolOutputBytes = new Map<string, number>();
   const issues: RolloutIssue[] = [];
   const hasher = createHash("sha256");
   let bytes = 0;
@@ -379,6 +405,21 @@ export async function readRolloutTimeline(
   let currentContext: UsageThreadRow["currentContext"] | undefined;
   const contexts: NonNullable<UsageThreadRow["currentContext"]>[] = [];
   let compactionPending = false;
+
+  const completeToolCall = (callIndex: number, output: NormalizedToolOutput, issueBytes: number): void => {
+    const start = toolCalls[callIndex];
+    if (!start) return;
+    if (start.startedAtMs !== undefined && output.observedAtMs !== undefined
+      && output.observedAtMs < start.startedAtMs) {
+      issues.push({
+        kind: "negative-tool-call-duration",
+        bytes: issueBytes,
+        observedAtMs: output.observedAtMs
+      });
+      return;
+    }
+    toolCalls[callIndex] = pairToolCall(start, output);
+  };
 
   const processRecord = (recordBytes: Buffer, contentBytes: Buffer): void => {
     hasher.update(recordBytes);
@@ -446,6 +487,52 @@ export async function readRolloutTimeline(
     if (event.type === "turn_context" && typeof payload?.model === "string") activeModel = payload.model;
     const reroute = reroutedModel(payload);
     if (reroute) activeModel = reroute;
+
+    if (event.type === "response_item" && payload && isToolCallStartPayload(payload)) {
+      const call = normalizeToolCallStart(payload, observed);
+      if (!call) {
+        issues.push({
+          kind: "invalid-tool-call",
+          bytes,
+          ...(observed ? { observedAtMs: observed.milliseconds } : {})
+        });
+      } else if (toolCallIndexes.has(call.callId)) {
+        issues.push({
+          kind: "duplicate-tool-call-start",
+          bytes,
+          ...(observed ? { observedAtMs: observed.milliseconds } : {})
+        });
+      } else {
+        const index = toolCalls.push(call) - 1;
+        toolCallIndexes.set(call.callId, index);
+        const outputIndex = toolOutputIndexes.get(call.callId);
+        if (outputIndex !== undefined) {
+          const output = toolOutputs[outputIndex];
+          if (output) completeToolCall(index, output, toolOutputBytes.get(call.callId) || bytes);
+        }
+      }
+    } else if (event.type === "response_item" && payload && isToolCallOutputPayload(payload)) {
+      const output = normalizeToolCallOutput(payload, observed);
+      if (!output) {
+        issues.push({
+          kind: "invalid-tool-call",
+          bytes,
+          ...(observed ? { observedAtMs: observed.milliseconds } : {})
+        });
+      } else if (toolOutputIndexes.has(output.callId)) {
+        issues.push({
+          kind: "duplicate-tool-call-output",
+          bytes,
+          ...(observed ? { observedAtMs: observed.milliseconds } : {})
+        });
+      } else {
+        const index = toolOutputs.push(output) - 1;
+        toolOutputIndexes.set(output.callId, index);
+        toolOutputBytes.set(output.callId, bytes);
+        const callIndex = toolCallIndexes.get(output.callId);
+        if (callIndex !== undefined) completeToolCall(callIndex, output, bytes);
+      }
+    }
 
     const normalizedActivity = activityKind(event, payload);
     if (normalizedActivity) {
@@ -551,6 +638,8 @@ export async function readRolloutTimeline(
     activities,
     contexts,
     ...(currentContext ? { currentContext } : {}),
+    toolCalls,
+    toolOutputs,
     issues,
     malformedRecords,
     invalidTokenRecords,
@@ -884,7 +973,13 @@ function selectedTokens(timeline: RolloutTimeline, interval: UsageInterval | und
       malformedRecords: issues.filter(issue => issue.kind === "malformed-record").length,
       invalidTokenRecords: issues.filter(issue => issue.kind === "invalid-token-record").length,
       missingTimestamps: issues.filter(issue => issue.kind === "missing-timestamp").length,
-      timestampRegressions: issues.filter(issue => issue.kind === "timestamp-regression").length
+      timestampRegressions: issues.filter(issue => issue.kind === "timestamp-regression").length,
+      coordinationIssues: issues.filter(issue => [
+        "invalid-tool-call",
+        "duplicate-tool-call-start",
+        "duplicate-tool-call-output",
+        "negative-tool-call-duration"
+      ].includes(issue.kind)).length
     };
     throw new SynodError(ERROR_CODES.ROLLOUT_INVALID, "An exact usage interval requires a complete, ordered rollout timeline.", {
       details: {
@@ -912,6 +1007,39 @@ function selectedActivity(
     incrementActivity(activity, item.kind);
   }
   return activity;
+}
+
+function selectedToolCalls(
+  timeline: RolloutTimeline,
+  interval: UsageInterval | undefined
+): NormalizedToolCall[] {
+  if (!interval) return timeline.toolCalls;
+  const startMs = Date.parse(interval.start.timestamp);
+  const endMs = Date.parse(interval.end.timestamp);
+  return timeline.toolCalls.filter(call => call.startedAtMs !== undefined
+    && call.startedAtMs > startMs && call.startedAtMs <= endMs).map(call => {
+    if (call.completedAtMs === undefined || call.completedAtMs <= endMs) return call;
+    const {
+      completedAt: _completedAt,
+      completedAtMs: _completedAtMs,
+      outputRecorded: _outputRecorded,
+      durationMs: _durationMs,
+      failed: _failed,
+      ...openAtBoundary
+    } = call;
+    return openAtBoundary;
+  });
+}
+
+function selectedToolOutputs(
+  timeline: RolloutTimeline,
+  interval: UsageInterval | undefined
+): NormalizedToolOutput[] {
+  if (!interval) return timeline.toolOutputs;
+  const startMs = Date.parse(interval.start.timestamp);
+  const endMs = Date.parse(interval.end.timestamp);
+  return timeline.toolOutputs.filter(output => output.observedAtMs !== undefined
+    && output.observedAtMs > startMs && output.observedAtMs <= endMs);
 }
 
 function timelineAttribution(
@@ -993,6 +1121,8 @@ export async function collectUsage({
     const roleAggregate = new Map<string, TokenUsage & { role: string; threads: Set<string> }>();
     const attributionAggregate = new Map<string, UsageAttributionRow>();
     const threadRows: UsageThreadRow[] = [];
+    const coordinationInputs: CoordinationThreadInput[] = [];
+    const coordinationOutputs: Array<{ threadId: string; outputs: NormalizedToolOutput[] }> = [];
     const completenessReasons = new Set<string>();
     if (!interval?.complete) completenessReasons.add(interval ? "open-canonical-interval" : "session-snapshot");
 
@@ -1014,6 +1144,12 @@ export async function collectUsage({
         if (timeline.invalidTokenRecords > 0) completenessReasons.add("invalid-token-records");
         if (timeline.missingTimestamps > 0) completenessReasons.add("missing-record-timestamps");
         if (timeline.timestampRegressions > 0) completenessReasons.add("timestamp-regression");
+        if (timeline.issues.some(issue => [
+          "invalid-tool-call",
+          "duplicate-tool-call-start",
+          "duplicate-tool-call-output",
+          "negative-tool-call-duration"
+        ].includes(issue.kind))) completenessReasons.add("invalid-tool-call-records");
       }
       const observations = selectedTokens(timeline, interval);
       const metadata = timelineAttribution(timeline, interval);
@@ -1054,6 +1190,16 @@ export async function collectUsage({
           ? observedAt > Date.parse(interval.start.timestamp) && observedAt <= Date.parse(interval.end.timestamp)
           : true;
       });
+      const activity = selectedActivity(timeline, interval);
+      coordinationInputs.push({
+        threadId: thread.id,
+        parentThreadId: thread.parentThreadId,
+        role,
+        source,
+        calls: selectedToolCalls(timeline, interval),
+        compactions: activity.compactions
+      });
+      coordinationOutputs.push({ threadId: thread.id, outputs: selectedToolOutputs(timeline, interval) });
       threadRows.push({
         threadId: thread.id,
         parentThreadId: thread.parentThreadId,
@@ -1061,10 +1207,41 @@ export async function collectUsage({
         source,
         models: activeModels.size,
         rollout: timelineIdentityAt(timeline, intervalEndMs),
-        activity: selectedActivity(timeline, interval),
+        activity,
         ...(selectedContext ? { currentContext: selectedContext } : {}),
         ...threadUsage
       });
+    }
+
+    const callOwners = new Map<string, string>();
+    for (const input of coordinationInputs) {
+      for (const call of input.calls) {
+        const owner = callOwners.get(call.callId);
+        if (owner && owner !== input.threadId) {
+          throw new SynodError(ERROR_CODES.ROLLOUT_INVALID, "A tool call identity is duplicated across threads.", {
+            details: { callId: call.callId, startThreadId: owner, duplicateThreadId: input.threadId }
+          });
+        }
+        callOwners.set(call.callId, input.threadId);
+      }
+    }
+    for (const row of coordinationOutputs) {
+      for (const output of row.outputs) {
+        const owner = callOwners.get(output.callId);
+        if (owner && owner !== row.threadId) {
+          throw new SynodError(ERROR_CODES.ROLLOUT_INVALID, "A tool call output crosses thread ownership.", {
+            details: { callId: output.callId, startThreadId: owner, outputThreadId: row.threadId }
+          });
+        }
+      }
+    }
+
+    const coordination = coordinationReport(
+      coordinationInputs,
+      interval?.complete ? [] : ["active-session-tree"]
+    );
+    if (coordination.completeness.reasons.includes("tool-call-output-missing")) {
+      completenessReasons.add("tool-call-output-missing");
     }
 
     const models = [...modelAggregate.values()]
@@ -1092,6 +1269,7 @@ export async function collectUsage({
       threads: threadRows,
       attribution,
       total,
+      coordination,
       completeness: {
         status: completenessReasons.size === 0 ? "complete" : "incomplete",
         reasons: [...completenessReasons].sort()
@@ -1127,6 +1305,11 @@ function formatNumber(value: number): string {
 function formatBoundary(boundary: UsageInterval["start"] | UsageInterval["end"]): string {
   if (boundary.kind === "capture") return `capture@${boundary.timestamp}`;
   return `${boundary.kind}#${boundary.event.sequence}:${boundary.event.id}@${boundary.timestamp}`;
+}
+
+function formatDurationMetric(metric: CoordinationReport["total"]["callDuration"]): string {
+  const total = metric.totalMs === undefined ? "unavailable" : `${formatNumber(metric.totalMs)}ms`;
+  return `${metric.status}; total=${total}; observed=${metric.observed}; missing=${metric.missing}`;
 }
 
 export function formatUsageReport(report: UsageReport): string {
@@ -1170,6 +1353,16 @@ export function formatUsageReport(report: UsageReport): string {
     return `- ${thread.threadId} parent=${parent} role=${thread.role} source=${thread.source} models=${thread.models}`
       + ` total=${formatNumber(thread.totalTokens)} rollout=${thread.rollout.sha256} bytes=${thread.rollout.bytes}`;
   });
+  const coordination = report.coordination.total;
+  const coordinationTools = coordination.tools.length > 0
+    ? coordination.tools.map(tool => `${tool.name}=${tool.calls}`).join(", ")
+    : "none";
+  const retries = coordination.retries.available
+    ? String(coordination.retries.count)
+    : "unavailable";
+  const outcomes = coordination.outcomes.failed === undefined
+    ? "unavailable"
+    : `${coordination.outcomes.failed} failed (${coordination.outcomes.status})`;
 
   return [
     `Session: ${report.session.threadId}`,
@@ -1184,6 +1377,18 @@ export function formatUsageReport(report: UsageReport): string {
     "",
     "Thread attribution:",
     ...threadRows,
+    "",
+    "Coordination:",
+    `- calls=${coordination.counts.totalCalls} coordination=${coordination.counts.coordinationCalls}`
+      + ` implementation=${coordination.counts.implementationCalls} compactions=${coordination.counts.compactions}`,
+    `- spawn=${coordination.counts.spawn} follow-up=${coordination.counts.followUp}`
+      + ` message=${coordination.counts.message} wait=${coordination.counts.wait}`
+      + ` supervision=${coordination.counts.supervision}`,
+    `- tools: ${coordinationTools}`,
+    `- call duration: ${formatDurationMetric(coordination.callDuration)}`,
+    `- wait duration: ${formatDurationMetric(coordination.waitDuration)}`,
+    `- requested wait duration: ${formatDurationMetric(coordination.requestedWaitDuration)}`,
+    `- outcomes=${outcomes}; retries=${retries}`,
     "",
     "Cached tokens are included in Input; reasoning tokens are included in Output."
   ].join("\n");

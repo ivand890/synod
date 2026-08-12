@@ -87,7 +87,7 @@ Commands:
   doctor      Probe Codex version, App Server, model, and reasoning capabilities.
   uninstall   Remove the local runtime and unchanged managed content; preserve durable state.
   profiles    List built-in model profiles and their requirements.
-  usage       Report attributable token consumption for a Codex session tree or canonical interval.
+  usage       Report attributable token and coordination activity for a session tree or canonical interval.
   wait        Observe child thread status changes without renewing worker leases.
 
 Options:
