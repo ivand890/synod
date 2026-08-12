@@ -68,7 +68,7 @@ Usage:
   synod doctor [directory] [--json]
   synod uninstall [directory] [--dry-run] [--force] [--json]
   synod profiles [--json]
-  synod usage [--session <thread-id>] [--cwd <directory>] [--by-model] [--json]
+  synod usage [--session <thread-id>] [--cwd <directory>] [--since-event <sequence|id> | --since-checkpoint | --task <task-id>] [--until-event <sequence|id>] [--by-model] [--json]
   synod wait --thread <thread-id> [--thread <thread-id>] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
   synod --help
   synod --version
@@ -87,7 +87,7 @@ Commands:
   doctor      Probe Codex version, App Server, model, and reasoning capabilities.
   uninstall   Remove the local runtime and unchanged managed content; preserve durable state.
   profiles    List built-in model profiles and their requirements.
-  usage       Report token consumption for a Codex session tree, grouped by model.
+  usage       Report attributable token consumption for a Codex session tree or canonical interval.
   wait        Observe child thread status changes without renewing worker leases.
 
 Options:
@@ -97,6 +97,13 @@ Options:
   --session   Select any thread in a session tree. Defaults to the latest session in --cwd.
   --cwd       Select the project directory used to find the latest session.
   --by-model  Group consumption by model (the default and currently supported view).
+  --since-event
+              Start marginal usage immediately after an exact canonical event.
+  --since-checkpoint
+              Start marginal usage after the acknowledged canonical checkpoint.
+  --task      Select the canonical lifetime of one task.
+  --until-event
+              Close a marginal interval at an exact canonical event.
   --thread    Add a Codex thread ID to a bounded status wait.
   --revision  Require the exact task revision for a transition.
   --evidence  Attach evidence to the exact task revision and current checkpoint.
