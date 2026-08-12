@@ -464,11 +464,12 @@ test("labels historical timestamp gaps incomplete and fails closed for a canonic
   const directory = await temporaryDirectory();
   await initProject({ directory }, { clock: () => "2026-08-12T12:00:00.000Z" });
   const rootPath = await rollout(directory, "untimed", [
-    event("turn_context", { model: "gpt-5.6-sol" }),
-    event("event_msg", { type: "token_count", info: { total_token_usage: {
+    timedEvent("2026-08-12T12:00:01.000Z", "turn_context", { model: "gpt-5.6-sol" }),
+    timedEvent("2026-08-12T12:00:02.000Z", "event_msg", { type: "token_count", info: { total_token_usage: {
       input_tokens: 8, cached_input_tokens: 2, output_tokens: 2,
       reasoning_output_tokens: 1, total_tokens: 10
-    } } })
+    } } }),
+    event("event_msg", { type: "task_complete" })
   ]);
   const root = {
     id: "untimed-root", parentThreadId: null, path: rootPath, cwd: directory,

@@ -262,6 +262,7 @@ export interface RolloutIssue {
   kind: RolloutIssueKind;
   bytes: number;
   observedAtMs?: number;
+  blocksPrefix?: boolean;
 }
 
 export interface RolloutTimeline {
@@ -373,6 +374,7 @@ export async function readRolloutTimeline(
   let previousTimestamp = Number.NEGATIVE_INFINITY;
   let timestampedRecords = 0;
   let prefixIdentity: RolloutIdentity | undefined;
+  let boundaryPassed = false;
   let lastObservedAt: string | undefined;
   let currentContext: UsageThreadRow["currentContext"] | undefined;
   const contexts: NonNullable<UsageThreadRow["currentContext"]>[] = [];
@@ -388,12 +390,20 @@ export async function readRolloutTimeline(
       event = parseJson(content);
     } catch {
       malformedRecords += 1;
-      issues.push({ kind: "malformed-record", bytes });
+      issues.push({
+        kind: "malformed-record",
+        bytes,
+        ...(identityEndMs !== undefined && !boundaryPassed ? { blocksPrefix: true } : {})
+      });
       return;
     }
     if (!isRecord(event)) {
       malformedRecords += 1;
-      issues.push({ kind: "malformed-record", bytes });
+      issues.push({
+        kind: "malformed-record",
+        bytes,
+        ...(identityEndMs !== undefined && !boundaryPassed ? { blocksPrefix: true } : {})
+      });
       return;
     }
     const observed = timestamp(event.timestamp);
@@ -412,9 +422,14 @@ export async function readRolloutTimeline(
           lastObservedAt: observed.iso
         };
       }
+      if (identityEndMs !== undefined && observed.milliseconds > identityEndMs) boundaryPassed = true;
     } else {
       missingTimestamps += 1;
-      issues.push({ kind: "missing-timestamp", bytes });
+      issues.push({
+        kind: "missing-timestamp",
+        bytes,
+        ...(identityEndMs !== undefined && !boundaryPassed ? { blocksPrefix: true } : {})
+      });
     }
 
     const payload = isRecord(event.payload) ? event.payload : undefined;
@@ -863,7 +878,7 @@ function selectedTokens(timeline: RolloutTimeline, interval: UsageInterval | und
   if (!interval) return timeline.tokens;
   const endMs = Date.parse(interval.end.timestamp);
   const prefix = timelineIdentityAt(timeline, endMs);
-  const issues = timeline.issues.filter(issue => issue.bytes <= prefix.bytes);
+  const issues = timeline.issues.filter(issue => issue.bytes <= prefix.bytes || issue.blocksPrefix);
   if ((prefix.bytes === 0 && timeline.identity.bytes > 0 && timeline.timestampedRecords === 0) || issues.length > 0) {
     const counts = {
       malformedRecords: issues.filter(issue => issue.kind === "malformed-record").length,
