@@ -1933,7 +1933,8 @@ function validateEventLog(events: unknown[]): OrchestrationEvent[] {
             || verifiedEvent.type !== "project.rotation-verified"
             || !recommendation || recommendation.id !== verification.recommendation.id
             || recommendation.previousHash !== verification.recommendation.previousHash
-            || recommendation.type !== "project.rotation-prepared") {
+            || recommendation.type !== "project.rotation-prepared"
+            || Date.parse(verification.newRootSessionCreatedAt) <= Date.parse(recommendation.timestamp)) {
             throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "A phase-rotation verification identity is not canonical.", {
               details: { sequence: verification.event.sequence }
             });
@@ -3569,6 +3570,19 @@ function selectedRotationRecommendation(rotation: ProjectRotation, selector: str
   return matches[0]!;
 }
 
+function codexSessionTimestamp(value: unknown): number | undefined {
+  let milliseconds: number | undefined;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    milliseconds = Math.abs(value) < 1_000_000_000_000 ? value * 1_000 : value;
+  } else if (typeof value === "string" && value.trim().length > 0) {
+    const numeric = Number(value);
+    milliseconds = Number.isFinite(numeric)
+      ? Math.abs(numeric) < 1_000_000_000_000 ? numeric * 1_000 : numeric
+      : Date.parse(value);
+  }
+  return milliseconds !== undefined && Number.isFinite(new Date(milliseconds).getTime()) ? milliseconds : undefined;
+}
+
 export async function verifyProjectRotation({
   directory = ".",
   recommendation,
@@ -3603,6 +3617,15 @@ export async function verifyProjectRotation({
   if (session.threadId !== selectedSession || session.threadId === selected.rootSessionId) {
     throw new SynodError(ERROR_CODES.ROTATION_SESSION_INVALID, "The verified session does not establish a new root identity.");
   }
+  const preparedEvent = canonical.events.find(event => event.sequence === selected.event.sequence && event.id === selected.event.id);
+  const preparedAt = preparedEvent ? Date.parse(preparedEvent.timestamp) : Number.NaN;
+  const newRootCreatedAt = codexSessionTimestamp(session.createdAt);
+  if (!Number.isFinite(preparedAt) || newRootCreatedAt === undefined || newRootCreatedAt <= preparedAt) {
+    throw new SynodError(ERROR_CODES.ROTATION_SESSION_INVALID, "The verified root session must include creation evidence after the prepared handoff.", {
+      details: { threadId: session.threadId, createdAt: session.createdAt, preparedAt: preparedEvent?.timestamp }
+    });
+  }
+  const newRootSessionCreatedAt = new Date(newRootCreatedAt).toISOString();
   const afterSession = await readOrchestration(targetDirectory);
   if (afterSession.state.lastEvent.sequence !== expected.sequence || afterSession.state.lastEvent.id !== expected.id
     || afterSession.state.lastEvent.hash !== expected.hash) {
@@ -3627,6 +3650,7 @@ export async function verifyProjectRotation({
       recommendation: selected.event,
       oldRootSessionId: selected.rootSessionId,
       newRootSessionId: session.threadId,
+      newRootSessionCreatedAt,
       priorStartEvent: selected.startEvent,
       handoff: selected.handoff,
       verifiedAt: context.timestamp

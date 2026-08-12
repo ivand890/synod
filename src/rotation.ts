@@ -79,6 +79,7 @@ export interface RotationVerification {
   recommendation: BudgetMutationIdentity;
   oldRootSessionId: string;
   newRootSessionId: string;
+  newRootSessionCreatedAt: string;
   priorStartEvent: CanonicalEventIdentity | BudgetMutationIdentity;
   handoff: RotationHandoffIdentity;
   verifiedAt: string;
@@ -229,6 +230,8 @@ export function isRotationVerification(value: unknown): value is RotationVerific
     && isNonEmptyString(value.oldRootSessionId)
     && isNonEmptyString(value.newRootSessionId)
     && value.oldRootSessionId !== value.newRootSessionId
+    && isNonEmptyString(value.newRootSessionCreatedAt)
+    && Number.isFinite(Date.parse(value.newRootSessionCreatedAt))
     && isPhaseEvent(value.priorStartEvent)
     && isHandoffIdentity(value.handoff)
     && isNonEmptyString(value.verifiedAt)

@@ -228,6 +228,18 @@ test("prepare and verify bind a new root while preserving tasks, Git, and exact 
     verifyProjectRotation({ directory, recommendation: prepared.recommendation.event.id, rootSessionId: "root-old" }),
     error => error instanceof SynodError && error.code === ERROR_CODES.ROTATION_STALE
   );
+  await assert.rejects(
+    verifyProjectRotation({ directory, recommendation: prepared.recommendation.event.id, rootSessionId: "root-preexisting" }, {
+      usageSessionResolver: async (options = {}) => ({
+        threadId: String(options.threadId),
+        cwd: path.resolve(String(options.cwd)),
+        createdAt: "2026-08-12T10:02:59.000Z",
+        warnings: [],
+        diagnostics: {}
+      })
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.ROTATION_SESSION_INVALID
+  );
 
   now = "2026-08-12T10:04:00.000Z";
   const verified = await verifyProjectRotation({
@@ -236,7 +248,7 @@ test("prepare and verify bind a new root while preserving tasks, Git, and exact 
     rootSessionId: "root-new"
   }, {
     clock: () => now,
-    usageSessionResolver: async (options = {}) => ({ threadId: String(options.threadId), cwd: path.resolve(String(options.cwd)), warnings: [], diagnostics: {} })
+    usageSessionResolver: async (options = {}) => ({ threadId: String(options.threadId), cwd: path.resolve(String(options.cwd)), createdAt: now, warnings: [], diagnostics: {} })
   });
   const phase = currentRotationPhase(verified.rotation);
   assert.equal(phase.rootSessionId, "root-new");
@@ -245,7 +257,7 @@ test("prepare and verify bind a new root while preserving tasks, Git, and exact 
   assert.equal((await execFileAsync("git", ["-C", directory, "rev-parse", "HEAD"], { encoding: "utf8" })).stdout.trim(), head);
   await assert.rejects(
     verifyProjectRotation({ directory, recommendation: prepared.recommendation.event.id, rootSessionId: "another-root" }, {
-      usageSessionResolver: async (options = {}) => ({ threadId: String(options.threadId), cwd: path.resolve(String(options.cwd)), warnings: [], diagnostics: {} })
+      usageSessionResolver: async (options = {}) => ({ threadId: String(options.threadId), cwd: path.resolve(String(options.cwd)), createdAt: now, warnings: [], diagnostics: {} })
     }),
     error => error instanceof SynodError && error.code === ERROR_CODES.ROTATION_STALE
   );
@@ -299,7 +311,7 @@ test("stale canonical handoffs and absent threshold evidence fail closed", async
   });
   await assert.rejects(
     verifyProjectRotation({ directory, recommendation: prepared.recommendation.event.id, rootSessionId: "root-new" }, {
-      usageSessionResolver: async (options = {}) => ({ threadId: String(options.threadId), cwd: path.resolve(String(options.cwd)), warnings: [], diagnostics: {} })
+      usageSessionResolver: async (options = {}) => ({ threadId: String(options.threadId), cwd: path.resolve(String(options.cwd)), createdAt: "2026-08-12T10:04:00.000Z", warnings: [], diagnostics: {} })
     }),
     error => error instanceof SynodError && error.code === ERROR_CODES.ROTATION_STALE
   );
@@ -355,6 +367,7 @@ test("rotation CLI exposes set, report, prepare, and verify envelopes", async ()
     usageSessionResolver: async (options: NonNullable<Parameters<typeof import("../src/usage.js").resolveUsageRootSession>[0]> = {}) => ({
       threadId: String(options.threadId),
       cwd: path.resolve(String(options.cwd)),
+      createdAt: now,
       warnings: [],
       diagnostics: {}
     })

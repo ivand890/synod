@@ -225,7 +225,7 @@ synod rotation prepare
 synod rotation verify --recommendation <event-id> --session thread:new-root
 ```
 
-Verification rejects the old root, descendant IDs, another project directory, checkpoint drift, a stale handoff, a reused recommendation, or any intervening canonical event. The verification event becomes the next phase's exact start boundary. `status`, handoff text/JSON, upgrade, and uninstall preserve the full policy, recommendation, and verification history.
+Verification requires creation-time evidence that the selected root was started after `prepare`; it rejects the old or another pre-existing root, descendant IDs, another project directory, checkpoint drift, a stale handoff, a reused recommendation, or any intervening canonical event. The verification event becomes the next phase's exact start boundary. `status`, handoff text/JSON, upgrade, and uninstall preserve the full policy, recommendation, and verification history.
 
 Task mutations do not move the canonical checkpoint, so they cannot silently accept repository drift. Only `synod checkpoint` changes the acknowledged branch, `HEAD`, and working-tree fingerprint.
 
