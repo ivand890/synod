@@ -1057,6 +1057,38 @@ test("lease baseline tampering fails closed before canonical state is exposed", 
   );
 });
 
+test("a self-consistent ledger still fails closed when its reservation baseline is missing", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await reserveTaskLease({ directory, id: "T-001", write: ["src/reserved.ts"] });
+
+  const ledgerPath = path.join(directory, LEASE_BASELINES_PATH);
+  const ledger = JSON.parse(await readFile(ledgerPath, "utf8"));
+  ledger.baselines = [];
+  const ledgerContent = `${JSON.stringify(ledger, null, 2)}\n`;
+  await writeFile(ledgerPath, ledgerContent, "utf8");
+  const statePath = path.join(directory, ORCHESTRATION_STATE_PATH);
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  state.leaseBaselines.contentHash = contentHash(ledgerContent);
+  const eventPath = path.join(directory, ORCHESTRATION_EVENTS_PATH);
+  const events = (await readFile(eventPath, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  const lastEvent = events.at(-1);
+  assert.ok(lastEvent);
+  lastEvent.state.leaseBaselines.contentHash = state.leaseBaselines.contentHash;
+  lastEvent.eventHash = orchestrationEventHash(lastEvent);
+  state.lastEvent.hash = lastEvent.eventHash;
+  await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await writeFile(eventPath, `${events.map(event => JSON.stringify(event)).join("\n")}\n`, "utf8");
+  await writeFile(path.join(directory, ORCHESTRATION_STATUS_PATH), renderStatusMarkdown(state), "utf8");
+
+  await assert.rejects(
+    readOrchestration(directory),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_BASELINE_INVALID
+  );
+});
+
 test("lease baseline retention preserves active identities and bounds inactive history", async () => {
   const directory = await temporaryProject();
   const snapshot = JSON.parse(await readFile(path.join(directory, CHECKPOINT_SNAPSHOT_PATH), "utf8"));

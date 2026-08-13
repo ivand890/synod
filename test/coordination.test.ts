@@ -185,6 +185,50 @@ test("classifies a normal wait expiry as no-change and a plain validation error 
   assert.doesNotMatch(JSON.stringify({ timeline, report }), /Wait timed out|timeout_ms must/);
 });
 
+test("recognizes content-free success shapes and keeps ambiguous legacy acknowledgements unknown", async () => {
+  const directory = await temporaryDirectory();
+  const file = await rollout(directory, "coordination-success-shapes", [
+    call("2026-08-12T12:00:00.000Z", "spawn", "spawn_agent"),
+    output("2026-08-12T12:00:01.000Z", "spawn", JSON.stringify({ task_name: "child" })),
+    call("2026-08-12T12:00:02.000Z", "follow", "followup_task"),
+    output("2026-08-12T12:00:03.000Z", "follow", JSON.stringify({ queued: true })),
+    call("2026-08-12T12:00:04.000Z", "message", "send_message"),
+    output("2026-08-12T12:00:05.000Z", "message", JSON.stringify({ delivered: true })),
+    call("2026-08-12T12:00:06.000Z", "wait", "wait_agent", { timeout_ms: 10_000 }),
+    output("2026-08-12T12:00:07.000Z", "wait", JSON.stringify({ message: "done", timed_out: false })),
+    call("2026-08-12T12:00:08.000Z", "list", "list_agents"),
+    output("2026-08-12T12:00:09.000Z", "list", JSON.stringify({ agents: [] })),
+    call("2026-08-12T12:00:10.000Z", "interrupt", "interrupt_agent"),
+    output("2026-08-12T12:00:11.000Z", "interrupt", JSON.stringify({ previous_status: "running" })),
+    call("2026-08-12T12:00:12.000Z", "legacy-message", "send_message"),
+    output("2026-08-12T12:00:13.000Z", "legacy-message", "legacy acknowledgement without a machine-readable result"),
+    call("2026-08-12T12:00:14.000Z", "empty", "spawn_agent"),
+    output("2026-08-12T12:00:15.000Z", "empty", JSON.stringify({}))
+  ]);
+
+  const timeline = await readRolloutTimeline(file);
+  const report = coordinationReport([{
+    threadId: "root",
+    parentThreadId: null,
+    role: "supervisor",
+    source: "cli",
+    calls: timeline.toolCalls,
+    compactions: 0
+  }]);
+
+  assert.deepEqual(report.total.outcomes, {
+    status: "available",
+    observed: 8,
+    missing: 0,
+    succeeded: 6,
+    noChange: 0,
+    timedOut: 0,
+    failed: 0,
+    unknown: 2
+  });
+  assert.doesNotMatch(JSON.stringify({ timeline, report }), /child|legacy acknowledgement|running/);
+});
+
 test("clips coordination calls and durations to the canonical task interval", async () => {
   const directory = await temporaryDirectory();
   await initProject({ directory }, { clock: () => "2026-08-12T12:00:00.000Z" });

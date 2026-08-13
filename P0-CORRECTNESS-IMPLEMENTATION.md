@@ -298,9 +298,11 @@ Implementation:
   classify them after pairing with the call name/category.
 - Recognize the valid structured `wait_agent` no-change shape separately from
   genuine tool timeout or failure signals.
-- Treat non-empty, non-structured outputs from known coordination tools as
-  failures because successful coordination outputs are structured; do not
-  apply that assumption to arbitrary implementation tools.
+- Recognize validated, content-free success shapes for each coordination tool.
+  Treat plain output as failure only for tools whose valid results are
+  structured (including `wait_agent`); historical plain acknowledgements from
+  `followup_task` and `send_message` remain `unknown` because their content is
+  not retained and cannot prove success or failure.
 - Add succeeded, no-change, timed-out, failed, unknown, observed, and missing
   counts with the existing availability status.
 - Keep duration and retry availability independent from outcome availability.

@@ -26,6 +26,14 @@ export interface ToolOutputSignals {
   explicitSuccess: boolean;
   timedOut: boolean;
   plainText: boolean;
+  successShapes: {
+    spawnAgent: boolean;
+    followupTask: boolean;
+    sendMessage: boolean;
+    waitAgent: boolean;
+    listAgents: boolean;
+    interruptAgent: boolean;
+  };
 }
 
 export interface NormalizedToolCall {
@@ -213,7 +221,21 @@ export function normalizeToolCallStart(
 }
 
 function emptyOutputSignals(): ToolOutputSignals {
-  return { structured: false, explicitFailure: false, explicitSuccess: false, timedOut: false, plainText: false };
+  return {
+    structured: false,
+    explicitFailure: false,
+    explicitSuccess: false,
+    timedOut: false,
+    plainText: false,
+    successShapes: {
+      spawnAgent: false,
+      followupTask: false,
+      sendMessage: false,
+      waitAgent: false,
+      listAgents: false,
+      interruptAgent: false
+    }
+  };
 }
 
 function mergeOutputSignals(target: ToolOutputSignals, source: ToolOutputSignals): void {
@@ -222,6 +244,9 @@ function mergeOutputSignals(target: ToolOutputSignals, source: ToolOutputSignals
   target.explicitSuccess ||= source.explicitSuccess;
   target.timedOut ||= source.timedOut;
   target.plainText ||= source.plainText;
+  for (const key of Object.keys(target.successShapes) as Array<keyof ToolOutputSignals["successShapes"]>) {
+    target.successShapes[key] ||= source.successShapes[key];
+  }
 }
 
 function structuredOutcome(value: unknown): ToolOutputSignals {
@@ -258,6 +283,17 @@ function structuredOutcome(value: unknown): ToolOutputSignals {
     signals.explicitSuccess = true;
   }
   if (status && ["ok", "success", "succeeded", "completed"].includes(status)) signals.explicitSuccess = true;
+  const taskName = record.task_name ?? record.taskName;
+  const agentId = record.agent_id ?? record.agentId;
+  signals.successShapes.spawnAgent ||= (typeof taskName === "string" && taskName.length > 0)
+    || (typeof agentId === "string" && agentId.length > 0);
+  signals.successShapes.followupTask ||= (typeof taskName === "string" && taskName.length > 0)
+    || record.accepted === true || record.queued === true;
+  signals.successShapes.sendMessage ||= record.delivered === true || record.sent === true;
+  signals.successShapes.waitAgent ||= typeof (record.timed_out ?? record.timedOut) === "boolean";
+  signals.successShapes.listAgents ||= Array.isArray(record.agents);
+  signals.successShapes.interruptAgent ||= Object.hasOwn(record, "previous_status")
+    || Object.hasOwn(record, "previousStatus");
   for (const field of ["output", "result", "data", "content"] as const) {
     if (record[field] !== undefined) mergeOutputSignals(signals, structuredOutcome(record[field]));
   }
@@ -269,7 +305,17 @@ function classifyOutcome(start: NormalizedToolCall, output: NormalizedToolOutput
   if (signals.explicitFailure) return "failed";
   if (signals.timedOut) return start.category === "wait" ? "no-change" : "timed-out";
   if (signals.explicitSuccess) return "succeeded";
-  if (signals.plainText && start.category !== "implementation") return "failed";
+  const recognizedSuccess = start.name === "spawn_agent" ? signals.successShapes.spawnAgent
+    : start.name === "followup_task" ? signals.successShapes.followupTask
+      : start.name === "send_message" ? signals.successShapes.sendMessage
+        : start.name === "wait_agent" ? signals.successShapes.waitAgent
+          : start.name === "list_agents" ? signals.successShapes.listAgents
+            : start.name === "interrupt_agent" ? signals.successShapes.interruptAgent
+              : false;
+  if (recognizedSuccess) return "succeeded";
+  if (signals.plainText && ["spawn_agent", "wait_agent", "list_agents", "interrupt_agent"].includes(start.name)) {
+    return "failed";
+  }
   return "unknown";
 }
 

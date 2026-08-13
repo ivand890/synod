@@ -2244,6 +2244,12 @@ async function readLeaseBaselines(
   const byIdentity = new Map(ledger.baselines.map(item => [`${item.leaseId}:${item.generation}`, item]));
   for (const task of taskList(state)) {
     const identities = [
+      ...(task.leaseReservation ? [{
+        id: task.leaseReservation.id,
+        generation: task.leaseReservation.generation,
+        taskRevision: task.leaseReservation.taskRevision,
+        reference: task.leaseReservation.baseline
+      }] : []),
       ...(task.lease ? [{
         id: task.lease.id,
         generation: task.lease.generation,
