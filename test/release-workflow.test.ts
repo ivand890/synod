@@ -7,6 +7,7 @@ import { isRecord, parseJson } from "../src/validation.js";
 const workflowPath = new URL("../.github/workflows/publish.yml", import.meta.url);
 const ciWorkflowPath = new URL("../.github/workflows/ci.yml", import.meta.url);
 const packagePath = new URL("../package.json", import.meta.url);
+const packageSmokePath = new URL("../scripts/package-smoke.ts", import.meta.url);
 
 test("Git dependency build lifecycles do not require pnpm or Corepack", async () => {
   const packageJson = parseJson(await readFile(packagePath, "utf8"));
@@ -69,6 +70,20 @@ test("CI installs the pinned toolchain and smokes compiled packages on every sup
   assert.match(workflow, /os: macos-latest\n\s+node-version: 24/);
   assert.match(workflow, /os: windows-latest\n\s+node-version: 24/);
   assert.match(workflow, /run: pnpm test:package/);
+});
+
+test("installed-package smoke covers the v0.9 production-shaped release contract", async () => {
+  const packageSmoke = await readFile(packageSmokePath, "utf8");
+
+  assert.match(packageSmoke, /runV09ProductionFixture/);
+  assert.match(packageSmoke, /reviewer-archived/);
+  assert.match(packageSmoke, /context_compacted/);
+  assert.match(packageSmoke, /tokenCounters\.resets/);
+  assert.match(packageSmoke, /setTaskBudgetPolicy/);
+  assert.match(packageSmoke, /prepareProjectRotation/);
+  assert.match(packageSmoke, /verifyProjectRotation/);
+  assert.match(packageSmoke, /projectUsageCost/);
+  assert.match(packageSmoke, /readFileSync\(statePath\)/);
 });
 
 test("durable release turn selects the oldest pending stable tag", () => {
