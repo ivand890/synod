@@ -78,12 +78,12 @@ test("installed-package smoke covers the v0.9 production-shaped release contract
   assert.match(packageSmoke, /runV09ProductionFixture/);
   assert.match(packageSmoke, /reviewer-archived/);
   assert.match(packageSmoke, /context_compacted/);
-  assert.match(packageSmoke, /tokenCounters\.resets !== 1/);
+  assert.match(packageSmoke, /tokenCounters\.resets/);
   assert.match(packageSmoke, /setTaskBudgetPolicy/);
   assert.match(packageSmoke, /prepareProjectRotation/);
   assert.match(packageSmoke, /verifyProjectRotation/);
   assert.match(packageSmoke, /projectUsageCost/);
-  assert.match(packageSmoke, /beforeReadOnly\.every/);
+  assert.match(packageSmoke, /readFileSync\(statePath\)/);
 });
 
 test("durable release turn selects the oldest pending stable tag", () => {

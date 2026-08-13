@@ -173,14 +173,18 @@ function addReadyTask(directory: string, id: string): void {
 async function runV09ProductionFixture(
   directory: string,
   consumer: string,
-  installedRoot: string,
 ): Promise<void> {
-  const [usageModule, costsModule, orchestrationModule, handoffModule] = await Promise.all([
-    import(pathToFileURL(path.join(installedRoot, "dist", "usage.js")).href),
-    import(pathToFileURL(path.join(installedRoot, "dist", "costs.js")).href),
-    import(pathToFileURL(path.join(installedRoot, "dist", "orchestration.js")).href),
-    import(pathToFileURL(path.join(installedRoot, "dist", "handoff.js")).href),
-  ]);
+  const installedExports = path.join(consumer, "v0.9-installed-exports.mjs");
+  writeFileSync(installedExports, [
+    'export * as usageModule from "@ivand890/synod/src/usage.js";',
+    'export * as costsModule from "@ivand890/synod/src/costs.js";',
+    'export * as orchestrationModule from "@ivand890/synod/src/orchestration.js";',
+    'export * as handoffModule from "@ivand890/synod/src/handoff.js";',
+    "",
+  ].join("\n"), "utf8");
+  const { usageModule, costsModule, orchestrationModule, handoffModule } = await import(
+    pathToFileURL(installedExports).href
+  );
   const canonical = await orchestrationModule.readOrchestration(directory);
   const startEvent = canonical.events[0];
   const endEvent = canonical.events.at(-1);
@@ -189,7 +193,7 @@ async function runV09ProductionFixture(
   }
   const startMs = Date.parse(startEvent.timestamp);
   const endMs = Date.parse(endEvent.timestamp);
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs - startMs < 24) {
     throw new Error("v0.9 production fixture requires an ordered canonical time interval.");
   }
   const at = (position: number): string => new Date(
@@ -381,6 +385,10 @@ async function runV09ProductionFixture(
     throw new Error(`Installed v0.9 rotation report was invalid or mutated state: ${JSON.stringify(firstRotation)}`);
   }
 
+  const priorPolicyRevision = canonical.state.tasks["T-001"]?.budget?.policy.revision;
+  if (typeof priorPolicyRevision !== "number") {
+    throw new Error("Installed v0.9 budget fixture requires its initial policy.");
+  }
   const postResetPolicy = await orchestrationModule.setTaskBudgetPolicy({
     directory,
     id: "T-001",
@@ -391,7 +399,9 @@ async function runV09ProductionFixture(
     evidence: ["package-smoke:v0.9-post-reset"],
     replace: true,
   }, { clock: () => new Date(endMs + 1_500).toISOString() });
-  if (postResetPolicy.policy.revision !== 2) throw new Error("Installed v0.9 budget did not rebind after reset.");
+  if (postResetPolicy.policy.revision !== priorPolicyRevision + 1) {
+    throw new Error("Installed v0.9 budget did not rebind after reset.");
+  }
   const observed = await orchestrationModule.observeTaskBudget({ directory, id: "T-001" }, {
     clock: () => new Date(endMs + 2_000).toISOString(),
     usageCollector,
@@ -445,7 +455,7 @@ async function runV09ProductionFixture(
   }, { clock: () => new Date(Date.parse(preparedEvent.timestamp) + 3_000).toISOString() });
   if (
     verified.verification.newRootSessionId !== "thread:package-smoke-next"
-    || replacement.policy.revision !== 3
+    || replacement.policy.revision !== postResetPolicy.policy.revision + 1
     || replacement.task.budget?.thresholdStatus !== "within"
     || replacement.task.budget?.observations.length !== 1
     || replacement.task.budget?.decisions.length !== 1
@@ -972,7 +982,7 @@ process.stdout.write(JSON.stringify({ notification: notification.mode, fallbackP
   if (rotationEnvelope.ok !== true || rotationData.action !== "set" || rotationPolicy.revision !== 1) {
     throw new Error(`Installed CLI failed its phase-rotation smoke: ${rotationOutput}`);
   }
-  await runV09ProductionFixture(targetDirectory, consumerDirectory, installedPackageRoot);
+  await runV09ProductionFixture(targetDirectory, consumerDirectory);
   const upgradeOutput = runSynod(["upgrade", targetDirectory, "--dry-run", "--json"], {
     cwd: consumerDirectory,
     capture: true,
