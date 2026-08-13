@@ -40,6 +40,9 @@ test("initializes a fresh project with durable state, agents, and skill", async 
   assert.match(agents, /\$synod-advisor/);
   assert.ok(agents.includes(`pnpm dlx @ivand890/synod@${packageVersion} status`));
   assert.ok(agents.includes("pnpm dlx @ivand890/synod@<target-version> upgrade [directory]"));
+  assert.match(agents, /Before spawning a writer, reserve/);
+  assert.match(agents, /writes, worktrees, and implementation commands must wait/);
+  assert.match(agents, /Keep `lease acquire` only for an already-known worker identity/);
 
   const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
   assert.equal(manifest.schemaVersion, 3);
@@ -212,7 +215,11 @@ test("keeps the primary agent supervisory and delegates routine implementation",
   assert.match(skill, /synod_implementer.*selected profile/);
   assert.match(skill, /rotation verify --recommendation <event-id> --session <id>/);
   assert.match(skill, /usage --since-event <start> --until-event <end> --price-file <path>/);
+  assert.match(skill, /usage --task <task-id> --session <session-id>/);
   assert.match(skill, /incomplete usage fails closed/);
+  assert.match(skill, /Before spawning a writer, run `[^`]+ lease reserve/);
+  assert.match(skill, /Only then tell the worker that writes are authorized/);
+  assert.match(skill, /atomic `delegate start` remains deferred/);
   assert.match(agents, /Do not use the supervising model as the default implementation worker\./);
   assert.match(decisions, /Cost-efficient agents perform implementation/);
 });

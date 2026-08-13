@@ -13,12 +13,16 @@ import { collectUsage, formatUsageReport } from "./usage.js";
 import {
   addTask,
   acquireTaskLease,
+  bindTaskLease,
+  cancelTaskLeaseReservation,
   expireTaskLease,
+  expireTaskLeaseReservation,
   formatOrchestrationStatus,
   heartbeatTaskLease,
   recordCheckpoint,
   recoverTaskLease,
   releaseTaskLease,
+  reserveTaskLease,
   revokeTaskLease,
   overrideCorrectionPolicy,
   splitTask,
@@ -76,9 +80,13 @@ Usage:
   synod rotation prepare [--actor <id>] [--cwd <directory>] [--json]
   synod rotation verify --recommendation <sequence|id> --session <new-root-thread-id> [--actor <id>] [--cwd <directory>] [--json]
   synod lease acquire <task-id> --owner-thread <thread-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
+  synod lease reserve <task-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--reservation-ttl-seconds <n>] [--cwd <directory>] [--json]
+  synod lease bind <task-id> --reservation-token <uuid> --lease-id <uuid> --generation <n> --revision <n> --expected-reserved-at <iso> --baseline-hash <sha256> --owner-thread <thread-id> [--evidence <reference>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
+  synod lease cancel <task-id> --reservation-token <uuid> --lease-id <uuid> --generation <n> --revision <n> --expected-reserved-at <iso> --baseline-hash <sha256> --reason <text> [--cwd <directory>] [--json]
   synod lease heartbeat <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
   synod lease release <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
   synod lease expire <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --reason <text> [--cwd <directory>] [--json]
+  synod lease expire <task-id> --reservation-token <uuid> --lease-id <uuid> --generation <n> --revision <n> --expected-reserved-at <iso> --baseline-hash <sha256> --reason <text> [--cwd <directory>] [--json]
   synod lease revoke <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --reason <text> [--cwd <directory>] [--json]
   synod lease recover <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --decision <resume|reassign|supersede> --reason <text> [--owner-thread <thread-id>] [--cwd <directory>] [--json]
   synod worktree create <task-id> --destination <path> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
@@ -105,7 +113,7 @@ Commands:
   task        Add tasks and apply validated, revision-aware state transitions.
   budget      Report and enforce explicit task-local raw-token budgets.
   rotation    Recommend, prepare, and verify explicit root-session phase rotation.
-  lease       Acquire and mutate fenced durable writer leases.
+  lease       Reserve, bind, acquire, and mutate fenced durable writer leases.
   worktree    Create and inspect explicit detached task worktrees at an exact lease base.
   doctor      Probe Codex version, App Server, model, and reasoning capabilities.
   uninstall   Remove the local runtime and unchanged managed content; preserve durable state.
@@ -516,26 +524,41 @@ export async function run(
     if (command === "lease") {
       const options = parseLeaseArgs(args.slice(1));
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      const result = options.action === "acquire"
-        ? await acquireTaskLease(options, dependencies)
+      const result = options.action === "reserve"
+        ? await reserveTaskLease(options, dependencies)
+        : options.action === "bind"
+          ? await bindTaskLease(options, dependencies)
+          : options.action === "cancel"
+            ? await cancelTaskLeaseReservation(options, dependencies)
+            : options.action === "acquire"
+              ? await acquireTaskLease(options, dependencies)
         : options.action === "heartbeat"
           ? await heartbeatTaskLease(options, dependencies)
           : options.action === "release"
             ? await releaseTaskLease(options, dependencies)
             : options.action === "expire"
-              ? await expireTaskLease(options, dependencies)
+              ? "reservationToken" in options
+                ? await expireTaskLeaseReservation(options, dependencies)
+                : await expireTaskLease(options, dependencies)
               : options.action === "revoke"
                 ? await revokeTaskLease(options, dependencies)
                 : await recoverTaskLease(options, dependencies);
       const data = {
         action: options.action,
         task: result.task,
-        lease: result.lease,
+        ...("lease" in result ? { lease: result.lease } : { reservation: result.reservation }),
+        ...("writeAuthorized" in result ? { writeAuthorized: result.writeAuthorized } : {}),
         checkpoint: result.state.checkpoint,
         lastEvent: result.state.lastEvent
       };
       if (options.json) output.log(JSON.stringify(successEnvelope("lease", data), null, 2));
-      else output.log(`Lease ${options.action} for ${result.task.id}: ${result.lease.id} generation ${result.lease.generation}.`);
+      else {
+        const authority = "lease" in result ? result.lease : result.reservation;
+        const authorization = "writeAuthorized" in result
+          ? `; write authorized ${result.writeAuthorized ? "yes" : "no"}`
+          : "";
+        output.log(`Lease ${options.action} for ${result.task.id}: ${authority.id} generation ${authority.generation}${authorization}.`);
+      }
       return 0;
     }
 

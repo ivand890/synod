@@ -64,6 +64,7 @@ function usageClient(root: Record<string, unknown>) {
     async start() {},
     async close() {},
     async request(method: string, params: Record<string, unknown> = {}) {
+      if (method === "thread/read") return { thread: root };
       assert.equal(method, "thread/list");
       if (params.parentThreadId || params.archived) return { data: [], nextCursor: null };
       return { data: [root], nextCursor: null };
@@ -138,7 +139,8 @@ test("classifies coordination, durations, failures, retries, and paired compacti
     status: "available", observed: 1, missing: 0, totalMs: 30_000
   });
   assert.deepEqual(report.total.outcomes, {
-    status: "partial", observed: 9, missing: 1, failed: 2
+    status: "partial", observed: 9, missing: 1,
+    succeeded: 7, noChange: 0, timedOut: 0, failed: 2, unknown: 0
   });
   assert.deepEqual(report.total.retries, { available: true, count: 1 });
   assert.deepEqual(report.roles.map(row => [row.role, row.threads, row.metrics.counts.totalCalls]), [
@@ -149,6 +151,38 @@ test("classifies coordination, durations, failures, retries, and paired compacti
   });
   assert.equal(report.total.tools.find(row => row.name === "exec")?.calls, 4);
   assert.doesNotMatch(JSON.stringify({ timeline, report }), /SECRET_/);
+});
+
+test("classifies a normal wait expiry as no-change and a plain validation error as failed", async () => {
+  const directory = await temporaryDirectory();
+  const file = await rollout(directory, "wait-outcomes", [
+    call("2026-08-12T12:00:00.000Z", "normal", "wait_agent", { timeout_ms: 10_000 }),
+    output("2026-08-12T12:00:10.000Z", "normal", JSON.stringify({ message: "Wait timed out.", timed_out: true })),
+    call("2026-08-12T12:00:11.000Z", "invalid", "wait_agent", { timeout_ms: 1 }),
+    output("2026-08-12T12:00:12.000Z", "invalid", "timeout_ms must be at least 10000")
+  ]);
+
+  const timeline = await readRolloutTimeline(file);
+  const report = coordinationReport([{
+    threadId: "root",
+    parentThreadId: null,
+    role: "supervisor",
+    source: "cli",
+    calls: timeline.toolCalls,
+    compactions: 0
+  }]);
+
+  assert.deepEqual(report.total.outcomes, {
+    status: "available",
+    observed: 2,
+    missing: 0,
+    succeeded: 0,
+    noChange: 1,
+    timedOut: 0,
+    failed: 1,
+    unknown: 0
+  });
+  assert.doesNotMatch(JSON.stringify({ timeline, report }), /Wait timed out|timeout_ms must/);
 });
 
 test("clips coordination calls and durations to the canonical task interval", async () => {
@@ -186,33 +220,36 @@ test("clips coordination calls and durations to the canonical task interval", as
 
   const report = await collectUsage({
     cwd: directory,
+    threadId: "root",
     taskId: "SYN-COORD",
     clientFactory: () => usageClient(root),
     clock: () => "2026-08-12T12:05:00.000Z"
   });
 
-  assert.equal(report.coordination.total.counts.totalCalls, 2);
+  assert.equal(report.coordination.total.counts.totalCalls, 1);
   assert.equal(report.coordination.total.counts.spawn, 1);
-  assert.equal(report.coordination.total.counts.wait, 1);
+  assert.equal(report.coordination.total.counts.wait, 0);
   assert.deepEqual(report.coordination.total.callDuration, {
-    status: "partial", observed: 1, missing: 1, totalMs: 2_000
+    status: "available", observed: 1, missing: 0, totalMs: 2_000
   });
   assert.deepEqual(report.coordination.total.waitDuration, {
-    status: "unavailable", observed: 0, missing: 1
+    status: "unavailable", observed: 0, missing: 0
   });
   assert.deepEqual(report.coordination.total.requestedWaitDuration, {
-    status: "available", observed: 1, missing: 0, totalMs: 120_000
+    status: "unavailable", observed: 0, missing: 0
   });
   assert.deepEqual(report.coordination.total.retries, { available: false });
   assert.deepEqual(report.coordination.threads.map(row => [row.threadId, row.role, row.metrics.counts.totalCalls]), [
-    ["root", "supervisor", 2]
+    ["root", "supervisor", 1]
   ]);
   assert.deepEqual(report.coordination.completeness, {
-    status: "incomplete", reasons: ["tool-call-output-missing"]
+    status: "complete", reasons: []
   });
   assert.deepEqual(report.completeness, {
-    status: "incomplete", reasons: ["tool-call-output-missing"]
+    status: "complete", reasons: []
   });
+  assert.equal(report.coordination.boundary.crossingCalls.total, 1);
+  assert.ok(report.threads[0]?.boundaryEvidence);
 
   const original = await readFile(rootPath, "utf8");
   await writeFile(rootPath, `${original}${call("2026-08-12T12:04:20.000Z", "late-duplicate", "exec")}\n${call(
@@ -227,6 +264,7 @@ test("clips coordination calls and durations to the canonical task interval", as
 
   const repeated = await collectUsage({
     cwd: directory,
+    threadId: "root",
     taskId: "SYN-COORD",
     clientFactory: () => usageClient(root),
     clock: () => "2026-08-12T12:06:00.000Z"

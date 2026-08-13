@@ -40,6 +40,7 @@ export interface HandoffTask {
   dependencies: Array<{ id: string; state: TaskState; complete: boolean }>;
   incompleteDependencies: string[];
   blocker: string | null;
+  leaseReservation: OrchestrationTask["leaseReservation"] | null;
   lease: OrchestrationTask["lease"] | null;
   proposal: OrchestrationTask["proposal"] | null;
   recovery: OrchestrationTask["recovery"] | null;
@@ -127,6 +128,7 @@ function handoffTask(
     dependencies,
     incompleteDependencies: dependencies.filter(item => !item.complete).map(item => item.id),
     blocker: task.blocker || null,
+    leaseReservation: task.leaseReservation || null,
     lease: task.lease || null,
     proposal: task.proposal || null,
     recovery: task.recovery || null,
@@ -256,6 +258,7 @@ export function formatHandoff(result: HandoffResult): string {
     lines.push(`  Objective: ${task.objective}`);
     lines.push(`  Dependencies: ${task.dependencies.length === 0 ? "none" : task.dependencies.map(item => `${item.id}=${item.state}`).join(", ")}`);
     lines.push(`  Blocker: ${task.blocker || "none"}`);
+    lines.push(`  Writer reservation: ${task.leaseReservation ? `${task.leaseReservation.id} generation ${task.leaseReservation.generation}; write authority false; expires ${task.leaseReservation.expiresAt}` : "none"}`);
     lines.push(`  Writer lease: ${task.lease ? `${task.lease.id} generation ${task.lease.generation}; owner ${task.lease.ownerThread}; expires ${task.lease.expiresAt}` : "none"}`);
     lines.push(`  Sealed proposal: ${task.proposal ? `${task.proposal.bundleId}; ${task.proposal.path}; owned paths ${task.proposal.ownedPaths.length > 0 ? task.proposal.ownedPaths.join(", ") : "none"}; excluded foreign paths ${task.proposal.excludedForeignPaths.length > 0 ? task.proposal.excludedForeignPaths.join(", ") : "none"}` : "none"}`);
     lines.push(`  Abandoned-owner recovery: ${task.recovery ? `${task.recovery.status}; prior owner ${task.recovery.endedLease.ownerThread} generation ${task.recovery.endedLease.generation}; proposal ${task.recovery.proposal?.bundleId || "not sealed"}; choices ${task.recovery.status === "PENDING" ? "resume, reassign, supersede" : task.recovery.decision?.action}; prior recoveries ${task.recoveryHistory.length}` : "none"}`);

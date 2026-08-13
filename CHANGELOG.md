@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Added schema-4 pre-spawn lease reservations with exact reserve, bind, cancel, and pre-bind expiry fencing, preserving the immutable scoped baseline until a returned Codex thread is atomically authorized.
+- Added explicit discovered/contributing thread totals, tool-aware coordination outcomes, and reproducible cross-boundary call evidence to usage reports.
+
+### Changed
+
+- Task-scoped usage now requires an explicit root or descendant `--session`; it no longer guesses the newest project session.
+- Generated advisor guidance now reserves scopes before spawn, keeps the initial child read-only, and grants write authority only after the complete reservation is bound to the returned owner thread.
+
+### Security
+
+- Reservations collide with active ownership and other durable claims, cannot authorize heartbeat, worktree, delivery, or `ACTIVE` transitions before bind, and clean up failed/unreturned spawns without creating false abandoned-worker recovery.
+- Coordination parsing retains only non-content signals, distinguishes normal wait expiry from actual failure, and excludes unprovable boundary-crossing calls without counting post-interval activity.
+
 ## [0.9.0] - 2026-08-12
 
 ### Added

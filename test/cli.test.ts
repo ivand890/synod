@@ -114,6 +114,8 @@ test("prints version and help", () => {
   assert.match(help.stdout, /synod task override/);
   assert.match(help.stdout, /synod task split/);
   assert.match(help.stdout, /synod lease acquire/);
+  assert.match(help.stdout, /synod lease reserve/);
+  assert.match(help.stdout, /synod lease bind/);
   assert.match(help.stdout, /synod lease recover/);
   assert.match(help.stdout, /synod worktree create/);
   assert.match(help.stdout, /synod worktree seal/);
@@ -194,6 +196,24 @@ test("lease parsing rejects malformed numeric fences before orchestration", asyn
   assert.equal(status, 1);
   assert.equal(envelope.error.code, ERROR_CODES.LEASE_INVALID);
   assert.equal(envelope.error.details.option, "--generation");
+});
+
+test("lease bind parsing requires the complete reservation fence", async () => {
+  const { messages, output } = capturedOutput();
+  const status = await run([
+    "lease", "bind", "T-001",
+    "--reservation-token", "00000000-0000-4000-8000-000000000001",
+    "--lease-id", "00000000-0000-4000-8000-000000000002",
+    "--generation", "1",
+    "--revision", "0",
+    "--expected-reserved-at", "2026-08-10T00:00:00.000Z",
+    "--owner-thread", "thread:test",
+    "--json"
+  ], output);
+  const envelope = JSON.parse(takeMessage(messages));
+  assert.equal(status, 1);
+  assert.equal(envelope.error.code, ERROR_CODES.LEASE_INVALID);
+  assert.match(envelope.error.message, /complete reservation fence/);
 });
 
 test("worktree parsing requires a complete exact lease fence", async () => {
@@ -538,6 +558,95 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
     assert.equal(recovered.data.lease.generation, 2);
     assert.equal(recovered.data.task.recovery.status, "REASSIGNED");
     assert.match(recovered.data.task.recovery.proposal.bundleId, /^sha256:/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("lease reservation commands expose the pre-spawn and post-bind authorization boundary", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-reservation-json-test-"));
+  const { messages, output } = capturedOutput();
+  const addReady = async (id: string) => {
+    await run([
+      "task", "add", id,
+      "--objective", `Reserve ${id}`,
+      "--executor", "synod_implementer",
+      "--acceptance", "The reservation is fenced",
+      "--verification", "pnpm test",
+      "--cwd", directory
+    ], output);
+    messages.length = 0;
+    await run(["task", "transition", id, "READY", "--revision", "0", "--cwd", directory], output);
+    messages.length = 0;
+  };
+  const fence = (reservation: Record<string, unknown>) => [
+    "--reservation-token", String(reservation.token),
+    "--lease-id", String(reservation.id),
+    "--generation", String(reservation.generation),
+    "--revision", String(reservation.taskRevision),
+    "--expected-reserved-at", String(reservation.reservedAt),
+    "--baseline-hash", String((reservation.baseline as Record<string, unknown>).snapshotContentHash)
+  ];
+
+  try {
+    await run(["init", directory], output);
+    initializeGitHead(directory);
+    messages.length = 0;
+    await addReady("T-RESERVE");
+    await addReady("T-CANCEL");
+
+    const reserveCode = await run([
+      "lease", "reserve", "T-RESERVE",
+      "--write", "src/reserved.ts",
+      "--reservation-ttl-seconds", "120",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const reserved = JSON.parse(takeMessage(messages));
+    assert.equal(reserveCode, 0);
+    assert.equal(reserved.data.action, "reserve");
+    assert.equal(reserved.data.writeAuthorized, false);
+    assert.equal(reserved.data.task.state, "READY");
+    assert.match(reserved.data.reservation.token, /^[0-9a-f-]{36}$/);
+
+    const bindCode = await run([
+      "lease", "bind", "T-RESERVE",
+      ...fence(reserved.data.reservation),
+      "--owner-thread", "thread:spawned",
+      "--ttl-seconds", "120",
+      "--heartbeat-seconds", "30",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const bound = JSON.parse(takeMessage(messages));
+    assert.equal(bindCode, 0);
+    assert.equal(bound.data.action, "bind");
+    assert.equal(bound.data.writeAuthorized, true);
+    assert.equal(bound.data.task.state, "ACTIVE");
+    assert.equal(bound.data.lease.id, reserved.data.reservation.id);
+    assert.equal(bound.data.lease.ownerThread, "thread:spawned");
+
+    const cancelReserveCode = await run([
+      "lease", "reserve", "T-CANCEL",
+      "--write", "src/cancelled.ts",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const cancelReserved = JSON.parse(takeMessage(messages));
+    assert.equal(cancelReserveCode, 0);
+    const cancelCode = await run([
+      "lease", "cancel", "T-CANCEL",
+      ...fence(cancelReserved.data.reservation),
+      "--reason", "spawn failed",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const cancelled = JSON.parse(takeMessage(messages));
+    assert.equal(cancelCode, 0);
+    assert.equal(cancelled.data.action, "cancel");
+    assert.equal(cancelled.data.writeAuthorized, false);
+    assert.equal(cancelled.data.task.state, "READY");
+    assert.equal(cancelled.data.task.recovery, undefined);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

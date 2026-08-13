@@ -25,8 +25,11 @@ import {
   TASK_STATES,
   acquireTaskLease,
   addTask,
+  bindTaskLease,
+  cancelTaskLeaseReservation,
   formatOrchestrationStatus,
   expireTaskLease,
+  expireTaskLeaseReservation,
   heartbeatTaskLease,
   orchestrationStatus,
   orchestrationStatusWithArtifacts,
@@ -35,6 +38,7 @@ import {
   recordCheckpoint,
   recoverTaskLease,
   releaseTaskLease,
+  reserveTaskLease,
   renderStatusMarkdown,
   revokeTaskLease,
   splitTask,
@@ -103,6 +107,17 @@ async function acquireDefaultLease(directory: string, id = "T-001") {
   });
 }
 
+function reservationFence(reservation: NonNullable<Awaited<ReturnType<typeof reserveTaskLease>>["reservation"]>) {
+  return {
+    reservationToken: reservation.token,
+    leaseId: reservation.id,
+    generation: reservation.generation,
+    revision: reservation.taskRevision,
+    expectedReservedAt: reservation.reservedAt,
+    baselineHash: reservation.baseline.snapshotContentHash
+  };
+}
+
 test.afterEach(async () => {
   for (const directory of temporaryDirectories) {
     await rm(directory, { recursive: true, force: true });
@@ -115,7 +130,7 @@ test("initializes canonical state, a hash-chained log, and a Markdown projection
   const { state, events } = await readOrchestration(directory);
   const markdown = await readFile(path.join(directory, ORCHESTRATION_STATUS_PATH), "utf8");
 
-  assert.equal(state.schemaVersion, 3);
+  assert.equal(state.schemaVersion, 4);
   assert.equal(state.lastEvent.sequence, 1);
   assert.equal(events.length, 1);
   const initialEvent = events[0];
@@ -759,6 +774,185 @@ test("blocking non-active tasks releases reserved leases without affecting activ
   assert.equal(reassigned.lease.generation, 1);
 });
 
+test("writer reservations fence scopes before spawn and bind one owner atomically", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  const reserved = await reserveTaskLease({
+    directory,
+    id: "T-001",
+    write: ["src/reserved.ts"],
+    reservationTtlSeconds: 120
+  }, { clock: () => "2026-08-10T12:00:00.000Z" });
+
+  assert.equal(reserved.writeAuthorized, false);
+  assert.equal(reserved.task.state, "READY");
+  assert.equal(reserved.task.lease, undefined);
+  assert.equal(reserved.reservation.status, "RESERVED");
+  assert.equal(reserved.reservation.generation, 1);
+  assert.equal(reserved.reservation.expiresAt, "2026-08-10T12:02:00.000Z");
+  assert.equal((await orchestrationStatus({ directory }, { clock: () => "2026-08-10T12:02:01.000Z" })).leaseReservationExpiryCandidates[0]?.taskId, "T-001");
+  await assert.rejects(
+    transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_REQUIRED
+  );
+
+  const stateBeforeStaleBind = await readFile(path.join(directory, ORCHESTRATION_STATE_PATH), "utf8");
+  await assert.rejects(
+    bindTaskLease({
+      directory,
+      id: "T-001",
+      ...reservationFence(reserved.reservation),
+      reservationToken: randomUUID(),
+      ownerThread: "thread:worker",
+      ttlSeconds: 120,
+      heartbeatIntervalSeconds: 30
+    }, { clock: () => "2026-08-10T12:00:10.000Z" }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_RESERVATION_STALE
+  );
+  assert.equal(await readFile(path.join(directory, ORCHESTRATION_STATE_PATH), "utf8"), stateBeforeStaleBind);
+
+  const bound = await bindTaskLease({
+    directory,
+    id: "T-001",
+    ...reservationFence(reserved.reservation),
+    ownerThread: "thread:worker",
+    ttlSeconds: 120,
+    heartbeatIntervalSeconds: 30
+  }, { clock: () => "2026-08-10T12:00:10.000Z" });
+
+  assert.equal(bound.writeAuthorized, true);
+  assert.equal(bound.task.state, "ACTIVE");
+  assert.equal(bound.task.leaseReservation, undefined);
+  assert.equal(bound.lease.id, reserved.reservation.id);
+  assert.equal(bound.lease.generation, reserved.reservation.generation);
+  assert.equal(bound.lease.ownerThread, "thread:worker");
+  assert.deepEqual(bound.lease.baseline, reserved.reservation.baseline);
+  assert.equal(bound.event.type, "lease.bound");
+  await assert.rejects(
+    bindTaskLease({
+      directory,
+      id: "T-001",
+      ...reservationFence(reserved.reservation),
+      ownerThread: "thread:other"
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_RESERVATION_NOT_FOUND
+  );
+});
+
+test("reservation cancel and expiry clean up without abandoned-owner recovery", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  const first = await reserveTaskLease({ directory, id: "T-001", write: ["src/cancel.ts"] }, {
+    clock: () => "2026-08-10T12:00:00.000Z"
+  });
+  const cancelled = await cancelTaskLeaseReservation({
+    directory,
+    id: "T-001",
+    ...reservationFence(first.reservation),
+    reason: "spawn failed"
+  }, { clock: () => "2026-08-10T12:00:05.000Z" });
+  assert.equal(cancelled.task.state, "READY");
+  assert.equal(cancelled.task.leaseReservation, undefined);
+  assert.equal(cancelled.task.recovery, undefined);
+  assert.equal(cancelled.event.type, "lease.reservation-cancelled");
+
+  const second = await reserveTaskLease({
+    directory,
+    id: "T-001",
+    write: ["src/expire.ts"],
+    reservationTtlSeconds: 30
+  }, { clock: () => "2026-08-10T12:01:00.000Z" });
+  await assert.rejects(
+    expireTaskLeaseReservation({
+      directory,
+      id: "T-001",
+      ...reservationFence(second.reservation),
+      reason: "spawn never returned"
+    }, { clock: () => "2026-08-10T12:01:29.000Z" }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_NOT_EXPIRED
+  );
+  const expired = await expireTaskLeaseReservation({
+    directory,
+    id: "T-001",
+    ...reservationFence(second.reservation),
+    reason: "spawn never returned"
+  }, { clock: () => "2026-08-10T12:01:30.000Z" });
+  assert.equal(expired.task.state, "READY");
+  assert.equal(expired.task.leaseReservation, undefined);
+  assert.equal(expired.task.recovery, undefined);
+  assert.equal(expired.event.type, "lease.reservation-expired");
+  assert.equal((await readOrchestration(directory)).leaseBaselines.baselines.length, 0);
+});
+
+test("overlapping reservations serialize to one winner and scoped drift prevents binding", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  for (const id of ["T-A", "T-B"]) {
+    await addDefaultTask(directory, { id, objective: `Reserve ${id}` });
+    await transitionTask({ directory, id, to: "READY", revision: 0 });
+  }
+  const attempts = await Promise.allSettled([
+    reserveTaskLease({ directory, id: "T-A", write: ["src/shared.ts"] }),
+    reserveTaskLease({ directory, id: "T-B", write: ["src/shared.ts"] })
+  ]);
+  assert.equal(attempts.filter(item => item.status === "fulfilled").length, 1);
+  assert.equal(attempts.filter(item => item.status === "rejected").length, 1);
+  const winner = attempts.find(item => item.status === "fulfilled");
+  assert.ok(winner && winner.status === "fulfilled");
+  const loser = winner.value.task.id === "T-A" ? "T-B" : "T-A";
+  await assert.rejects(
+    reserveTaskLease({ directory, id: loser, write: ["src/shared.ts"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_CONFLICT
+  );
+  const disjoint = await reserveTaskLease({ directory, id: loser, write: ["src/disjoint.ts"] });
+  assert.equal(disjoint.reservation.status, "RESERVED");
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/shared.ts"), "write before bind\n");
+  await assert.rejects(
+    bindTaskLease({
+      directory,
+      id: winner.value.task.id,
+      ...reservationFence(winner.value.reservation),
+      ownerThread: "thread:early-writer"
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_SCOPE_DRIFT
+  );
+  assert.ok((await readOrchestration(directory)).state.tasks[winner.value.task.id]?.leaseReservation);
+});
+
+test("binding a correction reservation applies the released correction transition effects", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-001", ownerThread: "thread:first", write: ["src/fix.ts"] });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/fix.ts"), "revision one\n");
+  await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery:r1"] });
+
+  const reserved = await reserveTaskLease({ directory, id: "T-001", write: ["src/fix.ts"] });
+  const bound = await bindTaskLease({
+    directory,
+    id: "T-001",
+    ...reservationFence(reserved.reservation),
+    ownerThread: "thread:correction",
+    evidence: ["review:changes-requested"]
+  });
+
+  assert.equal(bound.task.state, "ACTIVE");
+  assert.equal(bound.task.correctionRound, 1);
+  assert.equal(bound.task.correctionPolicy.used, 1);
+  assert.equal(bound.task.proposal, undefined);
+  assert.equal(bound.task.acceptance.status, "pending");
+  assert.equal(bound.task.verification.status, "pending");
+  assert.deepEqual(bound.evidence.map(item => [item.kind, item.revision]), [["correction", 1]]);
+});
+
 test("writer leases persist fenced generations, heartbeat deadlines, and immutable baselines", async () => {
   const directory = await temporaryProject();
   await initializeGitHead(directory);
@@ -914,6 +1108,50 @@ test("pending mutation recovery completes an interrupted lease-baseline replacem
   assert.deepEqual(canonical.state.checkpoint, checkpointBefore);
   assert.equal(canonical.state.tasks["T-001"]?.acceptance.status, "pending");
   assert.equal(canonical.leaseBaselines.baselines[0]?.leaseId, acquired.lease.id);
+  await assert.rejects(readFile(path.join(directory, ".synod/pending-mutation.json"), "utf8"), { code: "ENOENT" });
+});
+
+test("pending mutation recovery preserves one reservation generation through reserve and bind", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  let reserveInterrupted = false;
+  const reserved = await reserveTaskLease({
+    directory,
+    id: "T-001",
+    write: ["src/reservation-recovery.ts"]
+  }, {
+    transactionHook(operation) {
+      if (!reserveInterrupted && operation.path === LEASE_BASELINES_PATH) {
+        reserveInterrupted = true;
+        throw new Error("interrupt reservation baseline replacement");
+      }
+    }
+  });
+  let bindInterrupted = false;
+  const bound = await bindTaskLease({
+    directory,
+    id: "T-001",
+    ...reservationFence(reserved.reservation),
+    ownerThread: "thread:recovered-bind"
+  }, {
+    transactionHook(operation) {
+      if (!bindInterrupted && operation.path === ORCHESTRATION_STATE_PATH) {
+        bindInterrupted = true;
+        throw new Error("interrupt reservation bind publication");
+      }
+    }
+  });
+
+  assert.equal(bound.lease.id, reserved.reservation.id);
+  assert.equal(bound.lease.generation, 1);
+  assert.equal(bound.task.state, "ACTIVE");
+  const canonical = await readOrchestration(directory);
+  assert.equal(canonical.state.tasks["T-001"]?.lease?.id, reserved.reservation.id);
+  assert.equal(canonical.events.filter(event => event.type === "lease.reserved").length, 1);
+  assert.equal(canonical.events.filter(event => event.type === "lease.bound").length, 1);
+  assert.equal(canonical.leaseBaselines.baselines.filter(item => item.leaseId === reserved.reservation.id).length, 1);
   await assert.rejects(readFile(path.join(directory, ".synod/pending-mutation.json"), "utf8"), { code: "ENOENT" });
 });
 
@@ -1677,14 +1915,14 @@ test("stale orchestration locks are reclaimed while live locks fail closed", asy
   })}\n`;
   await writeFile(lockPath, staleLock, "utf8");
 
-  assert.equal((await readOrchestration(directory)).state.schemaVersion, 3);
+  assert.equal((await readOrchestration(directory)).state.schemaVersion, 4);
   await assert.rejects(readFile(lockPath, "utf8"), { code: "ENOENT" });
 
   await writeFile(lockPath, staleLock, "utf8");
   const claimId = createHash("sha256").update(staleLock, "utf8").digest("hex");
   const claimPath = path.join(directory, `.synod/orchestration-reclaim-${claimId}.lock`);
   await link(lockPath, claimPath);
-  assert.equal((await readOrchestration(directory)).state.schemaVersion, 3);
+  assert.equal((await readOrchestration(directory)).state.schemaVersion, 4);
   await assert.rejects(readFile(claimPath, "utf8"), { code: "ENOENT" });
 
   const liveLock = `${JSON.stringify({
@@ -1708,7 +1946,7 @@ test("an interrupted unpublished lock candidate never blocks orchestration", asy
   const candidatePath = path.join(directory, ".synod/orchestration-candidate-interrupted.lock");
   await writeFile(candidatePath, "{", "utf8");
 
-  assert.equal((await readOrchestration(directory)).state.schemaVersion, 3);
+  assert.equal((await readOrchestration(directory)).state.schemaVersion, 4);
   assert.equal(await readFile(candidatePath, "utf8"), "{");
 });
 
@@ -1792,7 +2030,7 @@ test("recovery replaces a matching partial event suffix from the pending mutatio
   const pendingLine = nextEvents.subarray(previousEvents.length, nextEvents.length - 1);
   const event = JSON.parse(pendingLine.toString("utf8"));
   const pending = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     event,
     state: JSON.parse(nextStateContent),
     status: nextStatus,

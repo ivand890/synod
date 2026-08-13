@@ -521,7 +521,7 @@ test("schema 1 migration records exact or ambiguous AGENTS separators safely", a
   assert.equal(ambiguous.manifest.files.find(item => item.path === "AGENTS.md")?.separatorAmbiguous, true);
 });
 
-test("schema 2 upgrade creates canonical orchestration records through migration 2 to 3", async () => {
+test("schema 2 upgrade creates canonical orchestration records through migration 2 to 3 and orchestration schema 4", async () => {
   const directory = await temporaryProject();
   const manifestPath = path.join(directory, ".synod/manifest.json");
   await initProject({ directory, profile: "portable" });
@@ -545,7 +545,7 @@ test("schema 2 upgrade creates canonical orchestration records through migration
   assert.equal(upgraded.schemaVersion, 3);
   assert.ok(upgraded.migrations.some((item: { from?: unknown; to?: unknown }) => item.from === 2 && item.to === 3));
   assert.equal(upgraded.files.find((entry: { path?: unknown }) => entry.path === ".synod/state.json")?.ownership, "record");
-  assert.equal(state.schemaVersion, 3);
+  assert.equal(state.schemaVersion, 4);
   assert.equal(state.lastEvent.sequence, 1);
 });
 
@@ -598,7 +598,7 @@ test("init adopts and migrates no-manifest schema-1 records without a lease ledg
   assert.ok(adopted.updated.includes(".synod/state.json"));
   assert.ok((await readFile(eventsPath, "utf8")).startsWith(legacyEventContent));
   const canonical = await readOrchestration(directory);
-  assert.equal(canonical.state.schemaVersion, 3);
+  assert.equal(canonical.state.schemaVersion, 4);
   assert.equal(canonical.events.at(-1)?.type, "orchestration.migrated");
 });
 
@@ -726,11 +726,11 @@ test("upgrade preserves the schema-1 event prefix and fences migrated in-flight 
   const upgradedEventContent = await readFile(eventsPath, "utf8");
   assert.ok(upgradedEventContent.startsWith(legacyEventContent));
   const canonical = await readOrchestration(directory);
-  assert.equal(canonical.state.schemaVersion, 3);
+  assert.equal(canonical.state.schemaVersion, 4);
   assert.equal(canonical.events.at(-1)?.type, "orchestration.migrated");
   assert.deepEqual(
-    canonical.events.slice(-2).map(event => event.payload.preservedEventCount),
-    [legacyEvents.length, legacyEvents.length]
+    canonical.events.slice(-3).map(event => event.payload.preservedEventCount),
+    [legacyEvents.length, legacyEvents.length, legacyEvents.length]
   );
   assert.equal(canonical.state.tasks["T-MIGRATE"]?.preLease, true);
   assert.equal(canonical.state.tasks["T-MIGRATE-REVIEW"]?.preLease, true);

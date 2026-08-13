@@ -11,8 +11,10 @@ export const LEASE_BASELINES_PATH = ".synod/lease-baselines.json";
 export const LEASE_BASELINES_SCHEMA_VERSION = 1;
 export const DEFAULT_LEASE_TTL_SECONDS = 1_800;
 export const DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 300;
+export const DEFAULT_LEASE_RESERVATION_TTL_SECONDS = 300;
 export const MIN_LEASE_TTL_SECONDS = 30;
 export const MAX_LEASE_TTL_SECONDS = 86_400;
+export const MAX_LEASE_RESERVATION_TTL_SECONDS = 3_600;
 export const MAX_RETAINED_LEASE_BASELINES = 64;
 
 export type LeaseAccess = "read" | "write";
@@ -29,6 +31,34 @@ export interface LeaseBaselineReference {
   contentHash: string;
 }
 
+export interface LeaseBaselineBinding {
+  path: typeof LEASE_BASELINES_PATH;
+  snapshotContentHash: string;
+  branch: string | null;
+  head: string | null;
+  worktreeFingerprint: string;
+  lastEvent: {
+    sequence: number;
+    id: string;
+    hash: string;
+  };
+}
+
+export interface TaskLeaseReservation {
+  id: string;
+  token: string;
+  generation: number;
+  taskId: string;
+  taskRevision: number;
+  executor: string;
+  scopes: LeaseScope[];
+  reservedAt: string;
+  expiresAt: string;
+  ttlSeconds: number;
+  baseline: LeaseBaselineBinding;
+  status: "RESERVED";
+}
+
 export interface TaskLease {
   id: string;
   generation: number;
@@ -42,18 +72,7 @@ export interface TaskLease {
   expiresAt: string;
   heartbeatIntervalSeconds: number;
   ttlSeconds: number;
-  baseline: {
-    path: typeof LEASE_BASELINES_PATH;
-    snapshotContentHash: string;
-    branch: string | null;
-    head: string | null;
-    worktreeFingerprint: string;
-    lastEvent: {
-      sequence: number;
-      id: string;
-      hash: string;
-    };
-  };
+  baseline: LeaseBaselineBinding;
   status: "ACTIVE";
 }
 
@@ -307,6 +326,43 @@ export function isTaskLease(value: unknown): value is TaskLease {
     && typeof value.baseline.lastEvent.id === "string"
     && typeof value.baseline.lastEvent.hash === "string"
     && value.status === "ACTIVE";
+}
+
+function isLeaseBaselineBinding(value: unknown): value is LeaseBaselineBinding {
+  return isRecord(value)
+    && value.path === LEASE_BASELINES_PATH
+    && isHash(value.snapshotContentHash)
+    && (value.branch === null || typeof value.branch === "string")
+    && (value.head === null || typeof value.head === "string")
+    && typeof value.worktreeFingerprint === "string"
+    && isRecord(value.lastEvent)
+    && isNonNegativeInteger(value.lastEvent.sequence)
+    && typeof value.lastEvent.id === "string"
+    && typeof value.lastEvent.hash === "string";
+}
+
+export function isTaskLeaseReservation(value: unknown): value is TaskLeaseReservation {
+  return isRecord(value)
+    && isUuid(value.id)
+    && isUuid(value.token)
+    && isPositiveInteger(value.generation)
+    && typeof value.taskId === "string"
+    && value.taskId.length > 0
+    && isNonNegativeInteger(value.taskRevision)
+    && typeof value.executor === "string"
+    && value.executor.length > 0
+    && Array.isArray(value.scopes)
+    && value.scopes.length > 0
+    && value.scopes.every(isLeaseScope)
+    && value.scopes.some(scope => scope.access === "write")
+    && validIsoTimestamp(value.reservedAt)
+    && validIsoTimestamp(value.expiresAt)
+    && isPositiveInteger(value.ttlSeconds)
+    && value.ttlSeconds >= MIN_LEASE_TTL_SECONDS
+    && value.ttlSeconds <= MAX_LEASE_RESERVATION_TTL_SECONDS
+    && Date.parse(value.reservedAt) < Date.parse(value.expiresAt)
+    && isLeaseBaselineBinding(value.baseline)
+    && value.status === "RESERVED";
 }
 
 export function isEndedTaskLease(value: unknown): value is EndedTaskLease {

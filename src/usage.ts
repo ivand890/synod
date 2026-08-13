@@ -94,6 +94,7 @@ export interface UsageThreadRow extends TokenUsage {
   source: string;
   models: number;
   rollout: RolloutIdentity;
+  boundaryEvidence?: RolloutIdentity;
   activity: {
     turnsStarted: number;
     turnsCompleted: number;
@@ -143,6 +144,8 @@ export interface UsageReport {
   roles: UsageRoleRow[];
   threads: UsageThreadRow[];
   attribution: UsageAttributionRow[];
+  discoveredThreads: number;
+  contributingThreads: number;
   total: TokenUsage & { threads: number };
   tokenCounters: { resets: number };
   completeness: UsageCompleteness;
@@ -575,7 +578,11 @@ export async function readRolloutTimeline(
         }
       }
     } else if (event.type === "response_item" && payload && isToolCallOutputPayload(payload)) {
-      const output = normalizeToolCallOutput(payload, observed);
+      const output = normalizeToolCallOutput(payload, observed ? {
+        ...observed,
+        bytes,
+        sha256: `sha256:${hasher.copy().digest("hex")}`
+      } : undefined);
       if (!output) {
         issues.push({
           kind: "invalid-tool-call",
@@ -1081,37 +1088,68 @@ function selectedActivity(
   return activity;
 }
 
-function selectedToolCalls(
-  timeline: RolloutTimeline,
-  interval: UsageInterval | undefined
-): NormalizedToolCall[] {
-  if (!interval) return timeline.toolCalls;
-  const startMs = Date.parse(interval.start.timestamp);
-  const endMs = Date.parse(interval.end.timestamp);
-  return timeline.toolCalls.filter(call => call.startedAtMs !== undefined
-    && call.startedAtMs > startMs && call.startedAtMs <= endMs).map(call => {
-    if (call.completedAtMs === undefined || call.completedAtMs <= endMs) return call;
-    const {
-      completedAt: _completedAt,
-      completedAtMs: _completedAtMs,
-      outputRecorded: _outputRecorded,
-      durationMs: _durationMs,
-      failed: _failed,
-      ...openAtBoundary
-    } = call;
-    return openAtBoundary;
-  });
+interface SelectedCoordination {
+  calls: NormalizedToolCall[];
+  identityCalls: NormalizedToolCall[];
+  crossingCalls: number;
+  missingCrossingOutput: boolean;
+  boundaryEvidence?: RolloutIdentity;
 }
 
-function selectedToolOutputs(
+function selectedCoordination(
   timeline: RolloutTimeline,
   interval: UsageInterval | undefined
-): NormalizedToolOutput[] {
-  if (!interval) return timeline.toolOutputs;
+): SelectedCoordination {
+  if (!interval) return { calls: timeline.toolCalls, identityCalls: timeline.toolCalls, crossingCalls: 0, missingCrossingOutput: false };
   const startMs = Date.parse(interval.start.timestamp);
   const endMs = Date.parse(interval.end.timestamp);
-  return timeline.toolOutputs.filter(output => output.observedAtMs !== undefined
-    && output.observedAtMs > startMs && output.observedAtMs <= endMs);
+  const calls: NormalizedToolCall[] = [];
+  const identityCalls: NormalizedToolCall[] = [];
+  let crossingCalls = 0;
+  let missingCrossingOutput = false;
+  let boundaryEvidence: RolloutIdentity | undefined;
+  for (const call of timeline.toolCalls) {
+    if (call.startedAtMs === undefined) continue;
+    if (call.completedAtMs === undefined) {
+      if (call.startedAtMs <= endMs) identityCalls.push(call);
+      if (call.startedAtMs > startMs && call.startedAtMs <= endMs) calls.push(call);
+      else if (call.startedAtMs <= startMs) {
+        crossingCalls += 1;
+        missingCrossingOutput = true;
+      }
+      continue;
+    }
+    const fullyContained = call.startedAtMs > startMs
+      && call.startedAtMs <= endMs
+      && call.completedAtMs > startMs
+      && call.completedAtMs <= endMs;
+    if (fullyContained) {
+      calls.push(call);
+      identityCalls.push(call);
+      continue;
+    }
+    const crosses = call.startedAtMs <= endMs && call.completedAtMs > startMs;
+    if (!crosses) continue;
+    identityCalls.push(call);
+    crossingCalls += 1;
+    if (call.completedAtMs > endMs
+      && call.completedAtBytes !== undefined
+      && call.completedAtSha256 !== undefined
+      && (!boundaryEvidence || call.completedAtBytes > boundaryEvidence.bytes)) {
+      boundaryEvidence = {
+        bytes: call.completedAtBytes,
+        sha256: call.completedAtSha256,
+        ...(call.completedAt ? { lastObservedAt: call.completedAt } : {})
+      };
+    }
+  }
+  return {
+    calls,
+    identityCalls,
+    crossingCalls,
+    missingCrossingOutput,
+    ...(boundaryEvidence ? { boundaryEvidence } : {})
+  };
 }
 
 function timelineAttribution(
@@ -1167,6 +1205,13 @@ export async function collectUsage({
     }
     const captureTime = captureValue.toISOString();
     const resolvedCwd = path.resolve(cwd);
+    if (taskId !== undefined && !String(threadId || "").trim()) {
+      throw new SynodError(
+        ERROR_CODES.USAGE_SESSION_REQUIRED,
+        `Usage for task ${taskId} requires --session <root-or-descendant-thread-id>.`,
+        { details: { taskId, requiredOption: "--session" } }
+      );
+    }
     const interval = await resolveUsageInterval(resolvedCwd, {
       ...(sinceEvent !== undefined ? { sinceEvent } : {}),
       ...(sinceCheckpoint === true ? { sinceCheckpoint } : {}),
@@ -1187,13 +1232,14 @@ export async function collectUsage({
       );
     }
 
-    const discoveredThreads = await findDescendants(client, root);
-    const selectedThreads = threadsForInterval(discoveredThreads, root.id, interval);
+    const sessionThreads = await findDescendants(client, root);
+    const selectedThreads = threadsForInterval(sessionThreads, root.id, interval);
     const modelAggregate = new Map<string, TokenUsage & { model: string; threads: Set<string> }>();
     const roleAggregate = new Map<string, TokenUsage & { role: string; threads: Set<string> }>();
     const attributionAggregate = new Map<string, UsageAttributionRow>();
     const threadRows: UsageThreadRow[] = [];
     const coordinationInputs: CoordinationThreadInput[] = [];
+    const coordinationIdentityInputs: Array<{ threadId: string; calls: NormalizedToolCall[] }> = [];
     const coordinationOutputs: Array<{ threadId: string; outputs: NormalizedToolOutput[] }> = [];
     const completenessReasons = new Set<string>();
     let tokenCounterResets = 0;
@@ -1212,9 +1258,11 @@ export async function collectUsage({
       const timeline = await readRolloutTimeline(thread.path, {
         ...(intervalEndMs !== undefined ? { identityEndMs: intervalEndMs } : {})
       });
-      const pairingPrefixBytes = intervalEndMs === undefined
-        ? timeline.identity.bytes
-        : timelineIdentityAt(timeline, intervalEndMs).bytes;
+      const coordinationSelection = selectedCoordination(timeline, interval);
+      const pairingPrefixBytes = Math.max(
+        intervalEndMs === undefined ? timeline.identity.bytes : timelineIdentityAt(timeline, intervalEndMs).bytes,
+        coordinationSelection.boundaryEvidence?.bytes || 0
+      );
       const pairingIssues = timeline.issues.filter(issue => [
         "duplicate-tool-call-start",
         "duplicate-tool-call-output",
@@ -1291,10 +1339,13 @@ export async function collectUsage({
         parentThreadId: thread.parentThreadId,
         role,
         source,
-        calls: selectedToolCalls(timeline, interval),
-        compactions: activity.compactions
+        calls: coordinationSelection.calls,
+        compactions: activity.compactions,
+        boundaryCrossingCalls: coordinationSelection.crossingCalls
       });
-      coordinationOutputs.push({ threadId: thread.id, outputs: selectedToolOutputs(timeline, interval) });
+      coordinationIdentityInputs.push({ threadId: thread.id, calls: coordinationSelection.identityCalls });
+      coordinationOutputs.push({ threadId: thread.id, outputs: timeline.toolOutputs });
+      if (coordinationSelection.missingCrossingOutput) completenessReasons.add("tool-call-boundary-output-missing");
       threadRows.push({
         threadId: thread.id,
         parentThreadId: thread.parentThreadId,
@@ -1302,6 +1353,7 @@ export async function collectUsage({
         source,
         models: activeModels.size,
         rollout: timelineIdentityAt(timeline, intervalEndMs),
+        ...(coordinationSelection.boundaryEvidence ? { boundaryEvidence: coordinationSelection.boundaryEvidence } : {}),
         activity,
         ...(selectedContext ? { currentContext: selectedContext } : {}),
         ...threadUsage
@@ -1309,7 +1361,7 @@ export async function collectUsage({
     }
 
     const callOwners = new Map<string, string>();
-    for (const input of coordinationInputs) {
+    for (const input of coordinationIdentityInputs) {
       for (const call of input.calls) {
         const owner = callOwners.get(call.callId);
         if (owner && owner !== input.threadId) {
@@ -1330,7 +1382,6 @@ export async function collectUsage({
         }
       }
     }
-
     const coordination = coordinationReport(
       coordinationInputs,
       interval?.complete ? [] : ["active-session-tree"]
@@ -1347,7 +1398,8 @@ export async function collectUsage({
       .sort((left, right) => right.totalTokens - left.totalTokens || left.role.localeCompare(right.role));
     const attribution = sortedAttribution([...attributionAggregate.values()]);
     threadRows.sort((left, right) => right.totalTokens - left.totalTokens || left.threadId.localeCompare(right.threadId));
-    const total = { threads: selectedThreads.length, ...emptyUsage() };
+    const contributingThreads = threadRows.filter(row => !isZeroUsage(row)).length;
+    const total = { threads: contributingThreads, ...emptyUsage() };
     for (const row of models) addUsage(total, row);
 
     const reportCapturedAt = interval?.complete ? interval.end.timestamp : captureTime;
@@ -1363,6 +1415,8 @@ export async function collectUsage({
       roles,
       threads: threadRows,
       attribution,
+      discoveredThreads: selectedThreads.length,
+      contributingThreads,
       total,
       tokenCounters: { resets: tokenCounterResets },
       coordination,
@@ -1447,7 +1501,10 @@ export function formatUsageReport(report: UsageReport): string {
   const threadRows = report.threads.map(thread => {
     const parent = thread.parentThreadId || "-";
     return `- ${thread.threadId} parent=${parent} role=${thread.role} source=${thread.source} models=${thread.models}`
-      + ` total=${formatNumber(thread.totalTokens)} rollout=${thread.rollout.sha256} bytes=${thread.rollout.bytes}`;
+      + ` total=${formatNumber(thread.totalTokens)} rollout=${thread.rollout.sha256} bytes=${thread.rollout.bytes}`
+      + (thread.boundaryEvidence
+        ? ` boundary-evidence=${thread.boundaryEvidence.sha256} boundary-bytes=${thread.boundaryEvidence.bytes}`
+        : "");
   });
   const coordination = report.coordination.total;
   const coordinationTools = coordination.tools.length > 0
@@ -1456,9 +1513,10 @@ export function formatUsageReport(report: UsageReport): string {
   const retries = coordination.retries.available
     ? String(coordination.retries.count)
     : "unavailable";
-  const outcomes = coordination.outcomes.failed === undefined
-    ? "unavailable"
-    : `${coordination.outcomes.failed} failed (${coordination.outcomes.status})`;
+  const outcomes = `${coordination.outcomes.status}; observed=${coordination.outcomes.observed}`
+    + ` missing=${coordination.outcomes.missing} succeeded=${coordination.outcomes.succeeded}`
+    + ` no-change=${coordination.outcomes.noChange} timed-out=${coordination.outcomes.timedOut}`
+    + ` failed=${coordination.outcomes.failed} unknown=${coordination.outcomes.unknown}`;
 
   return [
     `Session: ${report.session.threadId}`,
@@ -1466,6 +1524,7 @@ export function formatUsageReport(report: UsageReport): string {
     `Captured: ${report.capturedAt}`,
     `Interval: ${interval}`,
     `Completeness: ${completeness}`,
+    `Threads: discovered=${report.discoveredThreads}; contributing=${report.contributingThreads}; total.threads is a deprecated contributing alias`,
     "",
     render(headers),
     widths.map(width => "-".repeat(width)).join("  "),
@@ -1485,6 +1544,7 @@ export function formatUsageReport(report: UsageReport): string {
     `- wait duration: ${formatDurationMetric(coordination.waitDuration)}`,
     `- requested wait duration: ${formatDurationMetric(coordination.requestedWaitDuration)}`,
     `- outcomes=${outcomes}; retries=${retries}`,
+    `- boundary crossing calls=${report.coordination.boundary.crossingCalls.total}`,
     "",
     "Cached tokens are included in Input; reasoning tokens are included in Output."
   ].join("\n");

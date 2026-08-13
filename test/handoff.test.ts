@@ -16,6 +16,7 @@ import {
   addTask,
   readOrchestration,
   recordCheckpoint,
+  reserveTaskLease,
   revokeTaskLease,
   transitionTask
 } from "../src/orchestration.js";
@@ -79,6 +80,20 @@ test.afterEach(async () => {
     await rm(directory, { recursive: true, force: true });
     temporaryDirectories.delete(directory);
   }
+});
+
+test("handoff exposes an unbound reservation without implying write authority", async () => {
+  const { directory } = await project();
+  await add(directory, "T-RESERVED");
+  await transitionTask({ directory, id: "T-RESERVED", to: "READY", revision: 0 });
+  const reserved = await reserveTaskLease({ directory, id: "T-RESERVED", write: ["src/reserved.ts"] });
+
+  const handoff = await generateHandoff({ directory });
+  const task = handoff.tasks.find(item => item.id === "T-RESERVED");
+  assert.equal(task?.leaseReservation?.id, reserved.reservation.id);
+  assert.equal(task?.lease, null);
+  assert.match(formatHandoff(handoff), /Writer reservation: [0-9a-f-]+ generation 1; write authority false;/);
+  assert.match(formatHandoff(handoff), /Writer lease: none/);
 });
 
 test("handoff derives focus, current evidence, blockers, gates, and legal transitions from canonical state", async () => {

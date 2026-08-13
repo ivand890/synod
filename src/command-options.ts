@@ -87,6 +87,37 @@ export interface LeaseAcquireCommandOptions extends LeaseCommonOptions {
   heartbeatIntervalSeconds?: number;
 }
 
+export interface LeaseReserveCommandOptions extends LeaseCommonOptions {
+  action: "reserve";
+  read: string[];
+  write: string[];
+  readTree: string[];
+  writeTree: string[];
+  reservationTtlSeconds?: number;
+}
+
+interface LeaseReservationFenceCommandOptions extends LeaseCommonOptions {
+  reservationToken: string;
+  leaseId: string;
+  generation: number;
+  revision: number;
+  expectedReservedAt: string;
+  baselineHash: string;
+}
+
+export interface LeaseBindCommandOptions extends LeaseReservationFenceCommandOptions {
+  action: "bind";
+  ownerThread: string;
+  ttlSeconds?: number;
+  heartbeatIntervalSeconds?: number;
+  evidence: string[];
+}
+
+export interface LeaseReservationEndCommandOptions extends LeaseReservationFenceCommandOptions {
+  action: "cancel" | "expire";
+  reason: string;
+}
+
 export interface LeaseMutationCommandOptions extends LeaseCommonOptions {
   action: "heartbeat" | "release" | "expire" | "revoke";
   leaseId: string;
@@ -108,7 +139,12 @@ export interface LeaseRecoverCommandOptions extends LeaseCommonOptions {
   reason: string;
 }
 
-export type LeaseCommandOptions = LeaseAcquireCommandOptions | LeaseMutationCommandOptions | LeaseRecoverCommandOptions;
+export type LeaseCommandOptions = LeaseAcquireCommandOptions
+  | LeaseReserveCommandOptions
+  | LeaseBindCommandOptions
+  | LeaseReservationEndCommandOptions
+  | LeaseMutationCommandOptions
+  | LeaseRecoverCommandOptions;
 
 export interface WorktreeCreateCommandOptions {
   action: "create";
@@ -507,7 +543,7 @@ export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOpti
 export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOptions {
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
-  if (!["acquire", "heartbeat", "release", "expire", "revoke", "recover"].includes(action)) {
+  if (!["reserve", "bind", "cancel", "acquire", "heartbeat", "release", "expire", "revoke", "recover"].includes(action)) {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown lease action: ${action}`, { details: { action } });
   }
   const id = args[1];
@@ -522,7 +558,11 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
   let generation: number | undefined;
   let revision: number | undefined;
   let expectedHeartbeatAt: string | undefined;
+  let reservationToken: string | undefined;
+  let expectedReservedAt: string | undefined;
+  let baselineHash: string | undefined;
   let ttlSeconds: number | undefined;
+  let reservationTtlSeconds: number | undefined;
   let heartbeatIntervalSeconds: number | undefined;
   let reason: string | undefined;
   let decision: "resume" | "reassign" | "supersede" | undefined;
@@ -530,6 +570,7 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
   const write: string[] = [];
   const readTree: string[] = [];
   const writeTree: string[] = [];
+  const evidence: string[] = [];
   for (let index = 2; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg) continue;
@@ -540,7 +581,8 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     }
     const valueOptions = [
       "--cwd", "--actor", "--owner-thread", "--lease-id", "--generation", "--revision", "--expected-heartbeat-at",
-      "--ttl-seconds", "--heartbeat-seconds", "--reason", "--decision", "--read", "--write", "--read-tree", "--write-tree"
+      "--reservation-token", "--expected-reserved-at", "--baseline-hash", "--ttl-seconds", "--reservation-ttl-seconds",
+      "--heartbeat-seconds", "--reason", "--decision", "--read", "--write", "--read-tree", "--write-tree", "--evidence"
     ];
     if (!valueOptions.includes(arg)) {
       if (arg.startsWith("-")) throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
@@ -552,6 +594,9 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     else if (arg === "--owner-thread") ownerThread = value;
     else if (arg === "--lease-id") leaseId = value;
     else if (arg === "--expected-heartbeat-at") expectedHeartbeatAt = value;
+    else if (arg === "--reservation-token") reservationToken = value;
+    else if (arg === "--expected-reserved-at") expectedReservedAt = value;
+    else if (arg === "--baseline-hash") baselineHash = value;
     else if (arg === "--reason") reason = value;
     else if (arg === "--decision") {
       if (!["resume", "reassign", "supersede"].includes(value)) {
@@ -563,9 +608,11 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     else if (arg === "--write") write.push(value);
     else if (arg === "--read-tree") readTree.push(value);
     else if (arg === "--write-tree") writeTree.push(value);
+    else if (arg === "--evidence") evidence.push(value);
     else if (arg === "--generation") generation = /^\d+$/.test(value) ? Number(value) : Number.NaN;
     else if (arg === "--revision") revision = /^\d+$/.test(value) ? Number(value) : Number.NaN;
     else if (arg === "--ttl-seconds") ttlSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    else if (arg === "--reservation-ttl-seconds") reservationTtlSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
     else heartbeatIntervalSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
     index += 1;
   }
@@ -573,6 +620,7 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     ["--generation", generation],
     ["--revision", revision],
     ["--ttl-seconds", ttlSeconds],
+    ["--reservation-ttl-seconds", reservationTtlSeconds],
     ["--heartbeat-seconds", heartbeatIntervalSeconds]
   ] as const) {
     if (value !== undefined && Number.isNaN(value)) {
@@ -581,8 +629,16 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
       });
     }
   }
+  const hasReservationFence = reservationToken !== undefined || expectedReservedAt !== undefined || baselineHash !== undefined;
+  const reservationFenceComplete = reservationToken !== undefined
+    && leaseId !== undefined
+    && generation !== undefined
+    && revision !== undefined
+    && expectedReservedAt !== undefined
+    && baselineHash !== undefined;
   if (action === "acquire") {
-    if (leaseId !== undefined || generation !== undefined || revision !== undefined || expectedHeartbeatAt !== undefined || reason !== undefined || decision !== undefined) {
+    if (leaseId !== undefined || generation !== undefined || revision !== undefined || expectedHeartbeatAt !== undefined
+      || hasReservationFence || reservationTtlSeconds !== undefined || evidence.length > 0 || reason !== undefined || decision !== undefined) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Lease acquire received a mutation-only option.");
     }
     return {
@@ -600,8 +656,78 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
       ...(heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds })
     };
   }
+  if (action === "reserve") {
+    if (ownerThread !== undefined || leaseId !== undefined || generation !== undefined || revision !== undefined
+      || expectedHeartbeatAt !== undefined || hasReservationFence || ttlSeconds !== undefined
+      || heartbeatIntervalSeconds !== undefined || evidence.length > 0 || reason !== undefined || decision !== undefined) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Lease reserve received a bind- or mutation-only option.");
+    }
+    return {
+      action,
+      id,
+      directory,
+      json,
+      actor,
+      read,
+      write,
+      readTree,
+      writeTree,
+      ...(reservationTtlSeconds === undefined ? {} : { reservationTtlSeconds })
+    };
+  }
+  if (action === "bind") {
+    if (read.length > 0 || write.length > 0 || readTree.length > 0 || writeTree.length > 0
+      || reservationTtlSeconds !== undefined || expectedHeartbeatAt !== undefined || reason !== undefined || decision !== undefined) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Lease bind received a reserve- or active-mutation-only option.");
+    }
+    if (!reservationFenceComplete || !ownerThread) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease bind requires the complete reservation fence and --owner-thread.");
+    }
+    return {
+      action,
+      id,
+      directory,
+      json,
+      actor,
+      reservationToken: reservationToken!,
+      leaseId: leaseId!,
+      generation: generation!,
+      revision: revision!,
+      expectedReservedAt: expectedReservedAt!,
+      baselineHash: baselineHash!,
+      ownerThread,
+      evidence,
+      ...(ttlSeconds === undefined ? {} : { ttlSeconds }),
+      ...(heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds })
+    };
+  }
+  if (action === "cancel" || (action === "expire" && hasReservationFence)) {
+    if (read.length > 0 || write.length > 0 || readTree.length > 0 || writeTree.length > 0
+      || reservationTtlSeconds !== undefined || ttlSeconds !== undefined || heartbeatIntervalSeconds !== undefined
+      || expectedHeartbeatAt !== undefined || ownerThread !== undefined || evidence.length > 0 || decision !== undefined) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Lease ${action} reservation cleanup received an incompatible option.`);
+    }
+    if (!reservationFenceComplete || !reason) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease ${action} reservation cleanup requires the complete reservation fence and --reason.`);
+    }
+    return {
+      action,
+      id,
+      directory,
+      json,
+      actor,
+      reservationToken: reservationToken!,
+      leaseId: leaseId!,
+      generation: generation!,
+      revision: revision!,
+      expectedReservedAt: expectedReservedAt!,
+      baselineHash: baselineHash!,
+      reason
+    };
+  }
   if (read.length > 0 || write.length > 0 || readTree.length > 0 || writeTree.length > 0
-    || ttlSeconds !== undefined || heartbeatIntervalSeconds !== undefined) {
+    || ttlSeconds !== undefined || reservationTtlSeconds !== undefined || heartbeatIntervalSeconds !== undefined
+    || hasReservationFence || evidence.length > 0) {
     throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Lease ${action} received an acquire-only option.`);
   }
   if (action !== "recover" && decision !== undefined) {
