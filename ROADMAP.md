@@ -1,7 +1,7 @@
 # Synod Roadmap
 
-Last updated: 2026-08-10
-Current release baseline: `v0.8.0`
+Last updated: 2026-08-12
+Current release baseline: `v0.9.0`
 
 This roadmap converts the advisor loop's remaining operational risks into
 versioned, testable increments. Entries at or below the current release
@@ -177,6 +177,10 @@ Synod reaches a 1.0 candidate only after all of the following are demonstrated:
   proposal recovery, enforced correction policy, change-driven waiting,
   verifiable detached task worktrees, and explicit schema migration with
   installed concurrency, interruption, upgrade, and cleanup drills.
+- `v0.9.0`: exact marginal usage and coordination attribution, opt-in task
+  budgets, deterministic phase-rotation handoffs, and optional dated local
+  cost estimates, with installed production-shaped reset, reroute, archived
+  thread, incomplete-session, and schema-migration drills.
 
 The worktrees/leases and economics originally associated with `v0.6` were not
 discarded. They are deliberately sequenced after recoverable phase boundaries

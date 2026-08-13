@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-12
+
+### Added
+
+- Added exact marginal usage reports for canonical event, checkpoint, and task intervals, split by thread, model, and role with raw input, cached input, output, reasoning, and total token evidence.
+- Added coordination reporting for spawns, follow-ups, waits, tool calls, retries, failures, compactions, and durations, while marking active or otherwise incomplete session trees explicitly.
+- Added opt-in canonical task budgets with soft warnings, hard decision gates, and explicit continue, split, or phase-rotation decisions without forging task lifecycle state.
+- Added deterministic phase-rotation reports and canonical prepare/verify events that bind handoff evidence to a newly created root session before work continues.
+- Added optional dated local USD price files and cached/input/output cost projections that retain the underlying token evidence and remain disabled unless configured.
+
+### Changed
+
+- Canonical orchestration state migrates explicitly from schema 2 to schema 3, preserving historical state and the hash-chained event prefix while adding budgets and phase-rotation records.
+- Generated handoff context now includes the same deterministic phase-rotation recommendation used by the standalone report.
+- Installed-package smoke now exercises a production-shaped supervisor, implementer, and archived reviewer tree with model reroutes, counter resets, compactions, waits, failures, retries, budgets, rotation, costs, and schema upgrade/downgrade behavior.
+
+### Security
+
+- Usage and cost projections fail closed on incomplete bounded intervals, missing rollout prefixes, counter-reset ambiguity, unknown models, inherited price entries, and prices outside their declared validity window.
+- Budget and rotation mutations reject stale observations, recommendations, task revisions, pre-recommendation sessions, and inconsistent root-session bindings; read-only reports remain byte-for-byte non-mutating.
+
 ## [0.8.0] - 2026-08-10
 
 ### Added
@@ -161,7 +182,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/ivand890/synod/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/ivand890/synod/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ivand890/synod/compare/v0.6.3...v0.7.0
 [0.6.3]: https://github.com/ivand890/synod/compare/v0.6.2...v0.6.3

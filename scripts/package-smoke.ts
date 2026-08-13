@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import type { SpawnSyncOptionsWithStringEncoding } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { isRecord, parseJson } from "../src/validation.js";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -168,6 +168,290 @@ function addReadyTask(directory: string, id: string): void {
     "--json",
   ], { capture: true });
   runSynod(["task", "transition", id, "READY", "--revision", "0", "--cwd", directory, "--json"], { capture: true });
+}
+
+async function runV09ProductionFixture(
+  directory: string,
+  consumer: string,
+  installedRoot: string,
+): Promise<void> {
+  const [usageModule, costsModule, orchestrationModule, handoffModule] = await Promise.all([
+    import(pathToFileURL(path.join(installedRoot, "dist", "usage.js")).href),
+    import(pathToFileURL(path.join(installedRoot, "dist", "costs.js")).href),
+    import(pathToFileURL(path.join(installedRoot, "dist", "orchestration.js")).href),
+    import(pathToFileURL(path.join(installedRoot, "dist", "handoff.js")).href),
+  ]);
+  const canonical = await orchestrationModule.readOrchestration(directory);
+  const startEvent = canonical.events[0];
+  const endEvent = canonical.events.at(-1);
+  if (!startEvent || !endEvent || endEvent.sequence <= startEvent.sequence) {
+    throw new Error("v0.9 production fixture requires a non-empty canonical interval.");
+  }
+  const startMs = Date.parse(startEvent.timestamp);
+  const endMs = Date.parse(endEvent.timestamp);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+    throw new Error("v0.9 production fixture requires an ordered canonical time interval.");
+  }
+  const at = (position: number): string => new Date(
+    Math.min(endMs, startMs + Math.max(1, Math.floor(((endMs - startMs) * position) / 24))),
+  ).toISOString();
+  const captureAt = new Date(endMs + 1_000).toISOString();
+  const timed = (timestamp: string, type: string, payload: unknown): string => JSON.stringify({ timestamp, type, payload });
+  const call = (timestamp: string, callId: string, name: string, args: Record<string, unknown> = {}, extra: Record<string, unknown> = {}): string => timed(timestamp, "response_item", {
+    type: "function_call",
+    call_id: callId,
+    name,
+    arguments: JSON.stringify(args),
+    ...extra,
+  });
+  const output = (timestamp: string, callId: string, value: unknown): string => timed(timestamp, "response_item", {
+    type: "function_call_output",
+    call_id: callId,
+    output: JSON.stringify(value),
+  });
+  const token = (
+    timestamp: string,
+    total: { input: number; cached: number; output: number; reasoning: number; total: number },
+    context?: { input: number; window: number },
+  ): string => timed(timestamp, "event_msg", {
+    type: "token_count",
+    info: {
+      total_token_usage: {
+        input_tokens: total.input,
+        cached_input_tokens: total.cached,
+        output_tokens: total.output,
+        reasoning_output_tokens: total.reasoning,
+        total_tokens: total.total,
+      },
+      ...(context ? {
+        last_token_usage: { input_tokens: context.input },
+        model_context_window: context.window,
+      } : {}),
+    },
+  });
+  const writeRollout = (name: string, records: string[]): string => {
+    const rolloutDirectory = path.join(consumer, "v0.9-production-rollouts");
+    mkdirSync(rolloutDirectory, { recursive: true });
+    const filename = path.join(rolloutDirectory, `${name}.jsonl`);
+    writeFileSync(filename, `${records.join("\n")}\n`, "utf8");
+    return filename;
+  };
+
+  const rootPath = writeRollout("supervisor", [
+    timed(startEvent.timestamp, "session_meta", { source: "cli", agent_role: "supervisor" }),
+    timed(startEvent.timestamp, "turn_context", { model: "gpt-5.6-sol" }),
+    token(startEvent.timestamp, { input: 80, cached: 40, output: 20, reasoning: 5, total: 100 }, { input: 20, window: 1_000 }),
+    token(at(2), { input: 200, cached: 80, output: 40, reasoning: 10, total: 240 }, { input: 700, window: 1_000 }),
+    call(at(3), "spawn-1", "spawn_agent", { message: "fixture implementer" }),
+    output(at(4), "spawn-1", { ok: true }),
+    call(at(5), "wait-1", "wait_agent", { timeout_ms: 30_000 }),
+    output(at(7), "wait-1", { status: "completed" }),
+    timed(at(8), "event_msg", { type: "context_compacted" }),
+    call(at(9), "exec-failed", "exec", { command: "fixture" }),
+    output(at(10), "exec-failed", { exit_code: 1 }),
+    call(at(11), "exec-retry", "exec", { command: "fixture" }, { retry_of: "exec-failed" }),
+    output(at(12), "exec-retry", { exit_code: 0 }),
+    timed(at(13), "turn_context", { model: "gpt-5.6-luna" }),
+    token(at(14), { input: 300, cached: 120, output: 60, reasoning: 18, total: 360 }, { input: 850, window: 1_000 }),
+    timed(at(15), "event_msg", { type: "context_compacted" }),
+    token(at(16), { input: 24, cached: 8, output: 6, reasoning: 2, total: 30 }, { input: 120, window: 1_000 }),
+    token(endEvent.timestamp, { input: 40, cached: 12, output: 10, reasoning: 3, total: 50 }, { input: 180, window: 1_000 }),
+    token(new Date(endMs + 500).toISOString(), { input: 136, cached: 44, output: 34, reasoning: 9, total: 170 }, { input: 820, window: 1_000 }),
+  ]);
+  const implementerPath = writeRollout("implementer", [
+    timed(at(5), "session_meta", { source: { subagent: { thread_spawn: { agent_role: "synod_implementer" } } } }),
+    timed(at(6), "turn_context", { model: "gpt-5.6-luna" }),
+    call(at(7), "impl-exec", "exec", { command: "fixture implementation" }),
+    output(at(8), "impl-exec", { exit_code: 0 }),
+    token(at(9), { input: 160, cached: 80, output: 40, reasoning: 12, total: 200 }),
+  ]);
+  const reviewerPath = writeRollout("reviewer-archived", [
+    timed(at(10), "session_meta", { source: { subagent: { thread_spawn: { agent_role: "synod_reviewer" } } } }),
+    timed(at(11), "turn_context", { model: "gpt-5.6-terra" }),
+    call(at(12), "review-message", "send_message", { message: "fixture correction" }),
+    output(at(13), "review-message", { ok: true }),
+    token(at(14), { input: 64, cached: 32, output: 16, reasoning: 4, total: 80 }),
+  ]);
+  const root = {
+    id: "thread:package-smoke",
+    parentThreadId: null,
+    path: rootPath,
+    cwd: directory,
+    createdAt: new Date(startMs - 1_000).toISOString(),
+    updatedAt: captureAt,
+  };
+  const implementer = {
+    id: "thread:package-implementer",
+    parentThreadId: root.id,
+    path: implementerPath,
+    cwd: directory,
+    createdAt: at(5),
+    updatedAt: endEvent.timestamp,
+  };
+  const reviewer = {
+    id: "thread:package-reviewer",
+    parentThreadId: root.id,
+    path: reviewerPath,
+    cwd: directory,
+    createdAt: at(10),
+    updatedAt: endEvent.timestamp,
+  };
+  const records = new Map([root, implementer, reviewer].map(item => [item.id, item]));
+  const clientFactory = () => ({
+    async start() {},
+    async close() {},
+    async request(method: string, params: Record<string, unknown> = {}) {
+      if (method === "thread/read") return { thread: records.get(String(params.threadId)) };
+      if (method !== "thread/list") throw new Error(`Unexpected App Server method: ${method}`);
+      if (params.parentThreadId === root.id) {
+        return { data: params.archived ? [reviewer] : [implementer], nextCursor: null };
+      }
+      return { data: [], nextCursor: null };
+    },
+    getWarnings() { return []; },
+    getDiagnostics() { return { fixture: "v0.9-production" }; },
+  });
+  const usageCollector = (options: Record<string, unknown> = {}) => usageModule.collectUsage({
+    ...options,
+    clientFactory,
+  });
+
+  const completeUsage = await usageModule.collectUsage({
+    cwd: directory,
+    threadId: root.id,
+    sinceEvent: startEvent.id,
+    untilEvent: endEvent.id,
+    clientFactory,
+    clock: () => endEvent.timestamp,
+  });
+  const roles = new Set(completeUsage.roles.map((item: Record<string, unknown>) => item.role));
+  if (
+    completeUsage.completeness.status !== "complete"
+    || completeUsage.interval?.complete !== true
+    || completeUsage.threads.length !== 3
+    || !completeUsage.threads.some((item: Record<string, unknown>) => item.threadId === reviewer.id)
+    || !roles.has("supervisor")
+    || !roles.has("synod_implementer")
+    || !roles.has("synod_reviewer")
+    || completeUsage.models.length !== 3
+    || completeUsage.tokenCounters.resets !== 1
+    || completeUsage.coordination.total.counts.spawn !== 1
+    || completeUsage.coordination.total.counts.wait !== 1
+    || completeUsage.coordination.total.counts.compactions !== 2
+    || completeUsage.coordination.total.outcomes.failed !== 1
+    || completeUsage.coordination.total.retries.count !== 1
+  ) {
+    throw new Error(`Installed v0.9 usage fixture was not production-shaped: ${JSON.stringify(completeUsage)}`);
+  }
+
+  const usageDate = endEvent.timestamp.slice(0, 10);
+  const cost = costsModule.projectUsageCost(completeUsage, costsModule.validatePriceFile({
+    schemaVersion: 1,
+    currency: "USD",
+    asOf: usageDate,
+    validUntil: usageDate,
+    source: "package-smoke:v0.9-production",
+    models: {
+      "gpt-5.6-sol": { uncachedInputPerMillion: 2, cachedInputPerMillion: 0.5, outputPerMillion: 8 },
+      "gpt-5.6-luna": { uncachedInputPerMillion: 1, cachedInputPerMillion: 0.25, outputPerMillion: 4 },
+      "gpt-5.6-terra": { uncachedInputPerMillion: 1.5, cachedInputPerMillion: 0.4, outputPerMillion: 6 },
+    },
+  }));
+  if (cost.status !== "complete" || typeof cost.total !== "number" || cost.total <= 0 || cost.rows.length !== 3) {
+    throw new Error(`Installed v0.9 cost fixture was invalid: ${JSON.stringify(cost)}`);
+  }
+
+  const rotationDependencies = { clock: () => captureAt, usageCollector };
+  const statePath = path.join(directory, ".synod", "state.json");
+  const eventsPath = path.join(directory, ".synod", "events.jsonl");
+  const beforeReadOnly = [readFileSync(statePath), readFileSync(eventsPath)];
+  const firstRotation = await orchestrationModule.reportProjectRotation({ directory }, rotationDependencies);
+  const secondRotation = await orchestrationModule.reportProjectRotation({ directory }, rotationDependencies);
+  const handoff = await handoffModule.generateHandoff({ directory }, rotationDependencies);
+  const afterReadOnly = [readFileSync(statePath), readFileSync(eventsPath)];
+  if (
+    firstRotation.reportHash !== secondRotation.reportHash
+    || !firstRotation.recommended
+    || !firstRotation.reasons.includes("compactions")
+    || firstRotation.usage.completeness.status !== "incomplete"
+    || !firstRotation.completedTaskIds.includes("T-WORKTREE")
+    || handoff.rotation?.reportHash !== firstRotation.reportHash
+    || !beforeReadOnly.every((value, index) => value.equals(afterReadOnly[index]!))
+  ) {
+    throw new Error(`Installed v0.9 rotation report was invalid or mutated state: ${JSON.stringify(firstRotation)}`);
+  }
+
+  const postResetPolicy = await orchestrationModule.setTaskBudgetPolicy({
+    directory,
+    id: "T-001",
+    rootSessionId: root.id,
+    startEvent: endEvent.id,
+    hardTotalTokens: 100,
+    reason: "Measure the installed fixture after its intentional counter reset",
+    evidence: ["package-smoke:v0.9-post-reset"],
+    replace: true,
+  }, { clock: () => new Date(endMs + 1_500).toISOString() });
+  if (postResetPolicy.policy.revision !== 2) throw new Error("Installed v0.9 budget did not rebind after reset.");
+  const observed = await orchestrationModule.observeTaskBudget({ directory, id: "T-001" }, {
+    clock: () => new Date(endMs + 2_000).toISOString(),
+    usageCollector,
+  });
+  if (observed.observation.thresholdStatus !== "decision-required") {
+    throw new Error(`Installed v0.9 budget fixture did not cross its hard limit: ${JSON.stringify(observed)}`);
+  }
+  const decided = await orchestrationModule.decideTaskBudget({
+    directory,
+    id: "T-001",
+    observation: observed.observation.event.id,
+    action: "rotate",
+    reason: "Continue the installed fixture in a fresh root",
+    evidence: ["package-smoke:v0.9-budget-rotation"],
+  }, { clock: () => new Date(endMs + 3_000).toISOString() });
+  if (decided.decision.action !== "rotate") throw new Error("Installed v0.9 budget decision was not preserved.");
+
+  const prepared = await orchestrationModule.prepareProjectRotation({ directory }, {
+    clock: () => new Date(endMs + 4_000).toISOString(),
+    usageCollector,
+  });
+  const preparedCanonical = await orchestrationModule.readOrchestration(directory);
+  const preparedEvent = preparedCanonical.events.at(-1);
+  if (!preparedEvent || preparedEvent.id !== prepared.recommendation.event.id) {
+    throw new Error("Installed v0.9 rotation prepare did not bind the canonical event.");
+  }
+  const newRootCreatedAt = new Date(Date.parse(preparedEvent.timestamp) + 1_000).toISOString();
+  const verified = await orchestrationModule.verifyProjectRotation({
+    directory,
+    recommendation: prepared.recommendation.event.id,
+    rootSessionId: "thread:package-smoke-next",
+  }, {
+    clock: () => new Date(Date.parse(preparedEvent.timestamp) + 2_000).toISOString(),
+    usageSessionResolver: async () => ({
+      threadId: "thread:package-smoke-next",
+      cwd: directory,
+      createdAt: newRootCreatedAt,
+      warnings: [],
+      diagnostics: { fixture: "v0.9-production" },
+    }),
+  });
+  const replacement = await orchestrationModule.setTaskBudgetPolicy({
+    directory,
+    id: "T-001",
+    rootSessionId: verified.verification.newRootSessionId,
+    startEvent: verified.verification.event.id,
+    hardTotalTokens: 100,
+    reason: "Bind the verified installed fixture phase",
+    evidence: ["package-smoke:v0.9-verified-root"],
+    replace: true,
+  }, { clock: () => new Date(Date.parse(preparedEvent.timestamp) + 3_000).toISOString() });
+  if (
+    verified.verification.newRootSessionId !== "thread:package-smoke-next"
+    || replacement.policy.revision !== 3
+    || replacement.task.budget?.thresholdStatus !== "within"
+    || replacement.task.budget?.observations.length !== 1
+    || replacement.task.budget?.decisions.length !== 1
+  ) {
+    throw new Error("Installed v0.9 rotation/budget handshake did not close exactly.");
+  }
 }
 
 try {
@@ -488,6 +772,18 @@ process.stdout.write(JSON.stringify({ notification: notification.mode, fallbackP
   ) {
     throw new Error(`Installed worktree cleanup failed or removed durable proposals: ${worktreeCleanupOutput}`);
   }
+  runSynod([
+    "task", "transition", "T-WORKTREE", "ACCEPTED", "--revision", "1",
+    "--evidence", "package-smoke:accepted", "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  runSynod([
+    "task", "transition", "T-WORKTREE", "VERIFIED", "--revision", "1",
+    "--evidence", "package-smoke:verified", "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  runSynod([
+    "task", "transition", "T-WORKTREE", "DONE", "--revision", "1",
+    "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
 
   addReadyTask(targetDirectory, "T-RECOVER");
   const recoveryAcquireOutput = runSynod([
@@ -648,7 +944,7 @@ process.stdout.write(JSON.stringify({ notification: notification.mode, fallbackP
     "budget", "set", "T-001",
     "--session", "thread:package-smoke",
     "--since-event", "1",
-    "--hard-tokens", "1000",
+    "--hard-tokens", "100",
     "--reason", "Installed budget smoke",
     "--evidence", "package:smoke",
     "--cwd", targetDirectory,
@@ -676,6 +972,7 @@ process.stdout.write(JSON.stringify({ notification: notification.mode, fallbackP
   if (rotationEnvelope.ok !== true || rotationData.action !== "set" || rotationPolicy.revision !== 1) {
     throw new Error(`Installed CLI failed its phase-rotation smoke: ${rotationOutput}`);
   }
+  await runV09ProductionFixture(targetDirectory, consumerDirectory, installedPackageRoot);
   const upgradeOutput = runSynod(["upgrade", targetDirectory, "--dry-run", "--json"], {
     cwd: consumerDirectory,
     capture: true,

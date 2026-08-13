@@ -15,7 +15,7 @@ Synod publishes `@ivand890/synod` and its matching GitHub Release from GitHub Ac
 Update local `main`, then create a signed annotated tag for the exact release commit:
 
 ```bash
-release_version=0.8.0
+release_version=0.9.0
 git switch main
 git pull --ff-only origin main
 git tag -s "v$release_version" -m "v$release_version"
@@ -38,7 +38,7 @@ GitHub Releases and npm do not share an atomic transaction. A failure after npm 
 Approve the `npm` environment deployment in GitHub, then verify the release:
 
 ```bash
-release_version=0.8.0
+release_version=0.9.0
 npm view @ivand890/synod version dist-tags --json
 gh release view "v$release_version" --json tagName,isDraft,isPrerelease,url
 gh release list --limit 1
