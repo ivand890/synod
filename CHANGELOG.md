@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-08-13
+
 ### Added
 
 - Added schema-4 pre-spawn lease reservations with exact reserve, bind, cancel, and pre-bind expiry fencing, preserving the immutable scoped baseline until a returned Codex thread is atomically authorized.
@@ -19,7 +21,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Security
 
 - Reservations collide with active ownership and other durable claims, cannot authorize heartbeat, worktree, delivery, or `ACTIVE` transitions before bind, and clean up failed/unreturned spawns without creating false abandoned-worker recovery.
+- Reservation capability tokens are returned only by the initial reserve command and are redacted from stale-fence diagnostics and canonical handoffs.
 - Coordination parsing retains only non-content signals, distinguishes normal wait expiry from actual failure, and excludes unprovable boundary-crossing calls without counting post-interval activity.
+- Closed reports validate the complete ordered rollout prefix through any post-boundary evidence before treating crossing calls as reproducibly excluded.
 
 ## [0.9.0] - 2026-08-12
 
@@ -197,7 +201,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/ivand890/synod/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/ivand890/synod/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/ivand890/synod/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/ivand890/synod/compare/v0.6.3...v0.7.0
