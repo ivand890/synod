@@ -296,6 +296,22 @@ test("clips coordination calls and durations to the canonical task interval", as
   assert.ok(report.threads[0]?.boundaryEvidence);
 
   const original = await readFile(rootPath, "utf8");
+  const crossingOutput = output("2026-08-12T12:04:00.000Z", "wait", JSON.stringify({ ok: true }));
+  const malformedBoundaryPrefix = original.replace(crossingOutput, `{not-json}\n${crossingOutput}`);
+  assert.notEqual(malformedBoundaryPrefix, original);
+  await writeFile(rootPath, malformedBoundaryPrefix, "utf8");
+  await assert.rejects(
+    collectUsage({
+      cwd: directory,
+      threadId: "root",
+      taskId: "SYN-COORD",
+      clientFactory: () => usageClient(root),
+      clock: () => "2026-08-12T12:05:30.000Z"
+    }),
+    (error: unknown) => error instanceof SynodError
+      && error.code === ERROR_CODES.ROLLOUT_INVALID
+      && (error.details as { malformedRecords?: number } | undefined)?.malformedRecords === 1
+  );
   await writeFile(rootPath, `${original}${call("2026-08-12T12:04:20.000Z", "late-duplicate", "exec")}\n${call(
     "2026-08-12T12:04:21.000Z",
     "late-duplicate",

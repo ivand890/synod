@@ -1259,8 +1259,11 @@ export async function collectUsage({
         ...(intervalEndMs !== undefined ? { identityEndMs: intervalEndMs } : {})
       });
       const coordinationSelection = selectedCoordination(timeline, interval);
+      const canonicalPrefixBytes = intervalEndMs === undefined
+        ? timeline.identity.bytes
+        : timelineIdentityAt(timeline, intervalEndMs).bytes;
       const pairingPrefixBytes = Math.max(
-        intervalEndMs === undefined ? timeline.identity.bytes : timelineIdentityAt(timeline, intervalEndMs).bytes,
+        canonicalPrefixBytes,
         coordinationSelection.boundaryEvidence?.bytes || 0
       );
       const pairingIssues = timeline.issues.filter(issue => [
@@ -1279,6 +1282,26 @@ export async function collectUsage({
             negativeDurations: pairingIssues.filter(issue => issue.kind === "negative-tool-call-duration").length
           }
         });
+      }
+      if (coordinationSelection.boundaryEvidence) {
+        const boundaryPrefixIssues = timeline.issues.filter(issue =>
+          issue.bytes <= pairingPrefixBytes || issue.blocksPrefix
+        );
+        if (boundaryPrefixIssues.length > 0) {
+          throw new SynodError(ERROR_CODES.ROLLOUT_INVALID, "Boundary evidence requires a complete, ordered rollout prefix.", {
+            details: {
+              threadId: thread.id,
+              malformedRecords: boundaryPrefixIssues.filter(issue => issue.kind === "malformed-record").length,
+              invalidTokenRecords: boundaryPrefixIssues.filter(issue => issue.kind === "invalid-token-record").length,
+              missingTimestamps: boundaryPrefixIssues.filter(issue => issue.kind === "missing-timestamp").length,
+              timestampRegressions: boundaryPrefixIssues.filter(issue => issue.kind === "timestamp-regression").length,
+              invalidToolCalls: boundaryPrefixIssues.filter(issue => issue.kind === "invalid-tool-call").length,
+              canonicalPrefixBytes,
+              boundaryPrefixBytes: pairingPrefixBytes,
+              rolloutBytes: timeline.identity.bytes
+            }
+          });
+        }
       }
       if (!interval) {
         if (timeline.malformedRecords > 0) completenessReasons.add("malformed-rollout-records");

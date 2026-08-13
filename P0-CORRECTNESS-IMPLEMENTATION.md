@@ -484,4 +484,4 @@ regression and compatibility gates pass.
   `SYNOD_EXPECTED_CODEX_STATUS`, and `SYNOD_EXPECTED_DOCTOR_HEALTHY` values; the
   implementation gate above requires the configured matrix invocation.
 - Worktree before preparation: `main` matched `origin/main`; the pre-existing
-  untracked `V0.8-IMPLEMENTATION.md` was left untouched.
+  tracked deletion of `V0.9-IMPLEMENTATION.md` was left untouched.

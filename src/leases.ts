@@ -315,16 +315,7 @@ export function isTaskLease(value: unknown): value is TaskLease {
     && value.heartbeatIntervalSeconds < value.ttlSeconds
     && Date.parse(value.acquiredAt) <= Date.parse(value.heartbeatAt)
     && Date.parse(value.heartbeatAt) < Date.parse(value.expiresAt)
-    && isRecord(value.baseline)
-    && value.baseline.path === LEASE_BASELINES_PATH
-    && isHash(value.baseline.snapshotContentHash)
-    && (value.baseline.branch === null || typeof value.baseline.branch === "string")
-    && (value.baseline.head === null || typeof value.baseline.head === "string")
-    && typeof value.baseline.worktreeFingerprint === "string"
-    && isRecord(value.baseline.lastEvent)
-    && isNonNegativeInteger(value.baseline.lastEvent.sequence)
-    && typeof value.baseline.lastEvent.id === "string"
-    && typeof value.baseline.lastEvent.hash === "string"
+    && isLeaseBaselineBinding(value.baseline)
     && value.status === "ACTIVE";
 }
 

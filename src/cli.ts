@@ -548,6 +548,7 @@ export async function run(
         task: result.task,
         ...("lease" in result ? { lease: result.lease } : { reservation: result.reservation }),
         ...("writeAuthorized" in result ? { writeAuthorized: result.writeAuthorized } : {}),
+        ...("evidence" in result ? { evidence: result.evidence } : {}),
         checkpoint: result.state.checkpoint,
         lastEvent: result.state.lastEvent
       };
@@ -558,6 +559,9 @@ export async function run(
           ? `; write authorized ${result.writeAuthorized ? "yes" : "no"}`
           : "";
         output.log(`Lease ${options.action} for ${result.task.id}: ${authority.id} generation ${authority.generation}${authorization}.`);
+        if ("evidence" in result && Array.isArray(result.evidence)) {
+          for (const item of result.evidence) output.log(`Recorded evidence ${item.id}: ${item.kind} @ revision ${item.revision}.`);
+        }
       }
       return 0;
     }

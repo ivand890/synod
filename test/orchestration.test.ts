@@ -799,17 +799,27 @@ test("writer reservations fence scopes before spawn and bind one owner atomicall
   );
 
   const stateBeforeStaleBind = await readFile(path.join(directory, ORCHESTRATION_STATE_PATH), "utf8");
+  const invalidReservationToken = randomUUID();
   await assert.rejects(
     bindTaskLease({
       directory,
       id: "T-001",
       ...reservationFence(reserved.reservation),
-      reservationToken: randomUUID(),
+      reservationToken: invalidReservationToken,
       ownerThread: "thread:worker",
       ttlSeconds: 120,
       heartbeatIntervalSeconds: 30
     }, { clock: () => "2026-08-10T12:00:10.000Z" }),
-    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_RESERVATION_STALE
+    error => {
+      if (!(error instanceof SynodError) || error.code !== ERROR_CODES.LEASE_RESERVATION_STALE || !isRecord(error.details)) {
+        return false;
+      }
+      const serializedDetails = JSON.stringify(error.details);
+      assert.equal(error.details.reservationTokenMatches, false);
+      assert.equal(serializedDetails.includes(invalidReservationToken), false);
+      assert.equal(serializedDetails.includes(reserved.reservation.token), false);
+      return true;
+    }
   );
   assert.equal(await readFile(path.join(directory, ORCHESTRATION_STATE_PATH), "utf8"), stateBeforeStaleBind);
 

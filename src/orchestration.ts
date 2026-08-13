@@ -4485,15 +4485,15 @@ function requireLeaseReservationIdentity(
       details: { taskId: task.id }
     });
   }
+  const reservationTokenMatches = String(reservationToken || "") === reservation.token;
   const expected = {
-    reservationToken: reservation.token,
     leaseId: reservation.id,
     generation: reservation.generation,
     revision: reservation.taskRevision,
     reservedAt: reservation.reservedAt,
     baselineHash: reservation.baseline.snapshotContentHash
   };
-  if (String(reservationToken || "") !== reservation.token
+  if (!reservationTokenMatches
     || String(leaseId || "") !== reservation.id
     || generation !== reservation.generation
     || revision !== task.revision
@@ -4504,7 +4504,8 @@ function requireLeaseReservationIdentity(
       details: {
         taskId: task.id,
         expected,
-        actual: { reservationToken, leaseId, generation, revision, reservedAt: expectedReservedAt, baselineHash }
+        reservationTokenMatches,
+        actual: { leaseId, generation, revision, reservedAt: expectedReservedAt, baselineHash }
       }
     });
   }

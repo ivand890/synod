@@ -579,8 +579,8 @@ test("lease reservation commands expose the pre-spawn and post-bind authorizatio
     await run(["task", "transition", id, "READY", "--revision", "0", "--cwd", directory], output);
     messages.length = 0;
   };
-  const fence = (reservation: Record<string, unknown>) => [
-    "--reservation-token", String(reservation.token),
+  const fence = (reservation: Record<string, unknown>, reservationToken = String(reservation.token)) => [
+    "--reservation-token", reservationToken,
     "--lease-id", String(reservation.id),
     "--generation", String(reservation.generation),
     "--revision", String(reservation.taskRevision),
@@ -609,6 +609,22 @@ test("lease reservation commands expose the pre-spawn and post-bind authorizatio
     assert.equal(reserved.data.task.state, "READY");
     assert.match(reserved.data.reservation.token, /^[0-9a-f-]{36}$/);
 
+    const invalidReservationToken = "11111111-1111-4111-8111-111111111111";
+    const staleBindCode = await run([
+      "lease", "bind", "T-RESERVE",
+      ...fence(reserved.data.reservation, invalidReservationToken),
+      "--owner-thread", "thread:untrusted",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const staleBind = JSON.parse(takeMessage(messages));
+    const serializedStaleBind = JSON.stringify(staleBind);
+    assert.equal(staleBindCode, 1);
+    assert.equal(staleBind.error.code, ERROR_CODES.LEASE_RESERVATION_STALE);
+    assert.equal(staleBind.error.details.reservationTokenMatches, false);
+    assert.equal(serializedStaleBind.includes(invalidReservationToken), false);
+    assert.equal(serializedStaleBind.includes(reserved.data.reservation.token), false);
+
     const bindCode = await run([
       "lease", "bind", "T-RESERVE",
       ...fence(reserved.data.reservation),
@@ -625,6 +641,34 @@ test("lease reservation commands expose the pre-spawn and post-bind authorizatio
     assert.equal(bound.data.task.state, "ACTIVE");
     assert.equal(bound.data.lease.id, reserved.data.reservation.id);
     assert.equal(bound.data.lease.ownerThread, "thread:spawned");
+    assert.deepEqual(bound.data.evidence, []);
+
+    const reviewCode = await run([
+      "task", "transition", "T-RESERVE", "REVIEW",
+      "--revision", "1",
+      "--evidence", "delivery:initial",
+      "--cwd", directory
+    ], output);
+    assert.equal(reviewCode, 0);
+    messages.length = 0;
+    const correctionReserveCode = await run([
+      "lease", "reserve", "T-RESERVE",
+      "--write", "src/reserved.ts",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const correctionReserved = JSON.parse(takeMessage(messages));
+    assert.equal(correctionReserveCode, 0);
+    const correctionBindCode = await run([
+      "lease", "bind", "T-RESERVE",
+      ...fence(correctionReserved.data.reservation),
+      "--owner-thread", "thread:correction",
+      "--evidence", "review:changes-requested",
+      "--cwd", directory
+    ], output);
+    assert.equal(correctionBindCode, 0);
+    assert.match(messages.join("\n"), /Recorded evidence E-\d+: correction @ revision 1\./);
+    messages.length = 0;
 
     const cancelReserveCode = await run([
       "lease", "reserve", "T-CANCEL",
