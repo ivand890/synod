@@ -660,6 +660,22 @@ process.stdout.write(JSON.stringify({ notification: notification.mode, fallbackP
   if (budgetEnvelope.ok !== true || budgetData.action !== "set" || budgetPolicy.revision !== 1) {
     throw new Error(`Installed CLI failed its task-budget smoke: ${budgetOutput}`);
   }
+  const rotationOutput = runSynod([
+    "rotation", "set",
+    "--session", "thread:package-smoke",
+    "--since-event", "1",
+    "--compactions", "2",
+    "--reason", "Installed rotation smoke",
+    "--evidence", "package:smoke",
+    "--cwd", targetDirectory,
+    "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  const rotationEnvelope = jsonRecord(rotationOutput, "rotation envelope");
+  const rotationData = nestedRecord(rotationEnvelope, "data", "rotation envelope");
+  const rotationPolicy = nestedRecord(rotationData, "policy", "rotation envelope.data");
+  if (rotationEnvelope.ok !== true || rotationData.action !== "set" || rotationPolicy.revision !== 1) {
+    throw new Error(`Installed CLI failed its phase-rotation smoke: ${rotationOutput}`);
+  }
   const upgradeOutput = runSynod(["upgrade", targetDirectory, "--dry-run", "--json"], {
     cwd: consumerDirectory,
     capture: true,

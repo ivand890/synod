@@ -210,6 +210,9 @@ test("keeps the primary agent supervisory and delegates routine implementation",
 
   assert.match(skill, /Do not use the supervising model as the routine implementation worker\./);
   assert.match(skill, /synod_implementer.*selected profile/);
+  assert.match(skill, /rotation verify --recommendation <event-id> --session <id>/);
+  assert.match(skill, /usage --since-event <start> --until-event <end> --price-file <path>/);
+  assert.match(skill, /incomplete usage fails closed/);
   assert.match(agents, /Do not use the supervising model as the default implementation worker\./);
   assert.match(decisions, /Cost-efficient agents perform implementation/);
 });
