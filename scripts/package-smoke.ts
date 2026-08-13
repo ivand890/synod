@@ -157,6 +157,26 @@ function exactFence(lease: Record<string, unknown>): string[] {
   ];
 }
 
+function exactReservationFence(reservation: Record<string, unknown>): string[] {
+  const baseline = nestedRecord(reservation, "baseline", "lease reservation");
+  for (const key of ["id", "token", "generation", "taskRevision", "reservedAt"]) {
+    if ((typeof reservation[key] !== "string" && typeof reservation[key] !== "number") || reservation[key] === "") {
+      throw new Error(`Lease reservation is missing exact fence field ${key}.`);
+    }
+  }
+  if (typeof baseline.snapshotContentHash !== "string" || baseline.snapshotContentHash === "") {
+    throw new Error("Lease reservation is missing its baseline hash.");
+  }
+  return [
+    "--reservation-token", String(reservation.token),
+    "--lease-id", String(reservation.id),
+    "--generation", String(reservation.generation),
+    "--revision", String(reservation.taskRevision),
+    "--expected-reserved-at", String(reservation.reservedAt),
+    "--baseline-hash", baseline.snapshotContentHash,
+  ];
+}
+
 function addReadyTask(directory: string, id: string): void {
   runSynod([
     "task", "add", id,
@@ -564,7 +584,7 @@ try {
     || v08UpgradeData.templateVersion !== expectedVersion
     || upgradedManifest.templateVersion !== expectedVersion
     || upgradedRuntime.runtimeVersion !== expectedVersion
-    || upgradedState.schemaVersion !== 3
+    || upgradedState.schemaVersion !== 4
     || upgradedLeaseBaselines.schemaVersion !== 1
     || upgradedWorktrees.schemaVersion !== 1
   ) {
@@ -681,12 +701,67 @@ process.stdout.write(JSON.stringify({ notification: notification.mode, fallbackP
   }
   writeFileSync(path.join(targetDirectory, "package-recovery.txt"), "base\n");
   writeFileSync(path.join(targetDirectory, "package-worktree.txt"), "base\n");
+  writeFileSync(path.join(targetDirectory, "package-reservation.txt"), "base\n");
   run("git", ["-C", targetDirectory, "init"]);
   run("git", ["-C", targetDirectory, "config", "user.name", "Synod Package Smoke"]);
   run("git", ["-C", targetDirectory, "config", "user.email", "synod@example.invalid"]);
   run("git", ["-C", targetDirectory, "config", "commit.gpgsign", "false"]);
   run("git", ["-C", targetDirectory, "add", "."]);
   run("git", ["-C", targetDirectory, "commit", "-m", "package smoke base"]);
+
+  addReadyTask(targetDirectory, "T-RESERVE-BIND");
+  const reservationOutput = runSynod([
+    "lease", "reserve", "T-RESERVE-BIND", "--write", "package-reservation.txt",
+    "--reservation-ttl-seconds", "300", "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  const reservationData = nestedRecord(jsonRecord(reservationOutput, "reservation envelope"), "data", "reservation envelope");
+  const reservation = nestedRecord(reservationData, "reservation", "reservation envelope.data");
+  if (reservationData.writeAuthorized !== false) {
+    throw new Error(`Installed reservation granted premature write authority: ${reservationOutput}`);
+  }
+  const boundOutput = runSynod([
+    "lease", "bind", "T-RESERVE-BIND", ...exactReservationFence(reservation),
+    "--owner-thread", "thread:simulated-spawn", "--ttl-seconds", "300", "--heartbeat-seconds", "60",
+    "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  const boundData = nestedRecord(jsonRecord(boundOutput, "bind envelope"), "data", "bind envelope");
+  const boundLease = nestedRecord(boundData, "lease", "bind envelope.data");
+  const boundTask = nestedRecord(boundData, "task", "bind envelope.data");
+  if (
+    boundData.writeAuthorized !== true
+    || boundTask.state !== "ACTIVE"
+    || boundLease.id !== reservation.id
+    || boundLease.ownerThread !== "thread:simulated-spawn"
+  ) {
+    throw new Error(`Installed reservation did not bind atomically: ${boundOutput}`);
+  }
+  writeFileSync(path.join(targetDirectory, "package-reservation.txt"), "written only after bind\n");
+  const reservedDeliveryOutput = runSynod([
+    "task", "transition", "T-RESERVE-BIND", "REVIEW", "--revision", "1",
+    "--evidence", "package-smoke:reserved-bound-delivery", "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  const reservedDeliveryData = nestedRecord(jsonRecord(reservedDeliveryOutput, "reserved delivery envelope"), "data", "reserved delivery envelope");
+  const reservedReviewTask = nestedRecord(reservedDeliveryData, "task", "reserved delivery envelope.data");
+  if (reservedReviewTask.state !== "REVIEW" || "lease" in reservedReviewTask || "leaseReservation" in reservedReviewTask) {
+    throw new Error(`Installed reserved delivery did not clean up ownership: ${reservedDeliveryOutput}`);
+  }
+
+  addReadyTask(targetDirectory, "T-RESERVE-CANCEL");
+  const cancelledReservationOutput = runSynod([
+    "lease", "reserve", "T-RESERVE-CANCEL", "--write-tree", "cancelled-spawn",
+    "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  const cancelledReservationData = nestedRecord(jsonRecord(cancelledReservationOutput, "cancel reservation envelope"), "data", "cancel reservation envelope");
+  const cancelledReservation = nestedRecord(cancelledReservationData, "reservation", "cancel reservation envelope.data");
+  const cancelOutput = runSynod([
+    "lease", "cancel", "T-RESERVE-CANCEL", ...exactReservationFence(cancelledReservation),
+    "--reason", "simulated spawn failed", "--cwd", targetDirectory, "--json",
+  ], { cwd: consumerDirectory, capture: true });
+  const cancelData = nestedRecord(jsonRecord(cancelOutput, "reservation cancel envelope"), "data", "reservation cancel envelope");
+  const cancelledTask = nestedRecord(cancelData, "task", "reservation cancel envelope.data");
+  if (cancelData.writeAuthorized !== false || cancelledTask.state !== "READY" || "recovery" in cancelledTask) {
+    throw new Error(`Installed reservation cancellation created false execution state: ${cancelOutput}`);
+  }
 
   addReadyTask(targetDirectory, "T-CONCURRENT-A");
   addReadyTask(targetDirectory, "T-CONCURRENT-B");

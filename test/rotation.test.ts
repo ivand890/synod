@@ -72,7 +72,7 @@ function metrics({ compactions = 0, waits = 0, waitMs }: { compactions?: number;
       ? { status: "unavailable", observed: 0, missing: waits }
       : { status: "available", observed: waits, missing: 0, totalMs: waitMs },
     requestedWaitDuration: { status: "unavailable", observed: 0, missing: waits },
-    outcomes: { status: "unavailable", observed: 0, missing: waits },
+    outcomes: { status: "unavailable", observed: 0, missing: waits, succeeded: 0, noChange: 0, timedOut: 0, failed: 0, unknown: 0 },
     retries: { available: false }
   };
 }
@@ -98,6 +98,8 @@ function usageReport(
     }],
     roles: [],
     attribution: [],
+    discoveredThreads: 1,
+    contributingThreads: 1,
     threads: [{
       threadId: session,
       parentThreadId: null,
@@ -129,6 +131,7 @@ function usageReport(
       total: coordination,
       roles: [],
       threads: [],
+      boundary: { crossingCalls: { total: 0, roles: [], threads: [] } },
       completeness: { status: "incomplete", reasons: ["active-session-tree"] }
     },
     interval: {

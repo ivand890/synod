@@ -254,8 +254,14 @@ export function usageReportHash(report: UsageReport): string {
     capturedAt: report.capturedAt,
     interval: report.interval,
     total: report.total,
+    discoveredThreads: report.discoveredThreads,
+    contributingThreads: report.contributingThreads,
     tokenCounters: report.tokenCounters,
-    rollouts: report.threads.map(item => ({ threadId: item.threadId, rollout: item.rollout }))
+    rollouts: report.threads.map(item => ({
+      threadId: item.threadId,
+      rollout: item.rollout,
+      ...(item.boundaryEvidence ? { boundaryEvidence: item.boundaryEvidence } : {})
+    }))
       .sort((left, right) => left.threadId < right.threadId ? -1 : left.threadId > right.threadId ? 1 : 0)
   };
   return `sha256:${createHash("sha256").update(stable(normalized), "utf8").digest("hex")}`;

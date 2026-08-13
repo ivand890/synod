@@ -3,10 +3,42 @@ import test from "node:test";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
 import {
   isCorrectionPolicy,
+  isTaskLeaseReservation,
   leaseScopesOverlap,
   normalizeLeaseScopePath,
   normalizeLeaseScopes
 } from "../src/leases.js";
+
+test("lease reservations validate as a distinct pre-bind authority", () => {
+  const reservation = {
+    id: "00000000-0000-4000-8000-000000000001",
+    token: "00000000-0000-4000-8000-000000000002",
+    generation: 1,
+    taskId: "T-001",
+    taskRevision: 0,
+    executor: "synod_implementer",
+    scopes: [{ path: "src/task.ts", access: "write", kind: "file" }],
+    reservedAt: "2026-08-13T00:00:00.000Z",
+    expiresAt: "2026-08-13T00:05:00.000Z",
+    ttlSeconds: 300,
+    baseline: {
+      path: ".synod/lease-baselines.json",
+      snapshotContentHash: `sha256:${"a".repeat(64)}`,
+      branch: "main",
+      head: "b".repeat(40),
+      worktreeFingerprint: `sha256:${"c".repeat(64)}`,
+      lastEvent: {
+        sequence: 2,
+        id: "00000000-0000-4000-8000-000000000003",
+        hash: `sha256:${"d".repeat(64)}`
+      }
+    },
+    status: "RESERVED"
+  };
+  assert.equal(isTaskLeaseReservation(reservation), true);
+  assert.equal(isTaskLeaseReservation({ ...reservation, token: "not-a-token" }), false);
+  assert.equal(isTaskLeaseReservation({ ...reservation, status: "ACTIVE" }), false);
+});
 
 test("historical over-limit correction policies remain readable", () => {
   assert.equal(isCorrectionPolicy({ limit: 2, used: 3, overrides: [] }), true);

@@ -16,6 +16,7 @@ import {
   ORCHESTRATION_STATUS_PATH,
   acquireTaskLease,
   addTask,
+  bindTaskLease,
   createOrchestrationSchemaMigrationFiles,
   decideTaskBudget,
   heartbeatTaskLease,
@@ -23,6 +24,7 @@ import {
   orchestrationStatus,
   readOrchestration,
   reportTaskBudget,
+  reserveTaskLease,
   setTaskBudgetPolicy,
   splitTask,
   transitionTask,
@@ -75,6 +77,8 @@ function usageReport(start: OrchestrationEvent, totalTokens: number, {
     models: [],
     roles: [],
     attribution: [],
+    discoveredThreads: 1,
+    contributingThreads: 1,
     threads: [{
       threadId: session,
       parentThreadId: null,
@@ -147,7 +151,7 @@ function hashEvent(event: Record<string, unknown>): string {
   return `sha256:${createHash("sha256").update(stable(unsigned), "utf8").digest("hex")}`;
 }
 
-test("migrates schema 2 to schema 3 without rewriting the event prefix or inventing budgets", async () => {
+test("migrates schema 2 through schema 3 to schema 4 without rewriting the event prefix or inventing fields", async () => {
   const directory = await project();
   const statePath = path.join(directory, ORCHESTRATION_STATE_PATH);
   const eventPath = path.join(directory, ORCHESTRATION_EVENTS_PATH);
@@ -175,17 +179,60 @@ test("migrates schema 2 to schema 3 without rewriting the event prefix or invent
   const migratedBytes = await readFile(eventPath, "utf8");
   assert.ok(migratedBytes.startsWith(prefix));
   const canonical = await readOrchestration(directory);
-  assert.equal(canonical.state.schemaVersion, 3);
-  assert.equal(canonical.events.length, 2);
+  assert.equal(canonical.state.schemaVersion, 4);
+  assert.equal(canonical.events.length, 3);
   assert.deepEqual(canonical.events[1]?.payload, {
     fromSchemaVersion: 2,
     toSchemaVersion: 3,
     preservedEventCount: 1
   });
+  assert.deepEqual(canonical.events[2]?.payload, {
+    fromSchemaVersion: 3,
+    toSchemaVersion: 4,
+    preservedEventCount: 1
+  });
   assert.ok(canonical.state.taskOrder.every(id => canonical.state.tasks[id]?.budget === undefined));
+  assert.ok(canonical.state.taskOrder.every(id => canonical.state.tasks[id]?.leaseReservation === undefined));
 });
 
-test("rejects skipped schema boundaries and old-schema events after schema 3", async () => {
+test("migrates schema 3 to schema 4 with one append and preserves every prior event byte", async () => {
+  const directory = await project();
+  const statePath = path.join(directory, ORCHESTRATION_STATE_PATH);
+  const eventPath = path.join(directory, ORCHESTRATION_EVENTS_PATH);
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  const event = JSON.parse(await readFile(eventPath, "utf8"));
+  state.schemaVersion = 3;
+  event.schemaVersion = 3;
+  event.state.schemaVersion = 3;
+  event.eventHash = hashEvent(event);
+  state.lastEvent.hash = event.eventHash;
+  const prefix = `${JSON.stringify(event)}\n`;
+  await writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await writeFile(eventPath, prefix, "utf8");
+
+  const migration = await createOrchestrationSchemaMigrationFiles(directory, {
+    clock: () => "2026-08-12T10:03:00.000Z"
+  });
+  assert.equal(migration.status, "migrated");
+  if (migration.status !== "migrated") return;
+  for (const [relativePath, contents] of migration.files) {
+    await mkdir(path.dirname(path.join(directory, relativePath)), { recursive: true });
+    await writeFile(path.join(directory, relativePath), contents, "utf8");
+  }
+
+  assert.ok((await readFile(eventPath, "utf8")).startsWith(prefix));
+  const canonical = await readOrchestration(directory);
+  assert.equal(canonical.state.schemaVersion, 4);
+  assert.equal(canonical.events.length, 2);
+  assert.deepEqual(canonical.events[1]?.payload, {
+    fromSchemaVersion: 3,
+    toSchemaVersion: 4,
+    preservedEventCount: 1
+  });
+  assert.ok(canonical.state.taskOrder.every(id => canonical.state.tasks[id]?.leaseReservation === undefined));
+});
+
+test("rejects skipped schema boundaries and old-schema events after schema 4", async () => {
   const skippedDirectory = await project();
   const skippedEventPath = path.join(skippedDirectory, ORCHESTRATION_EVENTS_PATH);
   const skippedStatePath = path.join(skippedDirectory, ORCHESTRATION_STATE_PATH);
@@ -200,7 +247,7 @@ test("rejects skipped schema boundaries and old-schema events after schema 3", a
     sequence: 2,
     id: "skipped-schema-boundary",
     type: "orchestration.migrated",
-    payload: { fromSchemaVersion: 1, toSchemaVersion: 3 },
+    payload: { fromSchemaVersion: 1, toSchemaVersion: 4 },
     previousHash: legacyEvent.eventHash
   };
   skippedEvent.eventHash = hashEvent(skippedEvent);
@@ -217,21 +264,21 @@ test("rejects skipped schema boundaries and old-schema events after schema 3", a
 
   const downgradeDirectory = await project();
   const downgradeEventPath = path.join(downgradeDirectory, ORCHESTRATION_EVENTS_PATH);
-  const schemaThreeEvent = JSON.parse(await readFile(downgradeEventPath, "utf8"));
-  const schemaTwoCore = structuredClone(schemaThreeEvent.state);
-  schemaTwoCore.schemaVersion = 2;
+  const schemaFourEvent = JSON.parse(await readFile(downgradeEventPath, "utf8"));
+  const schemaThreeCore = structuredClone(schemaFourEvent.state);
+  schemaThreeCore.schemaVersion = 3;
   const downgradeEvent = {
-    ...schemaThreeEvent,
-    schemaVersion: 2,
+    ...schemaFourEvent,
+    schemaVersion: 3,
     sequence: 2,
     id: "schema-downgrade",
     type: "task.invalid-downgrade",
     payload: {},
-    previousHash: schemaThreeEvent.eventHash,
-    state: schemaTwoCore
+    previousHash: schemaFourEvent.eventHash,
+    state: schemaThreeCore
   };
   downgradeEvent.eventHash = hashEvent(downgradeEvent);
-  await writeFile(downgradeEventPath, `${JSON.stringify(schemaThreeEvent)}\n${JSON.stringify(downgradeEvent)}\n`, "utf8");
+  await writeFile(downgradeEventPath, `${JSON.stringify(schemaFourEvent)}\n${JSON.stringify(downgradeEvent)}\n`, "utf8");
   await assert.rejects(
     readOrchestration(downgradeDirectory),
     error => error instanceof SynodError && error.code === ERROR_CODES.EVENT_LOG_INVALID
@@ -320,6 +367,41 @@ test("records a hard crossing, gates execution, and resumes only through an exac
     }),
     error => error instanceof SynodError && error.code === ERROR_CODES.BUDGET_STALE
   );
+});
+
+test("a hard budget decision recorded after reserve prevents owner binding", async () => {
+  const directory = await project();
+  await task(directory);
+  const { start } = await configure(directory);
+  await transitionTask({ directory, id: "T-BUDGET", to: "READY", revision: 0 });
+  const reserved = await reserveTaskLease({
+    directory,
+    id: "T-BUDGET",
+    write: ["src/budget-reservation.ts"]
+  });
+  await observeTaskBudget({ directory, id: "T-BUDGET" }, {
+    clock: () => "2026-08-12T10:06:00.000Z",
+    usageCollector: collector(usageReport(start, 120))
+  });
+
+  await assert.rejects(
+    bindTaskLease({
+      directory,
+      id: "T-BUDGET",
+      reservationToken: reserved.reservation.token,
+      leaseId: reserved.reservation.id,
+      generation: reserved.reservation.generation,
+      revision: reserved.reservation.taskRevision,
+      expectedReservedAt: reserved.reservation.reservedAt,
+      baselineHash: reserved.reservation.baseline.snapshotContentHash,
+      ownerThread: "thread:budget-worker"
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.BUDGET_DECISION_REQUIRED
+  );
+  const canonical = (await readOrchestration(directory)).state.tasks["T-BUDGET"];
+  assert.equal(canonical?.state, "READY");
+  assert.equal(canonical?.lease, undefined);
+  assert.equal(canonical?.leaseReservation?.id, reserved.reservation.id);
 });
 
 test("a rotate decision authorizes policy and session replacement", async () => {

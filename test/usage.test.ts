@@ -37,6 +37,7 @@ function usageClient(root: Record<string, unknown>) {
     async start() {},
     async close() {},
     async request(method: string, params: Record<string, unknown> = {}) {
+      if (method === "thread/read") return { thread: root };
       assert.equal(method, "thread/list");
       if (params.parentThreadId || params.archived) return { data: [], nextCursor: null };
       return { data: [root], nextCursor: null };
@@ -221,18 +222,21 @@ test("collects a complete recursive advisor session and groups by model", async 
       reasoning_output_tokens: 2, total_tokens: 60
     } } })
   ]);
+  const idlePath = await rollout(directory, "idle", [event("turn_context", { model: "gpt-5.6-sol" })]);
 
   const root = { id: "root", parentThreadId: null, path: rootPath, cwd: directory, createdAt: 1, updatedAt: 4 };
   const child = { id: "child", parentThreadId: "root", path: childPath, cwd: directory };
   const grandchild = { id: "grandchild", parentThreadId: "child", path: grandchildPath, cwd: directory };
+  const idle = { id: "idle", parentThreadId: "root", path: idlePath, cwd: directory };
   const fakeClient = {
     async start() {},
     async close() {},
     async request(method: string, params: Record<string, unknown> = {}) {
       assert.equal(method, "thread/list");
-      if (params.parentThreadId === "root") return { data: [child], nextCursor: null };
+      if (params.parentThreadId === "root") return { data: [child, idle], nextCursor: null };
       if (params.parentThreadId === "child") return { data: [grandchild], nextCursor: null };
       if (params.parentThreadId === "grandchild") return { data: [], nextCursor: null };
+      if (params.parentThreadId === "idle") return { data: [], nextCursor: null };
       return { data: [root], nextCursor: null };
     }
   };
@@ -241,6 +245,9 @@ test("collects a complete recursive advisor session and groups by model", async 
 
   assert.equal(report.session.threadId, "root");
   assert.equal(report.total.threads, 3);
+  assert.equal(report.discoveredThreads, 4);
+  assert.equal(report.contributingThreads, 3);
+  assert.equal(report.threads.find(row => row.threadId === "idle")?.totalTokens, 0);
   assert.equal(report.total.totalTokens, 420);
   assert.deepEqual(report.models.map(row => [row.model, row.threads, row.totalTokens]), [
     ["gpt-5.6-luna", 2, 300],
@@ -285,6 +292,7 @@ test("reports an exact task interval with marginal reset usage and stable rollou
 
   const first = await collectUsage({
     cwd: directory,
+    threadId: "root",
     taskId: "SYN-TEST",
     clientFactory: () => usageClient(root),
     clock: () => "2026-08-12T12:06:00.000Z"
@@ -324,6 +332,7 @@ test("reports an exact task interval with marginal reset usage and stable rollou
   root.updatedAt = "2026-08-12T12:08:00.000Z";
   const second = await collectUsage({
     cwd: directory,
+    threadId: "root",
     taskId: "SYN-TEST",
     clientFactory: () => usageClient(root),
     clock: () => "2026-08-12T12:08:00.000Z"
@@ -332,6 +341,27 @@ test("reports an exact task interval with marginal reset usage and stable rollou
 
   assert.deepEqual(second, first);
   assert.deepEqual(canonicalAfter, canonicalBefore);
+});
+
+test("task usage requires an explicit session before Codex discovery starts", async () => {
+  const directory = await temporaryDirectory();
+  await canonicalTaskProject(directory);
+  let started = false;
+
+  await assert.rejects(
+    collectUsage({
+      cwd: directory,
+      taskId: "SYN-TEST",
+      clientFactory: () => ({
+        async start() { started = true; },
+        async close() {}
+      })
+    }),
+    error => error instanceof SynodError
+      && error.code === ERROR_CODES.USAGE_SESSION_REQUIRED
+      && error.message.includes("--session")
+  );
+  assert.equal(started, false);
 });
 
 test("resolves exact event and open checkpoint intervals against descendant creation times", async () => {

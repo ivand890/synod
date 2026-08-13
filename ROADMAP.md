@@ -1,6 +1,6 @@
 # Synod Roadmap
 
-Last updated: 2026-08-12
+Last updated: 2026-08-13
 Current release baseline: `v0.9.0`
 
 This roadmap converts the advisor loop's remaining operational risks into
@@ -8,6 +8,12 @@ versioned, testable increments. Entries at or below the current release
 baseline are delivered; later increments describe intended outcomes, not
 shipped commands. Exact CLI spelling remains provisional until an increment is
 implemented and released.
+
+The unreleased P0 correctness increment adds pre-spawn lease reservations and
+corrects task-session, thread-count, coordination-outcome, and exact-boundary
+usage semantics. It is implemented against the `v0.9.0` baseline but is not a
+delivered release until reviewed merge, signed tag, protected publication, and
+installed-package proof complete.
 
 ## Evidence behind this revision
 

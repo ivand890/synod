@@ -14,6 +14,26 @@ export type ToolCallCategory = (typeof COORDINATION_TOOLS)[keyof typeof COORDINA
 export interface ToolCallTimestamp {
   iso: string;
   milliseconds: number;
+  bytes?: number;
+  sha256?: string;
+}
+
+export type CoordinationOutcome = "succeeded" | "no-change" | "timed-out" | "failed" | "unknown";
+
+export interface ToolOutputSignals {
+  structured: boolean;
+  explicitFailure: boolean;
+  explicitSuccess: boolean;
+  timedOut: boolean;
+  plainText: boolean;
+  successShapes: {
+    spawnAgent: boolean;
+    followupTask: boolean;
+    sendMessage: boolean;
+    waitAgent: boolean;
+    listAgents: boolean;
+    interruptAgent: boolean;
+  };
 }
 
 export interface NormalizedToolCall {
@@ -24,10 +44,12 @@ export interface NormalizedToolCall {
   startedAtMs?: number;
   completedAt?: string;
   completedAtMs?: number;
+  completedAtBytes?: number;
+  completedAtSha256?: string;
   outputRecorded?: true;
   durationMs?: number;
   requestedWaitMs?: number;
-  failed?: boolean;
+  outcome?: CoordinationOutcome;
   retrySignalSupported: boolean;
   retryOf?: string;
 }
@@ -36,7 +58,9 @@ export interface NormalizedToolOutput {
   callId: string;
   observedAt?: string;
   observedAtMs?: number;
-  failed?: boolean;
+  observedAtBytes?: number;
+  observedAtSha256?: string;
+  signals: ToolOutputSignals;
 }
 
 export interface CoordinationCounts {
@@ -71,7 +95,11 @@ export interface CoordinationOutcomeMetric {
   status: "available" | "partial" | "unavailable";
   observed: number;
   missing: number;
-  failed?: number;
+  succeeded: number;
+  noChange: number;
+  timedOut: number;
+  failed: number;
+  unknown: number;
 }
 
 export interface CoordinationRetryMetric {
@@ -96,6 +124,7 @@ export interface CoordinationThreadInput {
   source: string;
   calls: NormalizedToolCall[];
   compactions: number;
+  boundaryCrossingCalls?: number;
 }
 
 export interface CoordinationThreadRow {
@@ -116,6 +145,13 @@ export interface CoordinationReport {
   total: CoordinationMetrics;
   roles: CoordinationRoleRow[];
   threads: CoordinationThreadRow[];
+  boundary: {
+    crossingCalls: {
+      total: number;
+      roles: Array<{ role: string; calls: number }>;
+      threads: Array<{ threadId: string; role: string; calls: number }>;
+    };
+  };
   completeness: {
     status: "complete" | "incomplete";
     reasons: string[];
@@ -184,29 +220,103 @@ export function normalizeToolCallStart(
   };
 }
 
-function structuredOutcome(value: unknown): boolean | undefined {
-  if (Array.isArray(value)) {
-    let observedSuccess = false;
-    for (const item of value) {
-      const result = structuredOutcome(item);
-      if (result === true) return true;
-      if (result === false) observedSuccess = true;
+function emptyOutputSignals(): ToolOutputSignals {
+  return {
+    structured: false,
+    explicitFailure: false,
+    explicitSuccess: false,
+    timedOut: false,
+    plainText: false,
+    successShapes: {
+      spawnAgent: false,
+      followupTask: false,
+      sendMessage: false,
+      waitAgent: false,
+      listAgents: false,
+      interruptAgent: false
     }
-    return observedSuccess ? false : undefined;
+  };
+}
+
+function mergeOutputSignals(target: ToolOutputSignals, source: ToolOutputSignals): void {
+  target.structured ||= source.structured;
+  target.explicitFailure ||= source.explicitFailure;
+  target.explicitSuccess ||= source.explicitSuccess;
+  target.timedOut ||= source.timedOut;
+  target.plainText ||= source.plainText;
+  for (const key of Object.keys(target.successShapes) as Array<keyof ToolOutputSignals["successShapes"]>) {
+    target.successShapes[key] ||= source.successShapes[key];
   }
-  const record = parsedRecord(value);
-  if (!record) return undefined;
-  if (record.isError === true || record.is_error === true || record.success === false || record.ok === false) return true;
+}
+
+function structuredOutcome(value: unknown): ToolOutputSignals {
+  if (Array.isArray(value)) {
+    const signals = emptyOutputSignals();
+    for (const item of value) mergeOutputSignals(signals, structuredOutcome(item));
+    return signals;
+  }
+  if (typeof value === "string") {
+    try {
+      return structuredOutcome(JSON.parse(value) as unknown);
+    } catch {
+      return { ...emptyOutputSignals(), plainText: value.trim().length > 0 };
+    }
+  }
+  if (!isRecord(value)) return emptyOutputSignals();
+  const record = value;
+  const signals = { ...emptyOutputSignals(), structured: true };
+  if (record.isError === true || record.is_error === true || record.success === false || record.ok === false) {
+    signals.explicitFailure = true;
+  }
   const exitCode = record.exitCode ?? record.exit_code;
-  if (typeof exitCode === "number" && Number.isFinite(exitCode)) return exitCode !== 0;
-  if (record.timedOut === true || record.timed_out === true) return true;
+  if (typeof exitCode === "number" && Number.isFinite(exitCode)) {
+    if (exitCode === 0) signals.explicitSuccess = true;
+    else signals.explicitFailure = true;
+  }
+  if (record.timedOut === true || record.timed_out === true) signals.timedOut = true;
   const status = typeof record.status === "string" ? record.status.toLowerCase() : undefined;
   if (status && ["error", "failed", "failure", "cancelled", "canceled", "timed-out", "timeout"].includes(status)) {
-    return true;
+    if (["timed-out", "timeout"].includes(status)) signals.timedOut = true;
+    else signals.explicitFailure = true;
   }
-  if (record.isError === false || record.is_error === false || record.success === true || record.ok === true) return false;
-  if (status && ["ok", "success", "succeeded", "completed"].includes(status)) return false;
-  return undefined;
+  if (record.isError === false || record.is_error === false || record.success === true || record.ok === true) {
+    signals.explicitSuccess = true;
+  }
+  if (status && ["ok", "success", "succeeded", "completed"].includes(status)) signals.explicitSuccess = true;
+  const taskName = record.task_name ?? record.taskName;
+  const agentId = record.agent_id ?? record.agentId;
+  signals.successShapes.spawnAgent ||= (typeof taskName === "string" && taskName.length > 0)
+    || (typeof agentId === "string" && agentId.length > 0);
+  signals.successShapes.followupTask ||= (typeof taskName === "string" && taskName.length > 0)
+    || record.accepted === true || record.queued === true;
+  signals.successShapes.sendMessage ||= record.delivered === true || record.sent === true;
+  signals.successShapes.waitAgent ||= typeof (record.timed_out ?? record.timedOut) === "boolean";
+  signals.successShapes.listAgents ||= Array.isArray(record.agents);
+  signals.successShapes.interruptAgent ||= Object.hasOwn(record, "previous_status")
+    || Object.hasOwn(record, "previousStatus");
+  for (const field of ["output", "result", "data", "content"] as const) {
+    if (record[field] !== undefined) mergeOutputSignals(signals, structuredOutcome(record[field]));
+  }
+  return signals;
+}
+
+function classifyOutcome(start: NormalizedToolCall, output: NormalizedToolOutput): CoordinationOutcome {
+  const signals = output.signals;
+  if (signals.explicitFailure) return "failed";
+  if (signals.timedOut) return start.category === "wait" ? "no-change" : "timed-out";
+  if (signals.explicitSuccess) return "succeeded";
+  const recognizedSuccess = start.name === "spawn_agent" ? signals.successShapes.spawnAgent
+    : start.name === "followup_task" ? signals.successShapes.followupTask
+      : start.name === "send_message" ? signals.successShapes.sendMessage
+        : start.name === "wait_agent" ? signals.successShapes.waitAgent
+          : start.name === "list_agents" ? signals.successShapes.listAgents
+            : start.name === "interrupt_agent" ? signals.successShapes.interruptAgent
+              : false;
+  if (recognizedSuccess) return "succeeded";
+  if (signals.plainText && ["spawn_agent", "wait_agent", "list_agents", "interrupt_agent"].includes(start.name)) {
+    return "failed";
+  }
+  return "unknown";
 }
 
 export function normalizeToolCallOutput(
@@ -216,11 +326,13 @@ export function normalizeToolCallOutput(
   if (!isToolCallOutputPayload(payload)) return undefined;
   const callId = payload.call_id ?? payload.callId;
   if (typeof callId !== "string" || callId.length === 0) return undefined;
-  const failed = structuredOutcome(payload.output) ?? structuredOutcome(payload);
+  const signals = structuredOutcome(payload.output ?? payload);
   return {
     callId,
     ...(observed ? { observedAt: observed.iso, observedAtMs: observed.milliseconds } : {}),
-    ...(failed !== undefined ? { failed } : {})
+    ...(observed?.bytes !== undefined ? { observedAtBytes: observed.bytes } : {}),
+    ...(observed?.sha256 !== undefined ? { observedAtSha256: observed.sha256 } : {}),
+    signals
   };
 }
 
@@ -233,8 +345,10 @@ export function pairToolCall(start: NormalizedToolCall, output: NormalizedToolOu
     outputRecorded: true,
     ...(output.observedAt ? { completedAt: output.observedAt } : {}),
     ...(output.observedAtMs !== undefined ? { completedAtMs: output.observedAtMs } : {}),
+    ...(output.observedAtBytes !== undefined ? { completedAtBytes: output.observedAtBytes } : {}),
+    ...(output.observedAtSha256 !== undefined ? { completedAtSha256: output.observedAtSha256 } : {}),
     ...(durationMs !== undefined && durationMs >= 0 ? { durationMs } : {}),
-    ...(output.failed !== undefined ? { failed: output.failed } : {})
+    outcome: classifyOutcome(start, output)
   };
 }
 
@@ -277,7 +391,11 @@ export function summarizeCoordination(inputs: CoordinationThreadInput[]): Coordi
   let missingRequestedWaitDurations = 0;
   let observedOutcomes = 0;
   let missingOutcomes = 0;
+  let succeeded = 0;
+  let noChange = 0;
+  let timedOut = 0;
   let failed = 0;
+  let unknown = 0;
   let retrySignals = 0;
   let retries = 0;
 
@@ -307,10 +425,14 @@ export function summarizeCoordination(inputs: CoordinationThreadInput[]): Coordi
       if (call.requestedWaitMs === undefined) missingRequestedWaitDurations += 1;
       else requestedWaitDurations.push(call.requestedWaitMs);
     }
-    if (call.failed === undefined) missingOutcomes += 1;
+    if (!call.outputRecorded) missingOutcomes += 1;
     else {
       observedOutcomes += 1;
-      if (call.failed) failed += 1;
+      if (call.outcome === "succeeded") succeeded += 1;
+      else if (call.outcome === "no-change") noChange += 1;
+      else if (call.outcome === "timed-out") timedOut += 1;
+      else if (call.outcome === "failed") failed += 1;
+      else unknown += 1;
     }
     if (call.retrySignalSupported) retrySignals += 1;
     if (call.retryOf) retries += 1;
@@ -329,7 +451,11 @@ export function summarizeCoordination(inputs: CoordinationThreadInput[]): Coordi
       status: outcomeStatus,
       observed: observedOutcomes,
       missing: missingOutcomes,
-      ...(observedOutcomes > 0 ? { failed } : {})
+      succeeded,
+      noChange,
+      timedOut,
+      failed,
+      unknown
     },
     retries: retrySignals > 0 ? { available: true, count: retries } : { available: false }
   };
@@ -366,6 +492,20 @@ export function coordinationReport(
     }))
       .sort((left, right) => right.metrics.counts.totalCalls - left.metrics.counts.totalCalls
         || left.threadId.localeCompare(right.threadId)),
+    boundary: {
+      crossingCalls: {
+        total: inputs.reduce((total, input) => total + (input.boundaryCrossingCalls || 0), 0),
+        roles: [...byRole.entries()].map(([role, rows]) => ({
+          role,
+          calls: rows.reduce((total, row) => total + (row.boundaryCrossingCalls || 0), 0)
+        })).filter(row => row.calls > 0).sort((left, right) => right.calls - left.calls || left.role.localeCompare(right.role)),
+        threads: inputs.map(input => ({
+          threadId: input.threadId,
+          role: input.role,
+          calls: input.boundaryCrossingCalls || 0
+        })).filter(row => row.calls > 0).sort((left, right) => right.calls - left.calls || left.threadId.localeCompare(right.threadId))
+      }
+    },
     completeness: {
       status: reasons.size === 0 ? "complete" : "incomplete",
       reasons: [...reasons].sort()

@@ -64,6 +64,7 @@ function usageClient(root: Record<string, unknown>) {
     async start() {},
     async close() {},
     async request(method: string, params: Record<string, unknown> = {}) {
+      if (method === "thread/read") return { thread: root };
       assert.equal(method, "thread/list");
       if (params.parentThreadId || params.archived) return { data: [], nextCursor: null };
       return { data: [root], nextCursor: null };
@@ -138,7 +139,8 @@ test("classifies coordination, durations, failures, retries, and paired compacti
     status: "available", observed: 1, missing: 0, totalMs: 30_000
   });
   assert.deepEqual(report.total.outcomes, {
-    status: "partial", observed: 9, missing: 1, failed: 2
+    status: "partial", observed: 9, missing: 1,
+    succeeded: 7, noChange: 0, timedOut: 0, failed: 2, unknown: 0
   });
   assert.deepEqual(report.total.retries, { available: true, count: 1 });
   assert.deepEqual(report.roles.map(row => [row.role, row.threads, row.metrics.counts.totalCalls]), [
@@ -149,6 +151,82 @@ test("classifies coordination, durations, failures, retries, and paired compacti
   });
   assert.equal(report.total.tools.find(row => row.name === "exec")?.calls, 4);
   assert.doesNotMatch(JSON.stringify({ timeline, report }), /SECRET_/);
+});
+
+test("classifies a normal wait expiry as no-change and a plain validation error as failed", async () => {
+  const directory = await temporaryDirectory();
+  const file = await rollout(directory, "wait-outcomes", [
+    call("2026-08-12T12:00:00.000Z", "normal", "wait_agent", { timeout_ms: 10_000 }),
+    output("2026-08-12T12:00:10.000Z", "normal", JSON.stringify({ message: "Wait timed out.", timed_out: true })),
+    call("2026-08-12T12:00:11.000Z", "invalid", "wait_agent", { timeout_ms: 1 }),
+    output("2026-08-12T12:00:12.000Z", "invalid", "timeout_ms must be at least 10000")
+  ]);
+
+  const timeline = await readRolloutTimeline(file);
+  const report = coordinationReport([{
+    threadId: "root",
+    parentThreadId: null,
+    role: "supervisor",
+    source: "cli",
+    calls: timeline.toolCalls,
+    compactions: 0
+  }]);
+
+  assert.deepEqual(report.total.outcomes, {
+    status: "available",
+    observed: 2,
+    missing: 0,
+    succeeded: 0,
+    noChange: 1,
+    timedOut: 0,
+    failed: 1,
+    unknown: 0
+  });
+  assert.doesNotMatch(JSON.stringify({ timeline, report }), /Wait timed out|timeout_ms must/);
+});
+
+test("recognizes content-free success shapes and keeps ambiguous legacy acknowledgements unknown", async () => {
+  const directory = await temporaryDirectory();
+  const file = await rollout(directory, "coordination-success-shapes", [
+    call("2026-08-12T12:00:00.000Z", "spawn", "spawn_agent"),
+    output("2026-08-12T12:00:01.000Z", "spawn", JSON.stringify({ task_name: "child" })),
+    call("2026-08-12T12:00:02.000Z", "follow", "followup_task"),
+    output("2026-08-12T12:00:03.000Z", "follow", JSON.stringify({ queued: true })),
+    call("2026-08-12T12:00:04.000Z", "message", "send_message"),
+    output("2026-08-12T12:00:05.000Z", "message", JSON.stringify({ delivered: true })),
+    call("2026-08-12T12:00:06.000Z", "wait", "wait_agent", { timeout_ms: 10_000 }),
+    output("2026-08-12T12:00:07.000Z", "wait", JSON.stringify({ message: "done", timed_out: false })),
+    call("2026-08-12T12:00:08.000Z", "list", "list_agents"),
+    output("2026-08-12T12:00:09.000Z", "list", JSON.stringify({ agents: [] })),
+    call("2026-08-12T12:00:10.000Z", "interrupt", "interrupt_agent"),
+    output("2026-08-12T12:00:11.000Z", "interrupt", JSON.stringify({ previous_status: "running" })),
+    call("2026-08-12T12:00:12.000Z", "legacy-message", "send_message"),
+    output("2026-08-12T12:00:13.000Z", "legacy-message", "legacy acknowledgement without a machine-readable result"),
+    call("2026-08-12T12:00:14.000Z", "empty", "spawn_agent"),
+    output("2026-08-12T12:00:15.000Z", "empty", JSON.stringify({}))
+  ]);
+
+  const timeline = await readRolloutTimeline(file);
+  const report = coordinationReport([{
+    threadId: "root",
+    parentThreadId: null,
+    role: "supervisor",
+    source: "cli",
+    calls: timeline.toolCalls,
+    compactions: 0
+  }]);
+
+  assert.deepEqual(report.total.outcomes, {
+    status: "available",
+    observed: 8,
+    missing: 0,
+    succeeded: 6,
+    noChange: 0,
+    timedOut: 0,
+    failed: 0,
+    unknown: 2
+  });
+  assert.doesNotMatch(JSON.stringify({ timeline, report }), /child|legacy acknowledgement|running/);
 });
 
 test("clips coordination calls and durations to the canonical task interval", async () => {
@@ -186,35 +264,54 @@ test("clips coordination calls and durations to the canonical task interval", as
 
   const report = await collectUsage({
     cwd: directory,
+    threadId: "root",
     taskId: "SYN-COORD",
     clientFactory: () => usageClient(root),
     clock: () => "2026-08-12T12:05:00.000Z"
   });
 
-  assert.equal(report.coordination.total.counts.totalCalls, 2);
+  assert.equal(report.coordination.total.counts.totalCalls, 1);
   assert.equal(report.coordination.total.counts.spawn, 1);
-  assert.equal(report.coordination.total.counts.wait, 1);
+  assert.equal(report.coordination.total.counts.wait, 0);
   assert.deepEqual(report.coordination.total.callDuration, {
-    status: "partial", observed: 1, missing: 1, totalMs: 2_000
+    status: "available", observed: 1, missing: 0, totalMs: 2_000
   });
   assert.deepEqual(report.coordination.total.waitDuration, {
-    status: "unavailable", observed: 0, missing: 1
+    status: "unavailable", observed: 0, missing: 0
   });
   assert.deepEqual(report.coordination.total.requestedWaitDuration, {
-    status: "available", observed: 1, missing: 0, totalMs: 120_000
+    status: "unavailable", observed: 0, missing: 0
   });
   assert.deepEqual(report.coordination.total.retries, { available: false });
   assert.deepEqual(report.coordination.threads.map(row => [row.threadId, row.role, row.metrics.counts.totalCalls]), [
-    ["root", "supervisor", 2]
+    ["root", "supervisor", 1]
   ]);
   assert.deepEqual(report.coordination.completeness, {
-    status: "incomplete", reasons: ["tool-call-output-missing"]
+    status: "complete", reasons: []
   });
   assert.deepEqual(report.completeness, {
-    status: "incomplete", reasons: ["tool-call-output-missing"]
+    status: "complete", reasons: []
   });
+  assert.equal(report.coordination.boundary.crossingCalls.total, 1);
+  assert.ok(report.threads[0]?.boundaryEvidence);
 
   const original = await readFile(rootPath, "utf8");
+  const crossingOutput = output("2026-08-12T12:04:00.000Z", "wait", JSON.stringify({ ok: true }));
+  const malformedBoundaryPrefix = original.replace(crossingOutput, `{not-json}\n${crossingOutput}`);
+  assert.notEqual(malformedBoundaryPrefix, original);
+  await writeFile(rootPath, malformedBoundaryPrefix, "utf8");
+  await assert.rejects(
+    collectUsage({
+      cwd: directory,
+      threadId: "root",
+      taskId: "SYN-COORD",
+      clientFactory: () => usageClient(root),
+      clock: () => "2026-08-12T12:05:30.000Z"
+    }),
+    (error: unknown) => error instanceof SynodError
+      && error.code === ERROR_CODES.ROLLOUT_INVALID
+      && (error.details as { malformedRecords?: number } | undefined)?.malformedRecords === 1
+  );
   await writeFile(rootPath, `${original}${call("2026-08-12T12:04:20.000Z", "late-duplicate", "exec")}\n${call(
     "2026-08-12T12:04:21.000Z",
     "late-duplicate",
@@ -227,6 +324,7 @@ test("clips coordination calls and durations to the canonical task interval", as
 
   const repeated = await collectUsage({
     cwd: directory,
+    threadId: "root",
     taskId: "SYN-COORD",
     clientFactory: () => usageClient(root),
     clock: () => "2026-08-12T12:06:00.000Z"

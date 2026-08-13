@@ -134,19 +134,34 @@ Each evidence item also captures the Git branch, exact `HEAD`, and content-sensi
 
 ### Writer leases and recovery
 
-Every writer must acquire an exact-revision lease before moving its task to `ACTIVE`. Declare the narrowest allowed scopes; exact paths use `--write`/`--read`, while directory trees use `--write-tree`/`--read-tree`:
+Every delegated writer uses a two-phase reservation so its scopes and immutable baseline are durable before Codex starts the child. Declare the narrowest allowed scopes; exact paths use `--write`/`--read`, while directory trees use `--write-tree`/`--read-tree`:
 
 ```bash
-synod lease acquire T-001 \
-  --owner-thread thread:019f... \
+synod lease reserve T-001 \
   --write-tree src/api \
   --read-tree test/fixtures \
-  --ttl-seconds 300 \
-  --heartbeat-seconds 60 \
+  --reservation-ttl-seconds 300 \
   --json
 ```
 
-The JSON result contains the lease ID, generation, task revision, owner, and `heartbeatAt`. Copy those exact values into heartbeat, release, worktree, revocation, or recovery commands; a stale value fails closed:
+The reservation returns `writeAuthorized:false`, an opaque token, lease ID, generation, task revision, reservation timestamp, baseline hash, and expiry. Give the child a read-only initial contract: analysis may begin, but writes, worktrees, and implementation commands must wait for bind confirmation. After `spawn_agent` returns the owner thread, bind every returned fence value; bind atomically grants `writeAuthorized:true` and moves the task to `ACTIVE`:
+
+```bash
+synod lease bind T-001 \
+  --reservation-token <token> --lease-id <id> --generation 1 --revision 0 \
+  --expected-reserved-at <iso> --baseline-hash <sha256> \
+  --owner-thread thread:019f... --ttl-seconds 300 --heartbeat-seconds 60 \
+  --json
+```
+
+If spawn fails, run `lease cancel` with the complete reservation fence and a reason. If no owner ID returns, wait for the reservation TTL and use the reservation form of `lease expire`. Neither pre-bind cleanup path creates an abandoned-worker recovery record because the reservation never authorized writes. Synod cannot invoke Codex `spawn_agent`; an atomic `delegate start` is deferred until a typed integration can perform both halves of the handshake.
+
+Callers that already know the worker identity may still use `lease acquire`. After bind or acquire, the JSON result contains the active lease ID, generation, task revision, owner, and `heartbeatAt`. Copy those exact values into heartbeat, release, worktree, revocation, or recovery commands; a stale value fails closed:
+
+```bash
+synod lease acquire T-001 --owner-thread thread:known \
+  --write-tree src/api --ttl-seconds 300 --heartbeat-seconds 60 --json
+```
 
 ```bash
 synod lease heartbeat T-001 --lease-id <id> --generation 1 --revision 0 \
@@ -336,14 +351,16 @@ synod usage --since-event 12
 synod usage --since-event 12 --until-event 18
 synod usage --since-event 019f-event-id --until-event 019f-event-id
 synod usage --since-checkpoint
-synod usage --task SYN-090A
+synod usage --task SYN-090A --session 019f...
 ```
 
-The three start selectors are mutually exclusive. Event selectors accept one exact canonical sequence or ID. `--since-checkpoint` binds the report to the currently acknowledged checkpoint and the canonical event that introduced it. `--task` starts at the task's first canonical event and closes at its first `DONE` or `SUPERSEDED` event; a live task ends at local capture time. Every interval uses `(start, end]`, so an observation at the start is excluded and one at the end is included. Canonical boundaries with indistinguishable timestamps are rejected instead of guessing sub-timestamp ordering.
+The three start selectors are mutually exclusive. Event selectors accept one exact canonical sequence or ID. `--since-checkpoint` binds the report to the currently acknowledged checkpoint and the canonical event that introduced it. `--task` requires `--session <root-or-descendant-id>` because canonical tasks do not yet persist a root-session binding; it starts at the task's first canonical event and closes at its first `DONE` or `SUPERSEDED` event. A live task ends at local capture time. Whole-session reports without `--task` retain latest-root selection. Every interval uses `(start, end]`, so an observation at the start is excluded and one at the end is included. Canonical boundaries with indistinguishable timestamps are rejected instead of guessing sub-timestamp ordering.
 
-Synod validates the complete state/event chain read-only, then reads Codex's local session metadata through the App Server and reconstructs deltas from the complete persisted counter stream before clipping observations to the interval. Counter decreases start a new epoch. Later model reroutes affect only later observations. A closed report excludes descendants created after its end and records the included byte length and SHA-256 rollout prefix for each thread. JSON adds interval provenance, completeness, per-thread rows, per-role totals, the thread/model/role cross-product, and a separate `coordination` report while retaining the existing `models` and `total` fields.
+Synod validates the complete state/event chain read-only, then reads Codex's local session metadata through the App Server and reconstructs deltas from the complete persisted counter stream before clipping observations to the interval. Counter decreases start a new epoch. Later model reroutes affect only later observations. A closed report excludes descendants created after its end and records the included byte length and SHA-256 rollout prefix for each thread. JSON reports `discoveredThreads` for every selected descendant and `contributingThreads` for rows with a non-zero token delta; the deprecated `total.threads` alias equals the latter. Zero-token rows remain for rollout provenance and coordination attribution. JSON also adds interval provenance, completeness, per-thread rows, per-role totals, the thread/model/role cross-product, and a separate `coordination` report while retaining the existing `models` and `total` fields.
 
-Coordination is derived only from normalized tool-call records. `spawn_agent`, `followup_task`, `send_message`, `wait_agent`, `list_agents`, and `interrupt_agent` are reported separately from implementation tools, by thread and role. Calls and outputs pair by `call_id`; observed and requested wait durations are included when the rollout supplies them. Compaction pairs are de-duplicated. Structured failures are counted without copying outputs, and tool names are retained without arguments. Missing outputs make the measurement incomplete. Duration, outcome, and retry metrics use explicit `available`, `partial`, or `unavailable` states instead of fabricating zero when Codex did not persist enough evidence.
+Coordination is derived only from normalized tool-call records. `spawn_agent`, `followup_task`, `send_message`, `wait_agent`, `list_agents`, and `interrupt_agent` are reported separately from implementation tools, by thread and role. Calls and outputs pair by `call_id`; observed and requested wait durations are included when the rollout supplies them. Compaction pairs are de-duplicated. Tool-aware outcomes distinguish succeeded, normal wait no-change, real timeout, failure, and unknown without copying outputs; tool names are retained without arguments. Validated content-free shapes identify structured successes. A plain `wait_agent` validation error is failure, while structured wait expiry is no-change; ambiguous historical plain acknowledgements remain unknown. Missing outputs make the measurement incomplete. Duration, outcome, and retry metrics use explicit `available`, `partial`, or `unavailable` states instead of fabricating zero when Codex did not persist enough evidence.
+
+For a closed exact interval, duration and outcome metrics include only call/output pairs fully contained in `(start,end]`. Calls crossing either boundary are excluded under `coordination.boundary.crossingCalls`; a post-end output contributes only byte-length/SHA-256 boundary evidence, never content or interval activity. A fully observed crossing does not make the report incomplete, but a crossing call whose output is still missing does. Because there is no persisted event-to-call causal identity yet, adjacent exact intervals are not guaranteed to sum to whole-session call counts.
 
 Whole-session and live canonical reports are explicitly `incomplete` persisted snapshots. A closed exact interval is `complete` only when every required rollout and timestamp is readable and ordered. Missing rollout paths, malformed required counters, timestamp regressions, ambiguous selectors, conflicting thread identities, and insufficient descendant creation evidence fail closed for exact reports.
 

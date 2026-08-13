@@ -13,7 +13,7 @@ function usage(): UsageReport {
     callDuration: { status: "unavailable" as const, observed: 0, missing: 0 },
     waitDuration: { status: "unavailable" as const, observed: 0, missing: 0 },
     requestedWaitDuration: { status: "unavailable" as const, observed: 0, missing: 0 },
-    outcomes: { status: "unavailable" as const, observed: 0, missing: 0 },
+    outcomes: { status: "unavailable" as const, observed: 0, missing: 0, succeeded: 0, noChange: 0, timedOut: 0, failed: 0, unknown: 0 },
     retries: { available: false }
   };
   return {
@@ -25,11 +25,13 @@ function usage(): UsageReport {
     ],
     roles: [],
     attribution: [],
+    discoveredThreads: 2,
+    contributingThreads: 2,
     threads: [],
     total: { threads: 2, inputTokens: 1_500_000, cachedInputTokens: 250_000, outputTokens: 150_000, reasoningOutputTokens: 50_000, totalTokens: 1_650_000 },
     tokenCounters: { resets: 0 },
     completeness: { status: "complete", reasons: [] },
-    coordination: { total: zeroCoordination, roles: [], threads: [], completeness: { status: "complete", reasons: [] } },
+    coordination: { total: zeroCoordination, roles: [], threads: [], boundary: { crossingCalls: { total: 0, roles: [], threads: [] } }, completeness: { status: "complete", reasons: [] } },
     interval: {
       inclusion: "(start,end]",
       start: { kind: "event", timestamp: "2026-08-12T10:00:00.000Z", event: { sequence: 1, id: "start", hash: "sha256:start", type: "orchestration.initialized" } },
