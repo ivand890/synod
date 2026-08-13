@@ -91,6 +91,8 @@ test("handoff exposes an unbound reservation without implying write authority", 
   const handoff = await generateHandoff({ directory });
   const task = handoff.tasks.find(item => item.id === "T-RESERVED");
   assert.equal(task?.leaseReservation?.id, reserved.reservation.id);
+  assert.equal(Object.hasOwn(task?.leaseReservation || {}, "token"), false);
+  assert.equal(JSON.stringify(handoff).includes(reserved.reservation.token), false);
   assert.equal(task?.lease, null);
   assert.match(formatHandoff(handoff), /Writer reservation: [0-9a-f-]+ generation 1; write authority false;/);
   assert.match(formatHandoff(handoff), /Writer lease: none/);

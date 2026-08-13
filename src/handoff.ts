@@ -31,6 +31,8 @@ export interface HandoffTaskEvidence {
   verification: TaskEvidence[];
 }
 
+export type HandoffLeaseReservation = Omit<NonNullable<OrchestrationTask["leaseReservation"]>, "token">;
+
 export interface HandoffTask {
   id: string;
   objective: string;
@@ -40,7 +42,7 @@ export interface HandoffTask {
   dependencies: Array<{ id: string; state: TaskState; complete: boolean }>;
   incompleteDependencies: string[];
   blocker: string | null;
-  leaseReservation: OrchestrationTask["leaseReservation"] | null;
+  leaseReservation: HandoffLeaseReservation | null;
   lease: OrchestrationTask["lease"] | null;
   proposal: OrchestrationTask["proposal"] | null;
   recovery: OrchestrationTask["recovery"] | null;
@@ -109,6 +111,12 @@ function currentProposalEvidence(task: OrchestrationTask): Pick<HandoffTaskEvide
   };
 }
 
+function handoffLeaseReservation(task: OrchestrationTask): HandoffLeaseReservation | null {
+  if (!task.leaseReservation) return null;
+  const { token: _reservationToken, ...reservation } = task.leaseReservation;
+  return reservation;
+}
+
 function handoffTask(
   task: OrchestrationTask,
   tasks: Readonly<Record<string, OrchestrationTask>>
@@ -128,7 +136,7 @@ function handoffTask(
     dependencies,
     incompleteDependencies: dependencies.filter(item => !item.complete).map(item => item.id),
     blocker: task.blocker || null,
-    leaseReservation: task.leaseReservation || null,
+    leaseReservation: handoffLeaseReservation(task),
     lease: task.lease || null,
     proposal: task.proposal || null,
     recovery: task.recovery || null,

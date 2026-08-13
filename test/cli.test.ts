@@ -609,6 +609,15 @@ test("lease reservation commands expose the pre-spawn and post-bind authorizatio
     assert.equal(reserved.data.task.state, "READY");
     assert.match(reserved.data.reservation.token, /^[0-9a-f-]{36}$/);
 
+    const handoffCode = await run(["handoff", directory, "--json"], output);
+    const handoffJson = takeMessage(messages);
+    const handoff = JSON.parse(handoffJson);
+    const handoffReservation = handoff.data.tasks.find((task: Record<string, unknown>) => task.id === "T-RESERVE").leaseReservation;
+    assert.equal(handoffCode, 0);
+    assert.equal(handoffReservation.id, reserved.data.reservation.id);
+    assert.equal(Object.hasOwn(handoffReservation, "token"), false);
+    assert.equal(handoffJson.includes(reserved.data.reservation.token), false);
+
     const invalidReservationToken = "11111111-1111-4111-8111-111111111111";
     const staleBindCode = await run([
       "lease", "bind", "T-RESERVE",
