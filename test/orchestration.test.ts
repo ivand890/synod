@@ -266,6 +266,28 @@ test("initializes canonical state, a hash-chained log, and a Markdown projection
   assert.equal((await orchestrationStatus({ directory })).healthy, true);
 });
 
+test("status isolates missing or malformed lifecycle metadata from canonical state", async () => {
+  for (const mode of ["missing", "malformed"] as const) {
+    const directory = await temporaryProject();
+    const canonical = await readOrchestration(directory);
+    const manifestPath = path.join(directory, ".synod/manifest.json");
+    const runtimePath = path.join(directory, ".synod/runtime.json");
+    if (mode === "missing") {
+      await unlink(manifestPath);
+      await assert.rejects(readFile(runtimePath, "utf8"), { code: "ENOENT" });
+    } else {
+      await writeFile(manifestPath, "{ malformed\n", "utf8");
+      await writeFile(runtimePath, "{ malformed\n", "utf8");
+    }
+
+    const status = await orchestrationStatus({ directory });
+    assert.equal(status.installedTemplateVersion, null);
+    assert.equal(status.runtimeVersion, null);
+    assert.equal(status.stateTemplateVersion, canonical.state.templateVersion);
+    assert.equal(status.templateVersion, canonical.state.templateVersion);
+  }
+});
+
 test("enforces the complete revision, acceptance, verification, and completion path", async () => {
   const directory = await temporaryProject();
   await initializeGitHead(directory);
@@ -1755,6 +1777,8 @@ test("status explain distinguishes committed, staged, unstaged, untracked, delet
   assert.equal(byPath.get("untracked-nul.dat")?.binary, true);
   assert.equal(byPath.get("binary.dat")?.binary, true);
   const text = formatOrchestrationStatus(explained);
+  assert.match(text, /Installed template:/);
+  assert.match(text, /State template:/);
   assert.match(text, /committed modified/);
   assert.match(text, /staged renamed/);
   assert.match(text, /untracked/);

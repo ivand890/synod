@@ -19,6 +19,8 @@ import {
   unsafeAncestor
 } from "./filesystem.js";
 import { packageName, packageVersion } from "./package.js";
+import { readLocalRuntimeDescriptor } from "./local-runtime.js";
+import { readManifest } from "./manifest.js";
 import { generatedConfigMarker, removeAgentsBlocks } from "./templates.js";
 import { errorCode, errorMessage, isRecord, parseJson } from "./validation.js";
 import {
@@ -439,6 +441,10 @@ export interface OrchestrationStatusResult {
   targetDirectory: string;
   healthy: boolean;
   stateSchemaVersion: number;
+  runtimeVersion: string | null;
+  installedTemplateVersion: string | null;
+  manifestSchemaVersion: number | null;
+  stateTemplateVersion: string;
   templateVersion: string;
   updatedAt: string;
   lastEvent: OrchestrationLastEvent;
@@ -6087,6 +6093,12 @@ async function orchestrationStatusFromCanonical(
     });
   }
   const drift = checkpointDrift(state.checkpoint, currentCheckpoint);
+  const [runtimeRead, manifestRead] = await Promise.allSettled([
+    readLocalRuntimeDescriptor(targetDirectory),
+    readManifest(targetDirectory, { required: false })
+  ]);
+  const localRuntimeDescriptor = runtimeRead.status === "fulfilled" ? runtimeRead.value : undefined;
+  const rawManifest = manifestRead.status === "fulfilled" ? manifestRead.value : undefined;
   const counts: Record<TaskState, number> = {
     PLANNED: 0,
     READY: 0,
@@ -6122,6 +6134,10 @@ async function orchestrationStatusFromCanonical(
     targetDirectory,
     healthy: !drift.detected,
     stateSchemaVersion: state.schemaVersion,
+    runtimeVersion: localRuntimeDescriptor?.runtimeVersion || null,
+    installedTemplateVersion: rawManifest?.templateVersion || null,
+    manifestSchemaVersion: rawManifest?.schemaVersion || null,
+    stateTemplateVersion: state.templateVersion,
     templateVersion: state.templateVersion,
     updatedAt: state.updatedAt,
     lastEvent: state.lastEvent,
@@ -6258,6 +6274,9 @@ export async function withValidatedCheckpointSource<Result>(
 export function formatOrchestrationStatus(result: OrchestrationStatusResult): string {
   const lines = [`Synod orchestration: ${result.healthy ? "in sync" : "checkpoint drift detected"}`];
   lines.push(`State schema: ${result.stateSchemaVersion}; events: ${result.eventCount}`);
+  lines.push(`Runtime: ${result.runtimeVersion || "external"}`);
+  lines.push(`Installed template: ${result.installedTemplateVersion || "unavailable"} (manifest schema ${result.manifestSchemaVersion ?? "unknown"})`);
+  lines.push(`State template: ${result.stateTemplateVersion}`);
   lines.push(`Checkpoint: ${checkpointLabel(result.checkpoint)}`);
   lines.push(`Current: ${checkpointLabel(result.currentCheckpoint)}`);
   lines.push(`Phase rotation: ${result.rotation ? `policy r${result.rotation.policy.revision}; session ${currentRotationPhase(result.rotation).rootSessionId}; ${result.rotation.recommendations.length} recommendation(s); ${result.rotation.verifications.length} verified` : "not configured"}`);

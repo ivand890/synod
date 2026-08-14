@@ -8,7 +8,8 @@ import { WARNING_CODES, baseDiagnostics } from "../src/contracts.js";
 import { ERROR_CODES, asSynodError } from "../src/errors.js";
 import { run } from "../src/cli.js";
 import { parseLeaseArgs, parseProposalArgs, parseTaskArgs, parseWorktreeArgs } from "../src/command-options.js";
-import { packageVersion } from "../src/package.js";
+import { initProject } from "../src/lifecycle.js";
+import { packageName, packageVersion } from "../src/package.js";
 
 const bin = path.resolve("bin/synod.js");
 
@@ -70,6 +71,40 @@ test("the installed entry point keeps init dry-run free of runtime and project w
     assert.match(result.stdout, /Synod init plan is valid/);
     await assert.rejects(readFile(path.join(directory, "docs/synod/PLAN.md"), "utf8"), { code: "ENOENT" });
     await assert.rejects(readFile(path.join(directory, ".synod/runtime.json"), "utf8"), { code: "ENOENT" });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("installed status bypasses malformed runtime metadata but not malformed canonical state", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-status-runtime-invalid-test-"));
+
+  try {
+    await initProject({ directory });
+    const runtimePath = path.join(directory, ".synod/runtime.json");
+    const statePath = path.join(directory, ".synod/state.json");
+    await writeFile(runtimePath, "{ malformed\n", "utf8");
+
+    const status = spawnSync(process.execPath, [bin, "status", directory, "--json"], {
+      cwd: directory,
+      encoding: "utf8"
+    });
+    assert.notEqual(status.stdout.trim(), "");
+    const envelope = JSON.parse(status.stdout);
+    const statusData = envelope.ok ? envelope.data : envelope.error.details;
+    assert.notEqual(envelope.error?.code, ERROR_CODES.LOCAL_RUNTIME_INVALID);
+    assert.equal(statusData.runtimeVersion, null);
+    assert.equal(statusData.stateTemplateVersion, packageVersion);
+
+    await writeFile(statePath, "{ malformed\n", "utf8");
+    const malformedState = spawnSync(process.execPath, [bin, "status", directory, "--json"], {
+      cwd: directory,
+      encoding: "utf8"
+    });
+    assert.equal(malformedState.status, 1);
+    const malformedStateEnvelope = JSON.parse(malformedState.stdout);
+    assert.equal(malformedStateEnvelope.ok, false);
+    assert.equal(malformedStateEnvelope.error.code, ERROR_CODES.ORCHESTRATION_STATE_INVALID);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -476,6 +511,73 @@ test("check and doctor emit failure JSON when their health gates fail", async ()
   }
 });
 
+test("doctor preserves divergent project version truth in JSON and text", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-doctor-versions-test-"));
+  const { messages, output } = capturedOutput();
+  const manifestPath = path.join(directory, ".synod/manifest.json");
+  const runtimePath = path.join(directory, ".synod/runtime.json");
+  const doctorDependencies = {
+    doctorRuntimeResolver: () => ({
+      surface: "cli",
+      executable: "codex",
+      executableSource: "test",
+      resolved: true
+    }),
+    doctorClientFactory: () => ({
+      async start() {},
+      async probeCapabilities() {},
+      async listModels() {
+        return [{ id: "gpt-5.5", supportedReasoningEfforts: ["low", "medium", "high", "xhigh"] }];
+      },
+      async close() {},
+      getWarnings() { return []; },
+      getDiagnostics() {
+        return {
+          codexVersion: "0.148.0",
+          codexSurface: "cli",
+          appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
+        };
+      }
+    })
+  };
+
+  try {
+    await run(["init", directory], output);
+    messages.length = 0;
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.templateVersion = "0.9.1";
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await writeFile(runtimePath, `${JSON.stringify({
+      schemaVersion: 1,
+      runtimeVersion: "0.9.3",
+      packageSpec: packageVersion,
+      packageName,
+      packageManager: "pnpm",
+      runtimeDirectory: ".synod/runtime",
+      executable: `.synod/runtime/node_modules/${packageName}/bin/synod.js`
+    }, null, 2)}\n`, "utf8");
+
+    const jsonStatus = await run(["doctor", directory, "--json"], output, doctorDependencies);
+    const doctor = JSON.parse(takeMessage(messages));
+    assert.equal(jsonStatus, 1);
+    const doctorData = doctor.ok ? doctor.data : doctor.error.details;
+    assert.equal(doctorData.project.runtimeVersion, "0.9.3");
+    assert.equal(doctorData.project.installedTemplateVersion, "0.9.1");
+    assert.equal(doctorData.project.stateTemplateVersion, packageVersion);
+    assert.equal(doctorData.project.templateVersion, "0.9.1");
+
+    messages.length = 0;
+    const textStatus = await run(["doctor", directory], output, doctorDependencies);
+    const text = takeMessage(messages);
+    assert.equal(textStatus, 1);
+    assert.match(text, /Project runtime: 0\.9\.3/);
+    assert.match(text, /Project installed template: 0\.9\.1/);
+    assert.match(text, new RegExp(`Project state template: ${packageVersion.replaceAll(".", "\\.")}`));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("doctor text identifies the Desktop executable, version, and shared Codex home", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-doctor-text-test-"));
   const { messages, output } = capturedOutput();
@@ -621,6 +723,10 @@ test("task and status commands expose canonical orchestration through schema-1 e
     assert.equal(status.command, "status");
     assert.equal(status.data.eventCount, 2);
     assert.equal(status.data.tasks[0].revision, 0);
+    assert.equal(status.data.runtimeVersion, null);
+    assert.equal(status.data.installedTemplateVersion, packageVersion);
+    assert.equal(status.data.stateTemplateVersion, packageVersion);
+    assert.equal(status.data.templateVersion, packageVersion);
 
     const explainCode = await run(["status", directory, "--explain", "--json"], output);
     const explained = JSON.parse(takeMessage(messages));
@@ -640,6 +746,12 @@ test("task and status commands expose canonical orchestration through schema-1 e
     const handoffTextCode = await run(["handoff", "--cwd", directory], output);
     assert.equal(handoffTextCode, 0);
     assert.match(takeMessage(messages), /T-001: PLANNED r0/);
+
+    const checkTextCode = await run(["check", directory], output);
+    assert.equal(checkTextCode, 0);
+    const checkText = takeMessage(messages);
+    assert.match(checkText, /Installed template:/);
+    assert.match(checkText, /State template:/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1011,15 +1123,18 @@ test("wait command exposes bounded mode and final thread status through JSON", a
   const envelope = JSON.parse(takeMessage(messages));
   assert.equal(status, 0);
   assert.equal(envelope.command, "wait");
+  assert.equal(envelope.data.waitAuthority, "appServer");
   assert.equal(envelope.data.mode, "poll");
   assert.deepEqual(envelope.data.threadIds, ["thread:one"]);
   assert.equal(envelope.data.fallbackPollCount, 0);
   assert.equal(envelope.data.incomplete, false);
+  assert.equal(envelope.data.hostWaitRequired, false);
   assert.equal(envelope.diagnostics.closed, 1);
 });
 
-test("wait command propagates cwd and returns failure for an incomplete result", async () => {
+test("wait command returns an explicit Desktop host handoff without creating a child client", async () => {
   const { messages, output } = capturedOutput();
+  let created = false;
   const status = await run([
     "wait",
     "--thread", "thread:one",
@@ -1027,7 +1142,7 @@ test("wait command propagates cwd and returns failure for an incomplete result",
     "--json"
   ], output, {
     waitClientFactory: options => {
-      assert.deepEqual(options, { cwd: "/tmp/project", codexBin: "/tmp/codex-desktop" });
+      created = true;
       return {
         async start() {},
         async request() {
@@ -1047,10 +1162,15 @@ test("wait command propagates cwd and returns failure for an incomplete result",
   const envelope = JSON.parse(takeMessage(messages));
 
   assert.equal(status, 1);
+  assert.equal(created, false);
   assert.equal(envelope.command, "wait");
+  assert.equal(envelope.data.waitAuthority, "host");
+  assert.equal(envelope.data.mode, "handoff");
   assert.equal(envelope.data.incomplete, true);
   assert.equal(envelope.data.approvalNeeded, false);
   assert.equal(envelope.data.userInputNeeded, false);
+  assert.equal(envelope.data.hostWaitRequired, true);
+  assert.deepEqual(envelope.data.hostWaitThreadIds, ["thread:one"]);
 });
 
 test("status explain returns the path delta inside checkpoint-drift JSON", async () => {

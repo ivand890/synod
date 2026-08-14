@@ -221,7 +221,9 @@ test("keeps the primary agent supervisory and delegates routine implementation",
   assert.match(skill, /incomplete usage fails closed/);
   assert.match(skill, /Before spawning a writer, run `[^`]+ lease reserve/);
   assert.match(skill, /wait --task <task-id>/);
-  assert.match(skill, /use direct platform `wait_agent` for exactly the returned thread IDs/);
+  assert.match(skill, /call direct platform `wait_agent` for exactly the returned `hostWaitThreadIds`/);
+  assert.match(skill, /waitAuthority: canonical/);
+  assert.match(skill, /hostFallbackRequired`\/`hostFallbackThreadIds` as compatibility aliases/);
   assert.match(skill, /Only after a successful bind may the supervisor send explicit write authorization/);
   assert.match(skill, /activation receipt does not claim that notification was observed/);
   assert.match(skill, /atomic `delegate start` remains deferred/);

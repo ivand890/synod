@@ -41,8 +41,16 @@ export interface WaitForThreadsOptions {
   signal?: AbortSignal;
 }
 
+/** The owner whose observation makes a wait result authoritative. */
+export type WaitAuthority = "host" | "appServer" | "canonical";
+
+/** The bounded transport used to observe (or hand off) a wait. */
+export type WaitMode = "notification" | "cursor" | "poll" | "handoff";
+
 export interface WaitReport {
-  mode: "notification" | "cursor" | "poll";
+  /** Transport mode; this is deliberately separate from waitAuthority. */
+  mode: WaitMode;
+  waitAuthority: WaitAuthority;
   threadIds: string[];
   wakeCount: number;
   fallbackPollCount: number;
@@ -52,6 +60,9 @@ export interface WaitReport {
   incomplete: boolean;
   approvalNeeded: boolean;
   userInputNeeded: boolean;
+  /** Positive host handoff contract. The legacy fallback fields below are aliases. */
+  hostWaitRequired: boolean;
+  hostWaitThreadIds: string[];
   hostFallbackRequired: boolean;
   hostFallbackThreadIds: string[];
   statuses: ObservedThreadStatus[];
@@ -87,6 +98,8 @@ export interface WaitTaskSelection {
 }
 
 export interface WaitSelection {
+  /** Task selectors are resolved from canonical state before runtime observation. */
+  waitAuthority?: "canonical";
   requestedTaskIds: string[];
   requestedThreadIds: string[];
   tasks: WaitTaskSelection[];
@@ -273,6 +286,7 @@ export async function resolveWaitSelection({
     }
   }
   return {
+    ...(requestedTaskIds.length > 0 ? { waitAuthority: "canonical" as const } : {}),
     requestedTaskIds,
     requestedThreadIds,
     tasks,
@@ -425,6 +439,56 @@ function waitForCursorSignal(
   });
 }
 
+function hostHandoffReport(
+  threadIds: string[],
+  runtime: WaitRuntime,
+  startedAt: number,
+  now: () => number,
+  signal?: AbortSignal
+): WaitReport {
+  const hostWaitThreadIds = [...threadIds];
+  const statuses = hostWaitThreadIds.map(threadId => ({
+    threadId,
+    // Desktop host state is intentionally not observed by this CLI. Keep the
+    // status incomplete rather than manufacturing an idle/completed result.
+    status: { type: "notLoaded" as const }
+  }));
+  return {
+    mode: "handoff",
+    waitAuthority: "host",
+    threadIds: [...threadIds],
+    wakeCount: 0,
+    fallbackPollCount: 0,
+    elapsedMs: Math.max(0, now() - startedAt),
+    timedOut: false,
+    aborted: Boolean(signal?.aborted),
+    incomplete: true,
+    approvalNeeded: false,
+    userInputNeeded: false,
+    hostWaitRequired: hostWaitThreadIds.length > 0,
+    hostWaitThreadIds,
+    // Preserve the 0.9.x compatibility aliases while making the positive
+    // handoff vocabulary authoritative for new callers.
+    hostFallbackRequired: hostWaitThreadIds.length > 0,
+    hostFallbackThreadIds: [...hostWaitThreadIds],
+    statuses,
+    warnings: [],
+    diagnostics: {
+      runtime: { ...runtime },
+      surface: runtime.surface,
+      executable: runtime.executable,
+      executableSource: runtime.executableSource,
+      codexSurface: runtime.surface,
+      codexExecutable: runtime.executable,
+      codexExecutableSource: runtime.executableSource,
+      waitAuthority: "host",
+      observation: "host-handoff",
+      hostWaitRequired: true,
+      hostWaitThreadIds: [...hostWaitThreadIds]
+    }
+  };
+}
+
 export async function waitForThreads({
   threadIds,
   cwd,
@@ -439,15 +503,16 @@ export async function waitForThreads({
     || !Number.isSafeInteger(cleanupTimeoutMs) || cleanupTimeoutMs <= 0) {
     throw new SynodError(ERROR_CODES.WAIT_INVALID, "Wait requires thread IDs, a positive timeout, and a poll interval of at most 5000ms.");
   }
+  const now = dependencies.clock || (() => Date.now());
+  const startedAt = now();
   let adapter = dependencies.adapterFactory?.();
   if (!adapter) {
     const runtime = (dependencies.runtimeResolver || resolveCodexRuntime)();
-    if (runtime.surface === "desktop" && !runtime.resolved) {
-      throw new SynodError(
-        ERROR_CODES.CODEX_RUNTIME_AMBIGUOUS,
-        "Synod wait detected Codex Desktop but could not resolve its App Server executable.",
-        { details: runtime }
-      );
+    // Desktop owns the live thread host. Resolve this boundary before any
+    // child App Server/client is constructed; the CLI cannot invoke the host
+    // primitive, so it returns an explicit incomplete handoff instead.
+    if (runtime.surface === "desktop") {
+      return hostHandoffReport(ids, runtime, startedAt, now, signal);
     }
     const clientOptions = { ...(cwd ? { cwd } : {}), codexBin: runtime.executable };
     adapter = appServerThreadStatusAdapter(
@@ -455,9 +520,8 @@ export async function waitForThreads({
       || new CodexAppServerClient(clientOptions)
     );
   }
-  const now = dependencies.clock || (() => Date.now());
-  const startedAt = now();
   const deadline = startedAt + timeoutMs;
+  const waitAuthority: WaitAuthority = "appServer";
   let mode: WaitReport["mode"] = "poll";
   let wakeCount = 0;
   let fallbackPollCount = 0;
@@ -471,6 +535,7 @@ export async function waitForThreads({
   let report: WaitReport | undefined;
   let failure: ReturnType<typeof asSynodError> | undefined;
   const cleanupWarnings: Warning[] = [];
+  let hasObservedSnapshot = false;
 
   try {
     const startOutcome = await boundedOperation(() => adapter.start(), deadline - now(), signal);
@@ -499,6 +564,7 @@ export async function waitForThreads({
         if (readOutcome.outcome === "timeout") { timedOut = true; break; }
         if (readOutcome.outcome === "abort") { aborted = true; break; }
         snapshot = readOutcome.value;
+        hasObservedSnapshot = true;
         for (const item of snapshot.statuses) byId.set(item.threadId, item.status);
         if (notificationFailure) throw notificationFailure;
         if (mode !== "notification" || notificationQueue.length === 0) break;
@@ -541,6 +607,7 @@ export async function waitForThreads({
             if (outcome.outcome === "timeout") { timedOut = true; break; }
             if (outcome.outcome === "abort") { aborted = true; break; }
             snapshot = outcome.snapshot;
+            hasObservedSnapshot = true;
             for (const item of snapshot.statuses) byId.set(item.threadId, item.status);
             wakeCount += 1;
           } else {
@@ -554,6 +621,7 @@ export async function waitForThreads({
             if (pollOutcome.outcome === "timeout") { timedOut = true; break; }
             if (pollOutcome.outcome === "abort") { aborted = true; break; }
             snapshot = pollOutcome.value;
+            hasObservedSnapshot = true;
             for (const item of snapshot.statuses) byId.set(item.threadId, item.status);
             fallbackPollCount += 1;
           }
@@ -563,11 +631,12 @@ export async function waitForThreads({
 
     const statuses = projectStatuses(ids, byId);
     const final = completion(statuses);
-    const hostFallbackThreadIds = statuses
-      .filter(item => item.status.type === "notLoaded")
-      .map(item => item.threadId);
+    const hostWaitThreadIds = hasObservedSnapshot
+      ? statuses.filter(item => item.status.type === "notLoaded").map(item => item.threadId)
+      : [];
     report = {
       mode,
+      waitAuthority,
       threadIds: ids,
       wakeCount,
       fallbackPollCount,
@@ -577,8 +646,10 @@ export async function waitForThreads({
       incomplete: timedOut || aborted || final.incomplete,
       approvalNeeded: final.approvalNeeded,
       userInputNeeded: final.userInputNeeded,
-      hostFallbackRequired: hostFallbackThreadIds.length > 0,
-      hostFallbackThreadIds,
+      hostWaitRequired: hostWaitThreadIds.length > 0,
+      hostWaitThreadIds,
+      hostFallbackRequired: hostWaitThreadIds.length > 0,
+      hostFallbackThreadIds: [...hostWaitThreadIds],
       statuses,
       warnings: [],
       diagnostics: {}
@@ -641,13 +712,16 @@ export function formatWaitReport(report: WaitReport, selection?: WaitSelection):
   for (const task of selection?.tasks || []) {
     lines.push(`${task.taskId}: ${task.state} r${task.revision}; lease ${task.leaseId} g${task.generation}; owner ${task.ownerThread}`);
   }
+  if (selection?.waitAuthority === "canonical") {
+    lines.push("Selection authority: canonical (task state; runtime completion is not implied)");
+  }
   lines.push(
     `Synod wait: ${report.incomplete ? "attention required" : "complete"}`,
-    `Mode: ${report.mode}; wakes ${report.wakeCount}; fallback polls ${report.fallbackPollCount}; elapsed ${report.elapsedMs}ms`,
+    `Authority: ${report.waitAuthority}; Mode: ${report.mode}; wakes ${report.wakeCount}; fallback polls ${report.fallbackPollCount}; elapsed ${report.elapsedMs}ms`,
     `Timed out: ${report.timedOut ? "yes" : "no"}; aborted: ${report.aborted ? "yes" : "no"}; approval needed: ${report.approvalNeeded ? "yes" : "no"}; user input needed: ${report.userInputNeeded ? "yes" : "no"}`
   );
-  if (report.hostFallbackRequired) {
-    lines.push(`Host fallback required: ${report.hostFallbackThreadIds.join(", ")}`);
+  if (report.hostWaitRequired) {
+    lines.push(`Host wait required: ${report.hostWaitThreadIds.join(", ")}`);
   }
   for (const item of report.statuses) {
     const flags = item.status.type === "active" && item.status.activeFlags.length > 0

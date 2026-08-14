@@ -33,6 +33,10 @@ test("summary status retains live lifecycle while omitting historical bulk", () 
     targetDirectory: "/tmp/project",
     healthy: true,
     stateSchemaVersion: 4,
+    runtimeVersion: "0.9.2",
+    installedTemplateVersion: "0.9.3",
+    manifestSchemaVersion: 3,
+    stateTemplateVersion: "0.9.1",
     templateVersion: "0.9.1",
     updatedAt: "2026-08-14T00:00:00.000Z",
     lastEvent: { sequence: 7, id: "event-7", hash: "sha256:event" },
@@ -80,6 +84,10 @@ test("summary status retains live lifecycle while omitting historical bulk", () 
   }) as Record<string, unknown>;
 
   assert.equal(status.healthy, true);
+  assert.equal(status.runtimeVersion, "0.9.2");
+  assert.equal(status.installedTemplateVersion, "0.9.3");
+  assert.equal(status.stateTemplateVersion, "0.9.1");
+  assert.equal(status.templateVersion, "0.9.1");
   assert.deepEqual(status.lastEvent, { sequence: 7, id: "event-7", hash: "sha256:event" });
   assert.deepEqual(status.taskCounts, { READY: 1 });
   assert.deepEqual((status.delta as Record<string, unknown>).counts, { staged: 0 });
@@ -402,6 +410,7 @@ test("summary wait selection retains task selector identity", () => {
     command: "wait",
     data: {
       selection: {
+        waitAuthority: "canonical",
         requestedTaskIds: ["T-001", "T-002"],
         requestedThreadIds: ["thread:reader"],
         tasks: [
@@ -425,7 +434,12 @@ test("summary wait selection retains task selector identity", () => {
         ],
         threadIds: ["thread:worker", "thread:other", "thread:reader"]
       },
+      waitAuthority: "appServer",
       mode: "poll",
+      hostWaitRequired: false,
+      hostWaitThreadIds: [],
+      hostFallbackRequired: false,
+      hostFallbackThreadIds: [],
       statuses: []
     },
     warnings: [],
@@ -452,6 +466,10 @@ test("summary wait selection retains task selector identity", () => {
       ownerThread: "thread:other"
     }
   ]);
+  assert.equal(summary.data.selection.waitAuthority, "canonical");
+  assert.equal(summary.data.waitAuthority, "appServer");
+  assert.equal(summary.data.mode, "poll");
+  assert.equal(summary.data.hostWaitRequired, false);
 });
 
 test("full envelope projection preserves the original payload", () => {

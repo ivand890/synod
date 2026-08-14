@@ -667,12 +667,67 @@ const poll = await waitForThreads({ threadIds: ['thread:package'], timeoutMs: 10
   async start() {}, capabilities: () => ({ notification: false, cursor: false }),
   async read() { return { statuses: [pollReads++ === 0 ? active : idle] }; }, async close() {}, getWarnings: () => [], getDiagnostics: () => ({ installed: true })
 }) });
-if (notification.mode !== 'notification' || notification.wakeCount !== 1 || notification.incomplete || poll.mode !== 'poll' || poll.fallbackPollCount !== 1 || poll.incomplete) process.exit(2);
-process.stdout.write(JSON.stringify({ notification: notification.mode, fallbackPolls: poll.fallbackPollCount }));`,
+let hostClientCreated = false;
+const host = await waitForThreads({ threadIds: ['thread:desktop'] }, {
+  runtimeResolver: () => ({ surface: 'desktop', executable: '/tmp/codex-desktop', executableSource: 'test', resolved: true }),
+  clientFactory: () => { hostClientCreated = true; throw new Error('Desktop host handoff must not create a child client'); }
+});
+if (notification.mode !== 'notification' || notification.waitAuthority !== 'appServer' || notification.wakeCount !== 1 || notification.incomplete || poll.mode !== 'poll' || poll.waitAuthority !== 'appServer' || poll.fallbackPollCount !== 1 || poll.incomplete || hostClientCreated || host.mode !== 'handoff' || host.waitAuthority !== 'host' || !host.incomplete || !host.hostWaitRequired || host.hostWaitThreadIds.join(',') !== 'thread:desktop') process.exit(2);
+process.stdout.write(JSON.stringify({ notification: notification.mode, fallbackPolls: poll.fallbackPollCount, hostAuthority: host.waitAuthority, hostMode: host.mode, hostWaitThreadIds: host.hostWaitThreadIds }));`,
   ], { cwd: consumerDirectory, capture: true });
   const waitDrillResult = jsonRecord(waitDrill, "installed wait drill");
-  if (waitDrillResult.notification !== "notification" || waitDrillResult.fallbackPolls !== 1) {
+  if (waitDrillResult.notification !== "notification" || waitDrillResult.fallbackPolls !== 1 || waitDrillResult.hostAuthority !== "host" || waitDrillResult.hostMode !== "handoff" || !Array.isArray(waitDrillResult.hostWaitThreadIds) || waitDrillResult.hostWaitThreadIds.join(",") !== "thread:desktop") {
     throw new Error(`Installed wait drill returned invalid observability: ${waitDrill}`);
+  }
+  const jobsDrill = run(process.execPath, [
+    "--input-type=module",
+    "--eval",
+    `import { validateJobHandle, validateJobEventSequence } from '@ivand890/synod/src/jobs.js';
+const handle = {
+  schemaVersion: 1,
+  kind: 'task',
+  jobId: 'job:package',
+  registeredAt: '2026-08-14T17:01:00.000Z',
+  waitAuthority: 'appServer',
+  threadId: 'thread:package',
+  taskId: 'T-PACKAGE-JOB',
+  taskRevision: 0,
+  leaseId: 'lease:package',
+  leaseGeneration: 1,
+  ownerThread: 'thread:package'
+};
+const event = (sequence, eventId, previousEventId, observedAt, sourceTimestamp, status, outcome) => ({
+  schemaVersion: 1,
+  jobId: handle.jobId,
+  kind: 'task',
+  threadId: handle.threadId,
+  taskId: handle.taskId,
+  taskRevision: handle.taskRevision,
+  leaseId: handle.leaseId,
+  leaseGeneration: handle.leaseGeneration,
+  ownerThread: handle.ownerThread,
+  observation: { sequence, eventId, previousEventId },
+  observedAt,
+  sourceTimestamp,
+  status,
+  outcome,
+  waitAuthority: 'appServer',
+  provenance: { authority: 'appServer', sourceId: 'server:package', transport: 'poll' }
+});
+const events = [
+  event(1, 'event:package:1', null, '2026-08-14T17:01:01.000Z', '2026-08-14T17:01:00.500Z', { type: 'active', activeFlags: [] }, 'active'),
+  event(2, 'event:package:2', 'event:package:1', '2026-08-14T17:01:02.000Z', null, { type: 'idle' }, 'quiescent')
+];
+validateJobHandle(JSON.parse(JSON.stringify(handle)));
+const validated = validateJobEventSequence(handle, JSON.parse(JSON.stringify(events)));
+let rejectedExtra = false;
+try { validateJobHandle({ ...handle, unexpected: true }); } catch { rejectedExtra = true; }
+if (validated.length !== 2 || validated[1].outcome !== 'quiescent' || !rejectedExtra) process.exit(2);
+process.stdout.write(JSON.stringify({ events: validated.length, rejectedExtra }));`,
+  ], { cwd: consumerDirectory, capture: true });
+  const jobsDrillResult = jsonRecord(jobsDrill, "installed jobs drill");
+  if (jobsDrillResult.events !== 2 || jobsDrillResult.rejectedExtra !== true) {
+    throw new Error(`Installed jobs contract deep import returned invalid validation: ${jobsDrill}`);
   }
   rmSync(path.join(targetDirectory, ".synod", "runtime", "node_modules"), { recursive: true });
   const delegatedVersion = runSynod(["--version"], { cwd: targetDirectory, capture: true });
@@ -698,6 +753,73 @@ process.stdout.write(JSON.stringify({ notification: notification.mode, fallbackP
     || !checkData.checks.some(item => isRecord(item) && item.path === ".synod/task-worktrees" && item.status === "valid")
   ) {
     throw new Error(`Installed CLI failed its project check: ${checkOutput}`);
+  }
+
+  const divergentManifestPath = path.join(targetDirectory, ".synod", "manifest.json");
+  const divergentStatePath = path.join(targetDirectory, ".synod", "state.json");
+  const divergentRuntimePath = path.join(targetDirectory, ".synod", "runtime.json");
+  const divergentManifestContent = readFileSync(divergentManifestPath, "utf8");
+  const divergentManifest = jsonRecord(readFileSync(divergentManifestPath, "utf8"), "divergent manifest");
+  const divergentState = jsonRecord(readFileSync(divergentStatePath, "utf8"), "divergent state");
+  const divergentRuntimeContent = readFileSync(divergentRuntimePath, "utf8");
+  const divergentRuntime = jsonRecord(divergentRuntimeContent, "divergent runtime");
+  const installedTemplateVersion = expectedVersion === "0.9.3" ? "0.9.2" : "0.0.1";
+  const divergentRuntimeVersion = expectedVersion === "0.9.3" ? "0.9.4" : "0.0.2";
+  try {
+    divergentManifest.templateVersion = installedTemplateVersion;
+    divergentRuntime.runtimeVersion = divergentRuntimeVersion;
+    writeFileSync(divergentManifestPath, `${JSON.stringify(divergentManifest, null, 2)}\n`);
+    writeFileSync(divergentRuntimePath, `${JSON.stringify(divergentRuntime, null, 2)}\n`);
+    const directCliModule = pathToFileURL(path.join(installedPackageRoot, "dist", "cli.js")).href;
+    const runInstalledCliDirect = (args: string[]): RunResult => runResult(process.execPath, [
+      "--input-type=module",
+      "--eval",
+      `import { run } from ${JSON.stringify(directCliModule)}; process.exitCode = await run(${JSON.stringify(args)});`
+    ], { cwd: consumerDirectory, capture: true });
+    const divergentCheckResult = runInstalledCliDirect(["check", targetDirectory, "--json"]);
+    const divergentCheckOutput = divergentCheckResult.stdout;
+    const divergentCheckEnvelope = jsonRecord(divergentCheckOutput, "divergent check envelope");
+    const divergentCheckContainer = nestedRecord(
+      divergentCheckEnvelope,
+      divergentCheckEnvelope.ok === true ? "data" : "error",
+      "divergent check envelope",
+    );
+    const divergentCheckData = divergentCheckEnvelope.ok === true
+      ? divergentCheckContainer
+      : nestedRecord(divergentCheckContainer, "details", "divergent check error");
+    if (
+      typeof divergentCheckEnvelope.ok !== "boolean"
+      || divergentCheckData.runtimeVersion !== divergentRuntimeVersion
+      || divergentCheckData.installedTemplateVersion !== installedTemplateVersion
+      || divergentCheckData.stateTemplateVersion !== divergentState.templateVersion
+      || divergentCheckData.templateVersion !== installedTemplateVersion
+      || divergentCheckData.upgradeAvailable !== true
+    ) {
+      throw new Error(`Installed CLI lost divergent project version truth: ${divergentCheckOutput}`);
+    }
+    const divergentStatusResult = runInstalledCliDirect(["status", targetDirectory, "--json", "--view", "summary"]);
+    const divergentStatusOutput = divergentStatusResult.stdout;
+    const divergentStatusEnvelope = jsonRecord(divergentStatusOutput, "divergent status envelope");
+    const divergentStatusContainer = nestedRecord(
+      divergentStatusEnvelope,
+      divergentStatusEnvelope.ok === true ? "data" : "error",
+      "divergent status envelope",
+    );
+    const divergentStatusData = divergentStatusEnvelope.ok === true
+      ? divergentStatusContainer
+      : nestedRecord(divergentStatusContainer, "details", "divergent status error");
+    if (
+      typeof divergentStatusEnvelope.ok !== "boolean"
+      || divergentStatusData.runtimeVersion !== divergentRuntimeVersion
+      || divergentStatusData.installedTemplateVersion !== installedTemplateVersion
+      || divergentStatusData.stateTemplateVersion !== divergentState.templateVersion
+      || divergentStatusData.templateVersion !== divergentState.templateVersion
+    ) {
+      throw new Error(`Installed CLI status did not preserve divergent project version truth: ${divergentStatusOutput}`);
+    }
+  } finally {
+    writeFileSync(divergentManifestPath, divergentManifestContent);
+    writeFileSync(divergentRuntimePath, divergentRuntimeContent);
   }
   writeFileSync(path.join(targetDirectory, "package-recovery.txt"), "base\n");
   writeFileSync(path.join(targetDirectory, "package-worktree.txt"), "base\n");
