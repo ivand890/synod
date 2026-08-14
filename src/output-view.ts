@@ -184,6 +184,60 @@ function compactWait(value: unknown): unknown {
   return result;
 }
 
+function compactGuidanceTask(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  const result = pick(value, [
+    "id",
+    "state",
+    "revision",
+    "dependsOn",
+    "incompleteDependencies",
+    "constraints",
+    "legalTransitions",
+    "actions"
+  ]);
+  if (isRecord(value.correction)) result.correction = pick(value.correction, ["limit", "used"]);
+  if (Object.hasOwn(value, "budget")) {
+    result.budget = isRecord(value.budget)
+      ? pick(value.budget, ["policyRevision", "thresholdStatus", "decisionRequired"])
+      : value.budget;
+  }
+  if (Object.hasOwn(value, "recovery")) {
+    result.recovery = isRecord(value.recovery)
+      ? pick(value.recovery, ["status", "priorGeneration", "priorOwnerThread"])
+      : value.recovery;
+  }
+  result.lease = isRecord(value.lease) ? compactLease(value.lease) : null;
+  result.reservation = isRecord(value.reservation) ? compactReservation(value.reservation) : null;
+  result.proposal = isRecord(value.proposal) ? compactProposal(value.proposal) : null;
+  if (Array.isArray(value.dependsOn)) result.dependsOn = [...value.dependsOn];
+  if (Array.isArray(value.incompleteDependencies)) result.incompleteDependencies = [...value.incompleteDependencies];
+  if (isRecord(value.constraints)) result.constraints = structuredClone(value.constraints);
+  if (Array.isArray(value.legalTransitions)) result.legalTransitions = [...value.legalTransitions];
+  if (Array.isArray(value.actions)) result.actions = structuredClone(value.actions);
+  return result;
+}
+
+function compactTaskGuidance(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  const result: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    result[key] = key === "tasks" && Array.isArray(entry)
+      ? entry.map(task => compactGuidanceTask(task))
+      : compactValue(entry, key);
+  }
+  return result;
+}
+
+function compactTaskNext(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  const result: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    result[key] = key === "guidance" ? compactTaskGuidance(entry) : compactValue(entry, key);
+  }
+  return result;
+}
+
 function compactRotation(value: unknown): unknown {
   if (!isRecord(value)) return value;
   const result = pick(value, ["policy", "handoff", "phase", "currentPhase"]);
@@ -398,6 +452,7 @@ export function projectSummary(command: string | null, data: unknown): unknown {
   if (command === "lease") return compactMutation(data);
   if (command === "wait") return compactWait(data);
   if (command === "proposal") return compactProposalMutation(data);
+  if (command === "task" && isRecord(data) && data.action === "next") return compactTaskNext(data);
   if (command === "handoff") {
     if (!isRecord(data)) return data;
     const result = pick(data, ["targetDirectory", "lastEvent", "focusTaskIds", "recoveryBundle"]);

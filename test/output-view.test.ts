@@ -224,6 +224,178 @@ test("summary proposal submission exposes the exact acceptance action without a 
   });
 });
 
+test("summary task-next preserves guidance gates and exact typed actions", () => {
+  const action = {
+    operation: "lease.bind",
+    arguments: {
+      taskId: "T-GUIDANCE",
+      reservationToken: "reservation-token",
+      leaseId: "lease-guidance",
+      generation: 2,
+      revision: 4,
+      expectedReservedAt: "2026-08-14T00:00:00.000Z",
+      baselineHash: "sha256:baseline",
+      ownerThread: null,
+      evidence: []
+    },
+    requirements: ["owner-thread", "evidence"]
+  };
+  const envelope = {
+    ok: true as const,
+    command: "task",
+    data: {
+      action: "next",
+      guidance: {
+        recommendedTaskId: "T-GUIDANCE",
+        tasks: [{
+          id: "T-GUIDANCE",
+          state: "REVIEW",
+          revision: 4,
+          dependsOn: ["T-BASE"],
+          incompleteDependencies: ["T-BASE"],
+          correction: { limit: 2, used: 1, overrides: [{ reason: "history" }] },
+          budget: { policyRevision: 3, thresholdStatus: "ok", decisionRequired: false, observations: [{ event: "omit" }] },
+          recovery: { status: "PENDING", priorGeneration: 1, priorOwnerThread: "thread:old", endedLease: { id: "omit" } },
+          lease: {
+            id: "lease-guidance",
+            generation: 2,
+            taskId: "T-GUIDANCE",
+            taskRevision: 4,
+            ownerThread: "thread:worker",
+            status: "ACTIVE",
+            heartbeatAt: "2026-08-14T00:01:00.000Z",
+            scopes: ["omit"]
+          },
+          reservation: {
+            id: "reservation-guidance",
+            token: "reservation-token",
+            generation: 2,
+            taskId: "T-GUIDANCE",
+            taskRevision: 4,
+            reservedAt: "2026-08-14T00:00:00.000Z",
+            expiresAt: "2026-08-14T00:05:00.000Z",
+            baseline: { snapshotContentHash: "sha256:baseline", branch: "omit" },
+            status: "RESERVED"
+          },
+          proposal: { bundleId: "sha256:proposal", revision: 4, status: "SEALED", path: ".synod/proposals/omit" },
+          constraints: { reservationRequiresBind: true, recoveryDecisionRequired: true },
+          legalTransitions: ["ACTIVE", "BLOCKED"],
+          actions: [action],
+          evidence: [{ id: "omit-history" }]
+        }],
+        lastEvent: { sequence: 12, id: "event-12", hash: "sha256:event" }
+      }
+    },
+    warnings: [],
+    diagnostics: {}
+  };
+
+  assert.deepEqual(projectJsonEnvelope(envelope, "full"), envelope);
+  const summary = projectJsonEnvelope(envelope, "summary") as typeof envelope;
+  const task = summary.data.guidance.tasks[0]!;
+  assert.equal(task.id, "T-GUIDANCE");
+  assert.deepEqual(task.dependsOn, ["T-BASE"]);
+  assert.deepEqual(task.incompleteDependencies, ["T-BASE"]);
+  assert.deepEqual(task.correction, { limit: 2, used: 1 });
+  assert.deepEqual(task.budget, { policyRevision: 3, thresholdStatus: "ok", decisionRequired: false });
+  assert.deepEqual(task.recovery, { status: "PENDING", priorGeneration: 1, priorOwnerThread: "thread:old" });
+  assert.deepEqual(task.constraints, { reservationRequiresBind: true, recoveryDecisionRequired: true });
+  assert.deepEqual(task.legalTransitions, ["ACTIVE", "BLOCKED"]);
+  assert.deepEqual(task.actions, [action]);
+  assert.equal(Object.hasOwn(task, "evidence"), false);
+  assert.deepEqual(task.lease, {
+    id: "lease-guidance",
+    generation: 2,
+    taskId: "T-GUIDANCE",
+    taskRevision: 4,
+    ownerThread: "thread:worker",
+    status: "ACTIVE",
+    heartbeatAt: "2026-08-14T00:01:00.000Z"
+  });
+  assert.deepEqual(task.reservation, {
+    id: "reservation-guidance",
+    token: "reservation-token",
+    generation: 2,
+    taskId: "T-GUIDANCE",
+    taskRevision: 4,
+    reservedAt: "2026-08-14T00:00:00.000Z",
+    expiresAt: "2026-08-14T00:05:00.000Z",
+    status: "RESERVED",
+    baseline: { snapshotContentHash: "sha256:baseline", branch: "omit" }
+  });
+  assert.deepEqual(task.proposal, {
+    path: ".synod/proposals/omit",
+    bundleId: "sha256:proposal",
+    revision: 4,
+    status: "SEALED"
+  });
+
+  const fencedActions: Array<Record<string, unknown>> = [
+    {
+      operation: "lease.expire",
+      arguments: {
+        taskId: "T-EXPIRED-RESERVATION",
+        reservationToken: "expired-reservation-token",
+        leaseId: "expired-reservation-lease",
+        generation: 3,
+        revision: 2,
+        expectedReservedAt: "2026-08-14T00:00:00.000Z",
+        baselineHash: "sha256:expired-baseline",
+        reason: null
+      },
+      requirements: ["reason"]
+    },
+    {
+      operation: "lease.expire",
+      arguments: {
+        taskId: "T-EXPIRED-LEASE",
+        leaseId: "expired-lease",
+        generation: 4,
+        revision: 2,
+        expectedHeartbeatAt: "2026-08-14T00:01:00.000Z",
+        reason: null
+      },
+      requirements: ["reason"]
+    },
+    {
+      operation: "lease.recover",
+      arguments: {
+        taskId: "T-RECOVER",
+        leaseId: "recover-lease",
+        generation: 5,
+        revision: 3,
+        expectedHeartbeatAt: "2026-08-14T00:02:00.000Z",
+        decision: null,
+        reason: null
+      },
+      requirements: ["decision", "reason"]
+    }
+  ];
+  const fencedSummary = projectSummary("task", {
+    action: "next",
+    guidance: {
+      recommendedTaskId: "T-EXPIRED-RESERVATION",
+      tasks: fencedActions.map((actions, index) => ({
+        id: `T-FENCE-${index}`,
+        state: "READY",
+        revision: 0,
+        dependsOn: [],
+        incompleteDependencies: [],
+        budget: null,
+        recovery: null,
+        lease: null,
+        reservation: null,
+        proposal: null,
+        constraints: {},
+        legalTransitions: [],
+        actions: [actions]
+      }))
+    }
+  }) as Record<string, unknown>;
+  const fencedTasks = (fencedSummary.guidance as Record<string, unknown>).tasks as Array<Record<string, unknown>>;
+  assert.deepEqual(fencedTasks.map(task => task.actions), fencedActions.map(action => [action]));
+});
+
 test("summary wait selection retains task selector identity", () => {
   const envelope = {
     ok: true as const,

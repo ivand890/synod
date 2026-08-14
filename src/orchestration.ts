@@ -555,6 +555,9 @@ export async function nextTaskGuidance(
     .filter(task => !["DONE", "SUPERSEDED"].includes(task.state))
     .map(task => {
       const nominalTransitions = legalTaskTransitions(task, canonical.state.tasks);
+      const correctionReady = ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state);
+      const leaseActivationReady = !task.lease
+        && (task.state === "READY" || correctionReady);
       const expiredReservation = task.leaseReservation?.status === "RESERVED"
         && Date.parse(task.leaseReservation.expiresAt) <= clock();
       const expiredLease = task.lease?.status === "ACTIVE" && Date.parse(task.lease.expiresAt) <= clock();
@@ -563,25 +566,40 @@ export async function nextTaskGuidance(
         : nominalTransitions.filter(to => !(task.state === "ACTIVE" && to === "REVIEW" && !task.lease));
       const incompleteDependencies = task.dependsOn.filter(taskId => canonical.state.tasks[taskId]?.state !== "DONE");
       const transitionActions = legalTransitions.map(to => ({
-        operation: task.state === "ACTIVE" && to === "REVIEW" ? "proposal.submit" : "task.transition",
-        arguments: task.state === "ACTIVE" && to === "REVIEW"
-          ? { taskId: task.id, evidence: [] }
+        ...(leaseActivationReady && to === "ACTIVE"
+          ? {
+              operation: "lease.reserve",
+              arguments: {
+                taskId: task.id,
+                write: [],
+                writeTree: [],
+                read: [],
+                readTree: []
+              },
+              requirements: ["write-scope"]
+            }
           : {
-              taskId: task.id,
-              to,
-              revision: task.state === "ACTIVE" && to === "REVIEW" ? task.revision + 1 : task.revision,
-              evidence: [],
-              ...(to === "BLOCKED" || to === "SUPERSEDED" ? { reason: null } : {})
-            },
-        requirements: [
-          ...(to === "ACTIVE" && !task.lease ? ["active-writer-lease"] : []),
-          ...((task.state === "ACTIVE" && to === "REVIEW")
-            || (task.state === "REVIEW" && to === "ACCEPTED")
-            || (task.state === "ACCEPTED" && to === "VERIFIED")
-            || (to === "ACTIVE" && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)) ? ["evidence"] : []),
-          ...(["BLOCKED", "SUPERSEDED"].includes(to) ? ["reason"] : [])
-        ]
+              operation: task.state === "ACTIVE" && to === "REVIEW" ? "proposal.submit" : "task.transition",
+              arguments: task.state === "ACTIVE" && to === "REVIEW"
+                ? { taskId: task.id, evidence: [] }
+                : {
+                    taskId: task.id,
+                    to,
+                    revision: task.state === "ACTIVE" && to === "REVIEW" ? task.revision + 1 : task.revision,
+                    evidence: [],
+                    ...(to === "BLOCKED" || to === "SUPERSEDED" ? { reason: null } : {})
+                  },
+              requirements: [
+                ...(to === "ACTIVE" && !task.lease ? ["active-writer-lease"] : []),
+                ...((task.state === "ACTIVE" && to === "REVIEW")
+                  || (task.state === "REVIEW" && to === "ACCEPTED")
+                  || (task.state === "ACCEPTED" && to === "VERIFIED")
+                  || (to === "ACTIVE" && correctionReady) ? ["evidence"] : []),
+                ...(["BLOCKED", "SUPERSEDED"].includes(to) ? ["reason"] : [])
+              ]
+            })
       }));
+      const bindRequirements = ["owner-thread", ...(correctionReady ? ["evidence"] : [])];
       const actions = expiredReservation && task.leaseReservation
         ? [{
             operation: "lease.expire",
@@ -611,7 +629,7 @@ export async function nextTaskGuidance(
               ownerThread: null,
               evidence: []
             },
-            requirements: ["owner-thread"]
+            requirements: bindRequirements
           }]
         : expiredLease && task.lease
           ? [{

@@ -1222,6 +1222,63 @@ test("CLI summary view keeps status and lease mutation fences while full stays d
   }
 });
 
+test("CLI task-next summary preserves typed lease-reserve guidance", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-task-next-summary-test-"));
+  const { messages, output } = capturedOutput();
+
+  try {
+    await run(["init", directory], output);
+    initializeGitHead(directory);
+    await run(["checkpoint", directory], output);
+    await run([
+      "task", "add", "T-NEXT",
+      "--objective", "Exercise task-next summary output",
+      "--executor", "synod_implementer",
+      "--acceptance", "Summary keeps guidance gates",
+      "--verification", "pnpm test",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    await run(["task", "transition", "T-NEXT", "READY", "--revision", "0", "--cwd", directory], output);
+    messages.length = 0;
+
+    const fullCode = await run(["task", "next", "--cwd", directory, "--json"], output);
+    const full = JSON.parse(takeMessage(messages));
+    assert.equal(fullCode, 0);
+    const fullTask = full.data.guidance.tasks.find((task: { id: string }) => task.id === "T-NEXT");
+    assert.ok(fullTask);
+    assert.equal(fullTask.actions[0].operation, "lease.reserve");
+    assert.ok(fullTask.constraints);
+    assert.ok(fullTask.legalTransitions.includes("ACTIVE"));
+    assert.ok(Object.hasOwn(fullTask, "incompleteDependencies"));
+    assert.ok(Object.hasOwn(fullTask, "budget"));
+    assert.ok(Object.hasOwn(fullTask, "recovery"));
+
+    messages.length = 0;
+    const summaryCode = await run(["task", "next", "--cwd", directory, "--json", "--view", "summary"], output);
+    const summary = JSON.parse(takeMessage(messages));
+    assert.equal(summaryCode, 0);
+    const summaryTask = summary.data.guidance.tasks.find((task: { id: string }) => task.id === "T-NEXT");
+    assert.ok(summaryTask);
+    assert.equal(summaryTask.actions[0].operation, "lease.reserve");
+    assert.deepEqual(summaryTask.actions[0].arguments, {
+      taskId: "T-NEXT",
+      write: [],
+      writeTree: [],
+      read: [],
+      readTree: []
+    });
+    assert.deepEqual(summaryTask.actions[0].requirements, ["write-scope"]);
+    assert.deepEqual(summaryTask.legalTransitions, fullTask.legalTransitions);
+    assert.deepEqual(summaryTask.constraints, fullTask.constraints);
+    assert.deepEqual(summaryTask.incompleteDependencies, fullTask.incompleteDependencies);
+    assert.deepEqual(summaryTask.budget, fullTask.budget);
+    assert.deepEqual(summaryTask.recovery, fullTask.recovery);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("CLI proposal summary exposes the exact acceptance action after releasing its lease", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-proposal-summary-test-"));
   const { messages, output } = capturedOutput();
