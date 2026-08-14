@@ -632,7 +632,7 @@ export async function waitForThreads({
 
     const statuses = projectStatuses(ids, byId);
     const final = completion(statuses);
-    const hostWaitThreadIds = hasObservedSnapshot
+    const hostWaitThreadIds = hasObservedSnapshot && !aborted
       ? statuses.filter(item => item.status.type === "notLoaded").map(item => item.threadId)
       : [];
     report = {

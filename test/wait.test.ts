@@ -461,6 +461,38 @@ test("an abort during a blocked notification wait stops the wait", async () => {
   assert.equal(adapter.closed, 1);
 });
 
+test("an App Server abort after a snapshot does not request a host handoff", async () => {
+  const controller = new AbortController();
+  const adapter = new FakeAdapter({
+    notification: true,
+    reads: [{ statuses: [
+      { threadId: "thread:desktop", status: { type: "notLoaded" } },
+      active("thread:active")
+    ] }]
+  });
+  adapter.onRead = () => setImmediate(() => controller.abort());
+
+  const report = await waitForThreads({
+    threadIds: ["thread:desktop", "thread:active"],
+    timeoutMs: 1_000,
+    signal: controller.signal
+  }, { adapterFactory: () => adapter });
+
+  assert.equal(report.waitAuthority, "appServer");
+  assert.equal(report.aborted, true);
+  assert.equal(report.incomplete, true);
+  assert.equal(report.hostWaitRequired, false);
+  assert.deepEqual(report.hostWaitThreadIds, []);
+  assert.equal(report.hostFallbackRequired, false);
+  assert.deepEqual(report.hostFallbackThreadIds, []);
+  assert.deepEqual(report.statuses, [
+    { threadId: "thread:desktop", status: { type: "notLoaded" } },
+    active("thread:active")
+  ]);
+  assert.equal(adapter.unsubscribed, 1);
+  assert.equal(adapter.closed, 1);
+});
+
 test("timeout, abort, and approval-needed exits clean up the adapter", async () => {
   const timeoutAdapter = new FakeAdapter({ notification: true, reads: [{ statuses: [active("thread:a")] }] });
   const timedOut = await waitForThreads({ threadIds: ["thread:a"], timeoutMs: 5 }, { adapterFactory: () => timeoutAdapter });
