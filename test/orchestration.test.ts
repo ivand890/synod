@@ -66,7 +66,7 @@ test("task-next guidance advertises fence resolution instead of rejected transit
   await transitionTask({ directory, id: "T-RESERVED", to: "READY", revision: 0 });
   await transitionTask({ directory, id: "T-RESERVATION-EXPIRED", to: "READY", revision: 0 });
   await transitionTask({ directory, id: "T-EXPIRED", to: "READY", revision: 0 });
-  const reserved = await reserveTaskLease({ directory, id: "T-RESERVED", write: ["src/reserved.ts"] });
+  const reserved = await reserveTaskLease({ directory, id: "T-RESERVED", write: ["src/reserved.ts"], reservationTtlSeconds: 600 }, { clock: () => "2026-08-13T10:00:00.000Z" });
   const expiredReservation = await reserveTaskLease({
     directory,
     id: "T-RESERVATION-EXPIRED",

@@ -330,6 +330,30 @@ function compactMutation(value: unknown): unknown {
   return result;
 }
 
+function proposalNextOperation(value: Record<string, unknown>): unknown {
+  const task = isRecord(value.task) ? value.task : undefined;
+  const taskId = typeof task?.id === "string" ? task.id : undefined;
+  const revision = typeof task?.revision === "number" ? task.revision : undefined;
+  if (!taskId || revision === undefined) return null;
+  return {
+    operation: "task.transition",
+    arguments: {
+      taskId,
+      to: "ACCEPTED",
+      revision,
+      evidence: []
+    },
+    requirements: ["evidence"]
+  };
+}
+
+function compactProposalMutation(value: unknown): unknown {
+  const compacted = compactValue(value);
+  if (!isRecord(compacted) || !isRecord(value)) return compacted;
+  compacted.nextOperation = proposalNextOperation(value);
+  return compacted;
+}
+
 export function parseOutputViewArgs(args: string[]): ParsedOutputViewArgs {
   const remaining: string[] = [];
   let view: OutputView = "full";
@@ -373,6 +397,7 @@ export function projectSummary(command: string | null, data: unknown): unknown {
   if (command === "status") return compactStatus(data);
   if (command === "lease") return compactMutation(data);
   if (command === "wait") return compactWait(data);
+  if (command === "proposal") return compactProposalMutation(data);
   if (command === "handoff") {
     if (!isRecord(data)) return data;
     const result = pick(data, ["targetDirectory", "lastEvent", "focusTaskIds", "recoveryBundle"]);

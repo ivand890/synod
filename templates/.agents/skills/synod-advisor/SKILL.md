@@ -72,7 +72,7 @@ After sending that post-bind authorization, use one `__SYNOD_COMMAND__ wait --ta
 
 Treat implementation output as a proposal, never as acceptance.
 
-Use `__SYNOD_COMMAND__ task next --json --view summary` for the routine deterministic canonical task/action view instead of reconstructing revisions, dependencies, budget, recovery, lease, or proposal constraints from chat. Add `--view full` when the omitted history or contract detail is needed. Submit active delivery with `__SYNOD_COMMAND__ proposal submit <task-id> --evidence <ref> --json --view summary`; its receipt preserves the exact next-operation lease fence and derives the revision and current bound lease internally while reusing the existing `ACTIVE` to `REVIEW` mutation. It does not own Codex spawn or replace reserve/bind.
+Use `__SYNOD_COMMAND__ task next --json --view summary` for the routine deterministic canonical task/action view instead of reconstructing revisions, dependencies, budget, recovery, lease, or proposal constraints from chat. Add `--view full` when the omitted history or contract detail is needed. Submit active delivery with `__SYNOD_COMMAND__ proposal submit <task-id> --evidence <ref> --json --view summary`; its summary returns a typed exact-revision acceptance action (`task.transition` to `ACCEPTED`, with evidence required), not a lease fence. Proposal submission releases the writer lease while reusing the existing `ACTIVE` to `REVIEW` mutation. It does not own Codex spawn or replace reserve/bind.
 
 1. Let the configured implementer complete the atomic task and return changed paths, diff summary, tests, and uncertainties.
 2. Have the supervisor inspect the actual diff against the contract and check for unrelated changes.

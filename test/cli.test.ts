@@ -1221,3 +1221,65 @@ test("CLI summary view keeps status and lease mutation fences while full stays d
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("CLI proposal summary exposes the exact acceptance action after releasing its lease", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-proposal-summary-test-"));
+  const { messages, output } = capturedOutput();
+
+  try {
+    await run(["init", directory], output);
+    await mkdir(path.join(directory, "src"), { recursive: true });
+    initializeGitHead(directory);
+    await run(["checkpoint", directory], output);
+    await run([
+      "task", "add", "T-PROPOSAL",
+      "--objective", "Exercise proposal summary output",
+      "--executor", "synod_implementer",
+      "--acceptance", "The proposal can be accepted",
+      "--verification", "pnpm test",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    await run(["task", "transition", "T-PROPOSAL", "READY", "--revision", "0", "--cwd", directory], output);
+    const acquireCode = await run([
+      "lease", "acquire", "T-PROPOSAL",
+      "--owner-thread", "thread:proposal",
+      "--write", "src/proposal.ts",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    assert.equal(acquireCode, 0);
+    const activateCode = await run([
+      "task", "transition", "T-PROPOSAL", "ACTIVE",
+      "--revision", "0",
+      "--cwd", directory
+    ], output);
+    assert.equal(activateCode, 0);
+    await writeFile(path.join(directory, "src/proposal.ts"), "proposal\n", "utf8");
+    messages.length = 0;
+
+    const submitCode = await run([
+      "proposal", "submit", "T-PROPOSAL",
+      "--evidence", "test:proposal-summary",
+      "--cwd", directory,
+      "--json", "--view", "summary"
+    ], output);
+    const summary = JSON.parse(takeMessage(messages));
+    assert.equal(submitCode, 0);
+    assert.equal(summary.data.action, "submit");
+    assert.deepEqual(summary.data.nextOperation, {
+      operation: "task.transition",
+      arguments: { taskId: "T-PROPOSAL", to: "ACCEPTED", revision: 1, evidence: [] },
+      requirements: ["evidence"]
+    });
+    assert.equal(Object.hasOwn(summary.data.nextOperation, "fence"), false);
+    assert.equal(summary.data.task.state, "REVIEW");
+    assert.equal(summary.data.task.lease, null);
+    assert.equal(summary.data.proposal.status, "SEALED");
+    assert.equal(summary.data.evidenceCount, 1);
+    assert.ok(summary.data.lastEvent);
+    assert.ok(summary.data.checkpoint);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

@@ -157,6 +157,73 @@ test("summary lease mutation keeps the exact next-operation fence", () => {
   });
 });
 
+test("summary proposal submission exposes the exact acceptance action without a lease fence", () => {
+  const summary = projectSummary("proposal", {
+    action: "submit",
+    task: {
+      id: "T-PROPOSAL",
+      state: "REVIEW",
+      revision: 3,
+      correctionPolicy: { limit: 2, used: 0 },
+      lease: undefined,
+      proposal: { bundleId: "sha256:proposal", revision: 3, status: "SEALED" }
+    },
+    proposal: {
+      path: ".synod/proposals/lease-1/1",
+      bundleId: "sha256:proposal",
+      leaseId: "lease-1",
+      generation: 1,
+      baseRevision: 2,
+      revision: 3,
+      status: "SEALED"
+    },
+    evidence: [{ id: "E-1", kind: "test", revision: 3, reference: "test:proposal" }],
+    checkpoint: {
+      capturedAt: "2026-08-14T00:00:00.000Z",
+      available: true,
+      branch: "main",
+      head: "abc",
+      worktree: { clean: true, entries: 0, fingerprint: "sha256:worktree", snapshot: { contentHash: "sha256:snapshot" } }
+    },
+    lastEvent: { sequence: 8, id: "event-8", hash: "sha256:event" }
+  }) as Record<string, unknown>;
+
+  assert.deepEqual(summary.nextOperation, {
+    operation: "task.transition",
+    arguments: { taskId: "T-PROPOSAL", to: "ACCEPTED", revision: 3, evidence: [] },
+    requirements: ["evidence"]
+  });
+  assert.equal(Object.hasOwn(summary.nextOperation as Record<string, unknown>, "fence"), false);
+  assert.deepEqual(summary.task, {
+    id: "T-PROPOSAL",
+    state: "REVIEW",
+    revision: 3,
+    correctionPolicy: { limit: 2, used: 0 },
+    lease: null,
+    leaseReservation: null,
+    proposal: { bundleId: "sha256:proposal", revision: 3, status: "SEALED" },
+    recovery: null
+  });
+  assert.deepEqual(summary.proposal, {
+    path: ".synod/proposals/lease-1/1",
+    bundleId: "sha256:proposal",
+    leaseId: "lease-1",
+    generation: 1,
+    baseRevision: 2,
+    revision: 3,
+    status: "SEALED"
+  });
+  assert.equal(summary.evidenceCount, 1);
+  assert.deepEqual(summary.lastEvent, { sequence: 8, id: "event-8", hash: "sha256:event" });
+  assert.deepEqual(summary.checkpoint, {
+    capturedAt: "2026-08-14T00:00:00.000Z",
+    available: true,
+    branch: "main",
+    head: "abc",
+    worktree: { clean: true, entries: 0, fingerprint: "sha256:worktree" }
+  });
+});
+
 test("summary wait selection retains task selector identity", () => {
   const envelope = {
     ok: true as const,
