@@ -446,8 +446,9 @@ function hostHandoffReport(
   now: () => number,
   signal?: AbortSignal
 ): WaitReport {
-  const hostWaitThreadIds = [...threadIds];
-  const statuses = hostWaitThreadIds.map(threadId => ({
+  const aborted = Boolean(signal?.aborted);
+  const hostWaitThreadIds = aborted ? [] : [...threadIds];
+  const statuses = threadIds.map(threadId => ({
     threadId,
     // Desktop host state is intentionally not observed by this CLI. Keep the
     // status incomplete rather than manufacturing an idle/completed result.
@@ -461,7 +462,7 @@ function hostHandoffReport(
     fallbackPollCount: 0,
     elapsedMs: Math.max(0, now() - startedAt),
     timedOut: false,
-    aborted: Boolean(signal?.aborted),
+    aborted,
     incomplete: true,
     approvalNeeded: false,
     userInputNeeded: false,
@@ -483,7 +484,7 @@ function hostHandoffReport(
       codexExecutableSource: runtime.executableSource,
       waitAuthority: "host",
       observation: "host-handoff",
-      hostWaitRequired: true,
+      hostWaitRequired: hostWaitThreadIds.length > 0,
       hostWaitThreadIds: [...hostWaitThreadIds]
     }
   };

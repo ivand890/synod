@@ -381,6 +381,39 @@ test("Desktop host handoff does not require an App Server executable", async () 
   assert.equal(report.diagnostics.codexExecutableSource, "PATH-fallback");
 });
 
+test("an already-aborted Desktop wait does not request a host handoff", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let clientCreated = false;
+  const report = await waitForThreads({
+    threadIds: ["thread:a"],
+    timeoutMs: 100,
+    signal: controller.signal
+  }, {
+    runtimeResolver: () => ({
+      surface: "desktop",
+      executable: "/Applications/Codex Desktop/codex",
+      executableSource: "desktop-process",
+      resolved: true
+    }),
+    clientFactory: () => {
+      clientCreated = true;
+      throw new Error("must not create client");
+    }
+  });
+
+  assert.equal(clientCreated, false);
+  assert.equal(report.aborted, true);
+  assert.equal(report.incomplete, true);
+  assert.equal(report.hostWaitRequired, false);
+  assert.deepEqual(report.hostWaitThreadIds, []);
+  assert.equal(report.hostFallbackRequired, false);
+  assert.deepEqual(report.hostFallbackThreadIds, []);
+  assert.equal(report.diagnostics.hostWaitRequired, false);
+  assert.deepEqual(report.diagnostics.hostWaitThreadIds, []);
+  assert.deepEqual(report.statuses, [{ threadId: "thread:a", status: { type: "notLoaded" } }]);
+});
+
 test("the overall deadline bounds an initial status read", async () => {
   let closed = 0;
   const report = await waitForThreads({ threadIds: ["thread:a"], timeoutMs: 5 }, {
