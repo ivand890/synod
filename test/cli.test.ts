@@ -7,6 +7,7 @@ import test from "node:test";
 import { WARNING_CODES, baseDiagnostics } from "../src/contracts.js";
 import { ERROR_CODES, asSynodError } from "../src/errors.js";
 import { run } from "../src/cli.js";
+import { parseLeaseArgs, parseProposalArgs, parseTaskArgs, parseWorktreeArgs } from "../src/command-options.js";
 import { packageVersion } from "../src/package.js";
 
 const bin = path.resolve("bin/synod.js");
@@ -95,36 +96,42 @@ test("the installed entry point emits one stable JSON error for an unmanaged run
   }
 });
 
-test("prints version and help", () => {
-  const version = spawnSync(process.execPath, [bin, "--version"], { encoding: "utf8" });
-  const help = spawnSync(process.execPath, [bin, "--help"], { encoding: "utf8" });
+test("prints version and help", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-version-help-test-"));
 
-  assert.equal(version.status, 0);
-  assert.equal(version.stdout.trim(), packageVersion);
-  assert.equal(help.status, 0);
-  assert.match(help.stdout, /synod init/);
-  assert.match(help.stdout, /synod usage/);
-  assert.match(help.stdout, /synod wait/);
-  assert.match(help.stdout, /synod upgrade/);
-  assert.match(help.stdout, /synod doctor/);
-  assert.match(help.stdout, /synod status/);
-  assert.match(help.stdout, /synod handoff/);
-  assert.match(help.stdout, /--explain/);
-  assert.match(help.stdout, /synod task add/);
-  assert.match(help.stdout, /synod task override/);
-  assert.match(help.stdout, /synod task split/);
-  assert.match(help.stdout, /synod lease acquire/);
-  assert.match(help.stdout, /synod lease reserve/);
-  assert.match(help.stdout, /synod lease bind/);
-  assert.match(help.stdout, /synod lease recover/);
-  assert.match(help.stdout, /synod worktree create/);
-  assert.match(help.stdout, /synod worktree seal/);
-  assert.match(help.stdout, /synod worktree integrate/);
-  assert.match(help.stdout, /synod worktree cleanup/);
-  assert.match(help.stdout, /synod worktree status/);
-  assert.match(help.stdout, /--write-tree/);
-  assert.match(help.stdout, /--read-tree/);
-  assert.match(help.stdout, /synod bundle export/);
+  try {
+    const version = spawnSync(process.execPath, [bin, "--version"], { cwd: directory, encoding: "utf8" });
+    const help = spawnSync(process.execPath, [bin, "--help"], { cwd: directory, encoding: "utf8" });
+
+    assert.equal(version.status, 0);
+    assert.equal(version.stdout.trim(), packageVersion);
+    assert.equal(help.status, 0);
+    assert.match(help.stdout, /synod init/);
+    assert.match(help.stdout, /synod usage/);
+    assert.match(help.stdout, /synod wait/);
+    assert.match(help.stdout, /synod upgrade/);
+    assert.match(help.stdout, /synod doctor/);
+    assert.match(help.stdout, /synod status/);
+    assert.match(help.stdout, /synod handoff/);
+    assert.match(help.stdout, /--explain/);
+    assert.match(help.stdout, /synod task add/);
+    assert.match(help.stdout, /synod task override/);
+    assert.match(help.stdout, /synod task split/);
+    assert.match(help.stdout, /synod lease acquire/);
+    assert.match(help.stdout, /synod lease reserve/);
+    assert.match(help.stdout, /synod lease bind/);
+    assert.match(help.stdout, /synod lease recover/);
+    assert.match(help.stdout, /synod worktree create/);
+    assert.match(help.stdout, /synod worktree seal/);
+    assert.match(help.stdout, /synod worktree integrate/);
+    assert.match(help.stdout, /synod worktree cleanup/);
+    assert.match(help.stdout, /synod worktree status/);
+    assert.match(help.stdout, /--write-tree/);
+    assert.match(help.stdout, /--read-tree/);
+    assert.match(help.stdout, /synod bundle export/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("init emits versioned JSON for success and conflicts", async () => {
@@ -259,7 +266,7 @@ test("worktree parsing requires a complete exact lease fence", async () => {
   }
 });
 
-test("wait parsing rejects missing threads and out-of-range fallback intervals", async () => {
+test("wait parsing requires a task or thread and rejects out-of-range fallback intervals", async () => {
   for (const args of [
     ["wait", "--json"],
     ["wait", "--thread", "thread:one", "--poll-interval-ms", "99", "--json"]
@@ -270,6 +277,164 @@ test("wait parsing rejects missing threads and out-of-range fallback intervals",
     assert.equal(status, 1);
     assert.equal(envelope.error.code, ERROR_CODES.WAIT_INVALID);
   }
+});
+
+test("typed task-next and proposal-submit parsing reject copied transition fences", () => {
+  assert.deepEqual(parseTaskArgs(["next", "--cwd", "/tmp/project", "--json"]), {
+    action: "next",
+    directory: "/tmp/project",
+    json: true,
+    actor: "supervisor"
+  });
+  assert.deepEqual(parseProposalArgs([
+    "submit", "t-api", "--evidence", "test:pass", "--evidence", "test:pass", "--cwd", "/tmp/project", "--json"
+  ]), {
+    action: "submit",
+    id: "t-api",
+    evidence: ["test:pass"],
+    directory: "/tmp/project",
+    json: true,
+    actor: "supervisor"
+  });
+  assert.throws(
+    () => parseProposalArgs(["submit", "T-API", "--revision", "1", "--evidence", "test:pass"]),
+    error => error instanceof Error && (error as Error & { code?: string }).code === ERROR_CODES.UNKNOWN_OPTION
+  );
+});
+
+test("recognized nested help wins before positional validation and mutation", async () => {
+  const parserCases = [
+    { parser: parseLeaseArgs, actions: ["reserve", "bind", "cancel", "acquire", "heartbeat", "release", "expire", "revoke", "recover"] },
+    { parser: parseWorktreeArgs, actions: ["create", "seal", "integrate", "cleanup", "status"] },
+    { parser: parseTaskArgs, actions: ["add", "transition", "override", "split", "next"] },
+    { parser: parseProposalArgs, actions: ["submit"] }
+  ];
+  for (const { parser, actions } of parserCases) {
+    for (const action of actions) assert.deepEqual(parser([action, "--help"]), { help: true });
+  }
+  assert.deepEqual(parseTaskArgs(["next", "--json", "--help"]), { help: true });
+  assert.deepEqual(parseTaskArgs(["add", "T-1", "--help"]), { help: true });
+  assert.deepEqual(parseProposalArgs(["submit", "T-1", "--help"]), { help: true });
+  assert.throws(
+    () => parseLeaseArgs(["unknown", "--help"]),
+    error => error instanceof Error
+      && (error as Error & { code?: string }).code === ERROR_CODES.UNEXPECTED_ARGUMENT
+      && error.message === "Unknown lease action: unknown"
+  );
+  assert.throws(
+    () => parseWorktreeArgs(["unknown", "--help"]),
+    error => error instanceof Error
+      && (error as Error & { code?: string }).code === ERROR_CODES.UNEXPECTED_ARGUMENT
+      && error.message === "Unknown worktree action: unknown"
+  );
+  assert.throws(
+    () => parseTaskArgs(["unknown", "--help"]),
+    error => error instanceof Error
+      && (error as Error & { code?: string }).code === ERROR_CODES.UNEXPECTED_ARGUMENT
+      && error.message === "Unknown task action: unknown"
+  );
+  assert.throws(
+    () => parseProposalArgs(["unknown", "--help"]),
+    error => error instanceof Error
+      && (error as Error & { code?: string }).code === ERROR_CODES.UNEXPECTED_ARGUMENT
+      && error.message === "Unknown proposal action: unknown"
+  );
+  assert.throws(() => parseLeaseArgs(["reserve"]), /Lease reserve is missing its task ID/);
+  assert.throws(() => parseWorktreeArgs(["create"]), /Worktree create is missing its task ID/);
+  assert.throws(() => parseTaskArgs(["add"]), /Task add is missing required positional arguments/);
+  assert.throws(() => parseProposalArgs(["submit"]), /Proposal submit requires a task ID/);
+  for (const { parser, action } of [
+    { parser: parseLeaseArgs, action: "reserve" },
+    { parser: parseWorktreeArgs, action: "create" },
+    { parser: parseTaskArgs, action: "add" },
+    { parser: parseProposalArgs, action: "submit" }
+  ]) {
+    assert.throws(
+      () => parser([action, "T-1", "--not-a-real-option", "--help"]),
+      error => error instanceof Error
+        && (error as Error & { code?: string }).code === ERROR_CODES.UNKNOWN_OPTION
+        && error.message === "Unknown option: --not-a-real-option"
+    );
+  }
+  assert.throws(
+    () => parseTaskArgs(["next", "--not-a-real-option", "--help"]),
+    error => error instanceof Error
+      && (error as Error & { code?: string }).code === ERROR_CODES.UNKNOWN_OPTION
+      && error.message === "Unknown option: --not-a-real-option"
+  );
+
+  const { messages, output } = capturedOutput();
+  let mutationCalls = 0;
+  const dependencies = {
+    beforeMutationHook() { mutationCalls += 1; },
+    worktreeDependencies: { worktreeHook() { mutationCalls += 1; } }
+  };
+  for (const args of [
+    ["lease", "reserve", "--help"],
+    ["lease", "bind", "-h"],
+    ["worktree", "create", "--help"],
+    ["task", "add", "-h"],
+    ["proposal", "submit", "--help"],
+    ["task", "next", "--json", "--help"],
+    ["task", "add", "T-1", "--help"],
+    ["proposal", "submit", "T-1", "--help"]
+  ]) {
+    messages.length = 0;
+    assert.equal(await run(args, output, dependencies), 0);
+    assert.match(takeMessage(messages), /synod task add/);
+  }
+  assert.equal(mutationCalls, 0);
+});
+
+test("wait accepts repeatable mixed task and thread selectors", async () => {
+  const { messages, output } = capturedOutput();
+  const status = await run([
+    "wait",
+    "--task", "t-api",
+    "--task", "T-API",
+    "--thread", "thread:reader",
+    "--json"
+  ], output, {
+    waitSelectionResolver: async options => {
+      assert.deepEqual(options, {
+        directory: process.cwd(),
+        taskIds: ["T-API"],
+        threadIds: ["thread:reader"]
+      });
+      return {
+        requestedTaskIds: ["T-API"],
+        requestedThreadIds: ["thread:reader"],
+        tasks: [{
+          taskId: "T-API",
+          state: "ACTIVE",
+          revision: 2,
+          leaseId: "lease:api",
+          generation: 3,
+          ownerThread: "thread:writer"
+        }],
+        threadIds: ["thread:writer", "thread:reader"]
+      };
+    },
+    waitAdapterFactory: () => ({
+      async start() {},
+      capabilities() { return { notification: false, cursor: false }; },
+      async read(threadIds) {
+        return { statuses: threadIds.map(threadId => ({ threadId, status: { type: "idle" as const } })) };
+      },
+      async close() {}
+    })
+  });
+  const envelope = JSON.parse(takeMessage(messages));
+  assert.equal(status, 0);
+  assert.deepEqual(envelope.data.selection.tasks, [{
+    taskId: "T-API",
+    state: "ACTIVE",
+    revision: 2,
+    leaseId: "lease:api",
+    generation: 3,
+    ownerThread: "thread:writer"
+  }]);
+  assert.deepEqual(envelope.data.threadIds, ["thread:writer", "thread:reader"]);
 });
 
 test("check and doctor emit failure JSON when their health gates fail", async () => {
@@ -312,84 +477,95 @@ test("check and doctor emit failure JSON when their health gates fail", async ()
 });
 
 test("doctor text identifies the Desktop executable, version, and shared Codex home", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-doctor-text-test-"));
   const { messages, output } = capturedOutput();
   const executable = "/Applications/ChatGPT.app/Contents/Resources/codex";
-  const status = await run(["doctor"], output, {
-    doctorRuntimeResolver: () => ({
-      surface: "desktop",
-      executable,
-      executableSource: "desktop-process",
-      resolved: true
-    }),
-    doctorClientFactory: options => ({
-      async start() { assert.equal(options.codexBin, executable); },
-      async probeCapabilities() {},
-      async listModels() {
-        return [{
-          id: "gpt-5.5",
-          supportedReasoningEfforts: ["low", "medium", "high", "xhigh"].map(reasoningEffort => ({ reasoningEffort }))
-        }];
-      },
-      async close() {},
-      getWarnings() { return []; },
-      getDiagnostics() {
-        return {
-          codexExecutable: executable,
-          codexHome: "/Users/test/.codex",
-          codexSurface: "desktop",
-          codexVersion: "0.147.0",
-          appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
-        };
-      }
-    })
-  });
 
-  assert.equal(status, 0);
-  assert.match(messages[0] ?? "", /Codex Desktop: 0\.147\.0 \(known-good; desktop\)/);
-  assert.match(messages[0] ?? "", /Codex executable: \/Applications\/ChatGPT\.app\/Contents\/Resources\/codex \(desktop-process\)/);
-  assert.match(messages[0] ?? "", /Codex home: \/Users\/test\/\.codex/);
-});
-
-test("shared client factories receive the doctor runtime executable", async () => {
-  const { output } = capturedOutput();
-  const executable = "/opt/codex/bin/codex";
-  const receivedExecutables: Array<string | undefined> = [];
-
-  const status = await run(["doctor"], output, {
-    doctorRuntimeResolver: () => ({
-      surface: "cli",
-      executable,
-      executableSource: "path",
-      resolved: true
-    }),
-    clientFactory: options => {
-      receivedExecutables.push(options?.codexBin);
-      return {
-        async start() {},
+  try {
+    const status = await run(["doctor", directory], output, {
+      doctorRuntimeResolver: () => ({
+        surface: "desktop",
+        executable,
+        executableSource: "desktop-process",
+        resolved: true
+      }),
+      doctorClientFactory: options => ({
+        async start() { assert.equal(options.codexBin, executable); },
         async probeCapabilities() {},
         async listModels() {
           return [{
             id: "gpt-5.5",
-            supportedReasoningEfforts: ["low", "medium", "high", "xhigh"]
+            supportedReasoningEfforts: ["low", "medium", "high", "xhigh"].map(reasoningEffort => ({ reasoningEffort }))
           }];
         },
-        async listThreads() { return { data: [], nextCursor: null }; },
         async close() {},
         getWarnings() { return []; },
         getDiagnostics() {
           return {
             codexExecutable: executable,
-            codexSurface: "cli",
+            codexHome: "/Users/test/.codex",
+            codexSurface: "desktop",
             codexVersion: "0.147.0",
             appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
           };
         }
-      };
-    }
-  });
+      })
+    });
 
-  assert.equal(status, 0);
-  assert.deepEqual(receivedExecutables, [executable]);
+    assert.equal(status, 0);
+    assert.match(messages[0] ?? "", /Codex Desktop: 0\.147\.0 \(known-good; desktop\)/);
+    assert.match(messages[0] ?? "", /Codex executable: \/Applications\/ChatGPT\.app\/Contents\/Resources\/codex \(desktop-process\)/);
+    assert.match(messages[0] ?? "", /Codex home: \/Users\/test\/\.codex/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("shared client factories receive the doctor runtime executable", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-doctor-factory-test-"));
+  const { output } = capturedOutput();
+  const executable = "/opt/codex/bin/codex";
+  const receivedExecutables: Array<string | undefined> = [];
+
+  try {
+    const status = await run(["doctor", directory], output, {
+      doctorRuntimeResolver: () => ({
+        surface: "cli",
+        executable,
+        executableSource: "path",
+        resolved: true
+      }),
+      clientFactory: options => {
+        receivedExecutables.push(options?.codexBin);
+        return {
+          async start() {},
+          async probeCapabilities() {},
+          async listModels() {
+            return [{
+              id: "gpt-5.5",
+              supportedReasoningEfforts: ["low", "medium", "high", "xhigh"]
+            }];
+          },
+          async listThreads() { return { data: [], nextCursor: null }; },
+          async close() {},
+          getWarnings() { return []; },
+          getDiagnostics() {
+            return {
+              codexExecutable: executable,
+              codexSurface: "cli",
+              codexVersion: "0.147.0",
+              appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
+            };
+          }
+        };
+      }
+    });
+
+    assert.equal(status, 0);
+    assert.deepEqual(receivedExecutables, [executable]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("doctor text never renders an undefined Codex surface", async () => {
@@ -594,6 +770,7 @@ test("lease reservation commands expose the pre-spawn and post-bind authorizatio
     messages.length = 0;
     await addReady("T-RESERVE");
     await addReady("T-CANCEL");
+    await addReady("T-SUMMARY");
 
     const reserveCode = await run([
       "lease", "reserve", "T-RESERVE",
@@ -651,6 +828,50 @@ test("lease reservation commands expose the pre-spawn and post-bind authorizatio
     assert.equal(bound.data.lease.id, reserved.data.reservation.id);
     assert.equal(bound.data.lease.ownerThread, "thread:spawned");
     assert.deepEqual(bound.data.evidence, []);
+    assert.deepEqual(bound.data.activation, {
+      taskId: "T-RESERVE",
+      revision: 0,
+      leaseId: reserved.data.reservation.id,
+      generation: reserved.data.reservation.generation,
+      ownerThread: "thread:spawned",
+      boundAt: bound.data.lease.acquiredAt,
+      event: bound.data.lastEvent,
+      writeAuthorized: true,
+      supervisorNotification: { status: "required-not-observed" },
+      followUp: {
+        operation: "wait",
+        arguments: { taskIds: ["T-RESERVE"] },
+        requirements: []
+      }
+    });
+    assert.equal(JSON.stringify(bound).includes(reserved.data.reservation.token), false);
+
+    const summaryReserveCode = await run([
+      "lease", "reserve", "T-SUMMARY",
+      "--write", "src/activation-summary.ts",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const summaryReserved = JSON.parse(takeMessage(messages));
+    assert.equal(summaryReserveCode, 0);
+    const summaryBindCode = await run([
+      "lease", "bind", "T-SUMMARY",
+      ...fence(summaryReserved.data.reservation),
+      "--owner-thread", "thread:summary",
+      "--cwd", directory,
+      "--json", "--view", "summary"
+    ], output);
+    const summaryBound = JSON.parse(takeMessage(messages));
+    assert.equal(summaryBindCode, 0);
+    assert.equal(summaryBound.data.writeAuthorized, true);
+    assert.deepEqual(summaryBound.data.activation.followUp, {
+      operation: "wait",
+      arguments: { taskIds: ["T-SUMMARY"] },
+      requirements: []
+    });
+    assert.deepEqual(summaryBound.data.activation.event, summaryBound.data.lastEvent);
+    assert.equal(summaryBound.data.activation.supervisorNotification.status, "required-not-observed");
+    assert.equal(JSON.stringify(summaryBound).includes(summaryReserved.data.reservation.token), false);
 
     const reviewCode = await run([
       "task", "transition", "T-RESERVE", "REVIEW",
@@ -806,7 +1027,7 @@ test("wait command propagates cwd and returns failure for an incomplete result",
     "--json"
   ], output, {
     waitClientFactory: options => {
-      assert.deepEqual(options, { cwd: "/tmp/project" });
+      assert.deepEqual(options, { cwd: "/tmp/project", codexBin: "/tmp/codex-desktop" });
       return {
         async start() {},
         async request() {
@@ -815,7 +1036,13 @@ test("wait command propagates cwd and returns failure for an incomplete result",
         async close() {},
         supportsThreadStatusNotifications: () => false
       };
-    }
+    },
+    waitRuntimeResolver: () => ({
+      surface: "desktop",
+      executable: "/tmp/codex-desktop",
+      executableSource: "desktop-process",
+      resolved: true
+    })
   });
   const envelope = JSON.parse(takeMessage(messages));
 
@@ -939,4 +1166,58 @@ test("bundle restore requires an explicit destination checkout", async () => {
   assert.equal(envelope.ok, false);
   assert.equal(envelope.error.code, ERROR_CODES.UNEXPECTED_ARGUMENT);
   assert.equal(envelope.error.details.option, "--cwd");
+});
+
+test("CLI summary view keeps status and lease mutation fences while full stays default", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-output-view-test-"));
+  const { messages, output } = capturedOutput();
+
+  try {
+    await run(["init", directory], output);
+    initializeGitHead(directory);
+    await run(["checkpoint", directory], output);
+    messages.length = 0;
+    await run([
+      "task", "add", "T-VIEW",
+      "--objective", "Exercise summary output",
+      "--executor", "synod_implementer",
+      "--acceptance", "Summary keeps lifecycle",
+      "--verification", "pnpm test",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    messages.length = 0;
+    await run(["task", "transition", "T-VIEW", "READY", "--revision", "0", "--cwd", directory], output);
+    messages.length = 0;
+
+    const fullCode = await run(["status", directory, "--json"], output);
+    const full = JSON.parse(takeMessage(messages));
+    assert.equal(fullCode, 0);
+    assert.ok(full.data.tasks[0].evidence);
+
+    const summaryCode = await run(["status", directory, "--json", "--view", "summary"], output);
+    const summary = JSON.parse(takeMessage(messages));
+    assert.equal(summaryCode, 0);
+    assert.equal(summary.data.healthy, true);
+    assert.equal(summary.data.tasks[0].state, "READY");
+    assert.equal(Object.hasOwn(summary.data.tasks[0], "evidence"), false);
+
+    const reserveCode = await run([
+      "lease", "reserve", "T-VIEW", "--write", "src/output-view.ts", "--cwd", directory,
+      "--json", "--view", "summary"
+    ], output);
+    const reserved = JSON.parse(takeMessage(messages));
+    assert.equal(reserveCode, 0);
+    assert.deepEqual(reserved.data.nextOperation.fence, {
+      reservationToken: reserved.data.reservation.token,
+      leaseId: reserved.data.reservation.id,
+      generation: reserved.data.reservation.generation,
+      revision: reserved.data.reservation.taskRevision,
+      expectedReservedAt: reserved.data.reservation.reservedAt,
+      baselineHash: reserved.data.reservation.baseline.snapshotContentHash
+    });
+
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

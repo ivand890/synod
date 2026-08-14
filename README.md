@@ -124,11 +124,13 @@ Every transition requires an exact task revision. Submitting work from `ACTIVE` 
 ```bash
 synod task transition T-001 READY --revision 0
 synod task transition T-001 ACTIVE --revision 0
-synod task transition T-001 REVIEW --revision 1 --evidence "commit:abc123"
+synod proposal submit T-001 --evidence "commit:abc123"
 synod task transition T-001 ACCEPTED --revision 1 --evidence "review:approved"
 synod task transition T-001 VERIFIED --revision 1 --evidence "test:pnpm-test:pass"
 synod task transition T-001 DONE --revision 1
 ```
+
+Use `synod task next --json` for a deterministic read-only view in canonical task order. It exposes each unfinished task's revision, dependency blockers, correction and budget gates, recovery, lease/reservation, proposal identity, legal transitions, and structured next actions. `proposal submit` reads the active task revision and bound lease from canonical state, then reuses the existing `ACTIVE` to `REVIEW` transition; it does not create a second proposal protocol or require copied fencing fields.
 
 Each evidence item also captures the Git branch, exact `HEAD`, and content-sensitive working-tree fingerprint observed for that event. State mutations hold an exclusive project lock, validate the complete event hash chain, append one event, and atomically replace state plus its Markdown projection.
 
@@ -153,6 +155,8 @@ synod lease bind T-001 \
   --owner-thread thread:019f... --ttl-seconds 300 --heartbeat-seconds 60 \
   --json
 ```
+
+The successful bind JSON adds an activation handoff derived from the existing `lease.bound` event: task and lease identity, `boundAt`, the exact event `{ sequence, id, hash }`, `writeAuthorized:true`, `supervisorNotification.status: "required-not-observed"`, and a typed `wait --task T-001` follow-up. The supervisor must send explicit write authorization to the worker only after bind succeeds, then run that task-aware wait; the receipt never claims that Codex notification, receipt, or execution was observed and never repeats the reservation token.
 
 If spawn fails, run `lease cancel` with the complete reservation fence and a reason. If no owner ID returns, wait for the reservation TTL and use the reservation form of `lease expire`. Neither pre-bind cleanup path creates an abandoned-worker recovery record because the reservation never authorized writes. Synod cannot invoke Codex `spawn_agent`; an atomic `delegate start` is deferred until a typed integration can perform both halves of the handshake.
 
@@ -222,6 +226,14 @@ While that decision is pending, Synod rejects new leases, heartbeats, resume/rea
 ### Explicit phase rotation
 
 Project-level rotation is opt-in. A policy binds the initial root session and canonical start event, then enables only the thresholds supplied by the caller:
+
+Before enabling a policy, run the read-only adaptive preflight:
+
+```bash
+synod rotation suggest --json
+```
+
+For an unconfigured project it returns deterministic 80% context, three-compaction, 50-wait, and phase-sized completed-task thresholds together with a structured `rotation.set` action. Live observations remain explicitly unavailable until the operator supplies the root session and records the policy. For a configured project the suggestion reuses the existing rotation report and returns `rotation.report`, `rotation.prepare`, or `rotation.verify` as the legal next typed action. It never sets policy or prepares a handoff.
 
 ```bash
 synod rotation set --session thread:old-root --since-event 12 \
@@ -380,14 +392,16 @@ For a session that is still running, the report is a persisted snapshot: the act
 
 ## Change-driven thread waiting
 
-Wait for one or more child threads to become quiescent without a fixed busy-poll loop:
+Wait for one or more canonical delegated tasks or explicit child threads to become quiescent without a fixed busy-poll loop. Task selectors resolve the currently bound lease owner read-only, while explicit threads remain useful for reviewers and explorers that do not own a canonical writer lease:
 
 ```bash
-synod wait --thread thread:one --thread thread:two --timeout-seconds 300
-synod wait --thread thread:one --poll-interval-ms 1000 --json
+synod wait --task T-API --task T-UI --timeout-seconds 300 --json
+synod wait --task T-API --thread thread:reviewer --poll-interval-ms 1000 --json
 ```
 
-Synod prefers App Server status notifications, then a status cursor when available. If neither capability exists it uses a bounded polling fallback of at most five seconds. Text and JSON report `mode`, `wakeCount`, `fallbackPollCount`, elapsed time, timeout/abort state, and whether approval or user input is required. Every path bounds startup, waiting, listener removal, and client cleanup; cleanup degradation is emitted as a warning instead of leaving a process handle alive.
+`--task` is repeatable and may be combined with repeatable `--thread`; duplicate owner identities collapse into one multi-thread wait. JSON preserves each observed task revision, lease ID, generation, and owner alongside the resolved unique thread list. Selection validates canonical state but never mutates it, heartbeats a lease, or advances acceptance.
+
+Synod resolves the active Codex surface before starting App Server, prefers status notifications, and otherwise uses a bounded polling fallback of at most five seconds. A separate App Server process may report a thread as `notLoaded` even while the Codex host still runs it; Synod therefore returns attention with `hostFallbackRequired` and the exact affected thread IDs instead of claiming completion. The advisor must then use the host's direct wait primitive for those IDs. Text and JSON also report `mode`, `wakeCount`, `fallbackPollCount`, elapsed time, timeout/abort state, and whether approval or user input is required. An unresolved Desktop executable fails closed, and every path bounds startup, waiting, listener removal, and client cleanup.
 
 ## JSON contract
 
@@ -401,7 +415,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
   "data": {},
   "warnings": [],
   "diagnostics": {
-    "synodVersion": "0.9.1",
+    "synodVersion": "0.9.2",
     "nodeVersion": "24.12.0",
     "platform": "darwin",
     "codexVersion": "0.142.0"
@@ -410,6 +424,16 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
 ```
 
 Failures set `ok` to `false`, omit `data`, include `error: { code, message, details? }`, and return a non-zero exit status. Warnings use `{ code, message, details? }`. Codes are stable within schema version 1.
+
+Use the opt-in `--view summary` projection with JSON when routine supervision does not need historical evidence, recovery history, or full contract bulk:
+
+```bash
+synod status --json --view summary
+synod lease reserve T-001 --write-tree src/api --json --view summary
+synod task next --json --view summary
+```
+
+`--view full` is the default and preserves the existing JSON payload. Summary status retains health, drift, counts, current task lifecycle, proposal, lease/reservation, and the last event. Summary lease and reservation receipts include an exact `nextOperation.fence` for the next legal mutation. `--view` is CLI-only and requires `--json`; text output and library return types are unchanged.
 
 Lifecycle errors include stable codes for invalid/unsupported manifests, invalid or conflicting local runtimes, failed runtime installation or execution, required upgrades, conflicts, unsafe paths, destination races, transaction rollback, and unsupported downgrades. Orchestration errors identify invalid state/logs, state-log mismatch, held locks, invalid tasks or transitions, stale revisions, missing evidence, checkpoint drift, lease conflicts and fencing, proposal validation, correction exhaustion, wait failures, and worktree reconciliation. Recovery errors distinguish invalid or corrupted bundles, existing export destinations, required untracked opt-in, unsupported dirty submodules, wrong restore bases, dirty destinations, restore failures, invalid journals, and rollback failures. Existing command, App Server, session, and JSON codes remain stable within envelope schema version 1.
 

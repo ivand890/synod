@@ -31,6 +31,7 @@ import {
   expireTaskLease,
   expireTaskLeaseReservation,
   heartbeatTaskLease,
+  nextTaskGuidance,
   orchestrationStatus,
   orchestrationStatusWithArtifacts,
   overrideCorrectionPolicy,
@@ -54,6 +55,60 @@ const temporaryDirectories = new Set<string>();
 test("keeps the exported task-state table immutable at runtime", () => {
   assert.equal(Object.isFrozen(TASK_STATES), true);
   assert.throws(() => Reflect.apply(Array.prototype.push, TASK_STATES, ["INVALID"]), TypeError);
+});
+
+test("task-next guidance advertises fence resolution instead of rejected transitions", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-RESERVED" });
+  await addDefaultTask(directory, { id: "T-RESERVATION-EXPIRED" });
+  await addDefaultTask(directory, { id: "T-EXPIRED" });
+  await transitionTask({ directory, id: "T-RESERVED", to: "READY", revision: 0 });
+  await transitionTask({ directory, id: "T-RESERVATION-EXPIRED", to: "READY", revision: 0 });
+  await transitionTask({ directory, id: "T-EXPIRED", to: "READY", revision: 0 });
+  const reserved = await reserveTaskLease({ directory, id: "T-RESERVED", write: ["src/reserved.ts"] });
+  const expiredReservation = await reserveTaskLease({
+    directory,
+    id: "T-RESERVATION-EXPIRED",
+    write: ["src/reservation-expired.ts"],
+    reservationTtlSeconds: 60
+  }, { clock: () => "2026-08-13T10:00:00.000Z" });
+  const acquired = await acquireTaskLease({
+    directory,
+    id: "T-EXPIRED",
+    ownerThread: "thread:expired",
+    write: ["src/expired.ts"],
+    ttlSeconds: 60,
+    heartbeatIntervalSeconds: 10
+  }, { clock: () => "2026-08-13T10:00:00.000Z" });
+
+  const guidance = await nextTaskGuidance({ directory }, { clock: () => Date.parse("2026-08-13T10:01:00.000Z") });
+  const reservedTask = guidance.tasks.find(task => task.id === "T-RESERVED")!;
+  const expiredReservationTask = guidance.tasks.find(task => task.id === "T-RESERVATION-EXPIRED")!;
+  const expiredTask = guidance.tasks.find(task => task.id === "T-EXPIRED")!;
+
+  assert.deepEqual(reservedTask.legalTransitions, []);
+  assert.equal(reservedTask.constraints.reservationRequiresBind, true);
+  assert.equal(reservedTask.actions[0]?.operation, "lease.bind");
+  const bindArguments: unknown = reservedTask.actions[0]?.arguments;
+  assert.ok(isRecord(bindArguments));
+  assert.equal(bindArguments.leaseId, reserved.reservation.id);
+  assert.deepEqual(expiredReservationTask.legalTransitions, []);
+  assert.equal(expiredReservationTask.constraints.reservationRequiresBind, true);
+  assert.equal(expiredReservationTask.constraints.reservationExpired, true);
+  assert.equal(expiredReservationTask.actions[0]?.operation, "lease.expire");
+  const reservationExpireArguments: unknown = expiredReservationTask.actions[0]?.arguments;
+  assert.ok(isRecord(reservationExpireArguments));
+  assert.equal(reservationExpireArguments.reservationToken, expiredReservation.reservation.token);
+  assert.equal(reservationExpireArguments.leaseId, expiredReservation.reservation.id);
+  assert.equal(reservationExpireArguments.expectedReservedAt, expiredReservation.reservation.reservedAt);
+  assert.equal(reservationExpireArguments.baselineHash, expiredReservation.reservation.baseline.snapshotContentHash);
+  assert.deepEqual(expiredTask.legalTransitions, []);
+  assert.equal(expiredTask.constraints.leaseExpired, true);
+  assert.equal(expiredTask.actions[0]?.operation, "lease.expire");
+  const expireArguments: unknown = expiredTask.actions[0]?.arguments;
+  assert.ok(isRecord(expireArguments));
+  assert.equal(expireArguments.leaseId, acquired.lease.id);
 });
 
 async function temporaryProject(): Promise<string> {

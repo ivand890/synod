@@ -218,7 +218,10 @@ test("keeps the primary agent supervisory and delegates routine implementation",
   assert.match(skill, /usage --task <task-id> --session <session-id>/);
   assert.match(skill, /incomplete usage fails closed/);
   assert.match(skill, /Before spawning a writer, run `[^`]+ lease reserve/);
-  assert.match(skill, /Only then tell the worker that writes are authorized/);
+  assert.match(skill, /wait --task <task-id>/);
+  assert.match(skill, /use direct platform `wait_agent` for exactly the returned thread IDs/);
+  assert.match(skill, /Only after a successful bind may the supervisor send explicit write authorization/);
+  assert.match(skill, /activation receipt does not claim that notification was observed/);
   assert.match(skill, /atomic `delegate start` remains deferred/);
   assert.match(agents, /Do not use the supervising model as the default implementation worker\./);
   assert.match(decisions, /Cost-efficient agents perform implementation/);

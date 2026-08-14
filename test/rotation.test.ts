@@ -18,6 +18,7 @@ import {
   readOrchestration,
   reportProjectRotation,
   setRotationPolicy,
+  suggestProjectRotation,
   transitionTask,
   verifyProjectRotation
 } from "../src/orchestration.js";
@@ -169,6 +170,73 @@ test("unconfigured projects expose no recommendation and handoff stays read-only
   assert.equal(handoff.rotation, null);
   assert.match(formatHandoff(handoff), /Phase rotation: not configured/);
   assert.deepEqual(await Promise.all(paths.map(item => readFile(item))), before);
+});
+
+test("rotation suggestion is read-only and returns a typed set action for an unconfigured phase", async () => {
+  const directory = await project();
+  await addTask({
+    directory,
+    id: "T-ONE",
+    objective: "First phase task",
+    executor: "worker",
+    acceptance: ["done"],
+    verification: ["pnpm test"]
+  });
+  await addTask({
+    directory,
+    id: "T-TWO",
+    objective: "Second phase task",
+    executor: "worker",
+    acceptance: ["done"],
+    verification: ["pnpm test"]
+  });
+  const paths = [ORCHESTRATION_STATE_PATH, ORCHESTRATION_EVENTS_PATH, ORCHESTRATION_STATUS_PATH].map(item => path.join(directory, item));
+  const before = await Promise.all(paths.map(item => readFile(item)));
+  const canonical = await readOrchestration(directory);
+
+  const suggestion = await suggestProjectRotation({ directory });
+
+  assert.equal(suggestion.configured, false);
+  assert.equal(suggestion.phaseTaskCount, 2);
+  assert.deepEqual(suggestion.recommendedThresholds, {
+    supervisorContextPercent: 80,
+    compactions: 3,
+    waitCalls: 50,
+    completedTasks: 2
+  });
+  assert.ok(suggestion.observations.every(item => item.status === "unavailable" && item.triggered === false));
+  assert.equal(suggestion.nextAction.operation, "rotation.set");
+  assert.deepEqual(suggestion.nextAction.arguments.startEvent?.value, {
+    sequence: canonical.state.lastEvent.sequence,
+    id: canonical.state.lastEvent.id,
+    hash: canonical.state.lastEvent.hash
+  });
+  assert.equal(suggestion.nextAction.arguments.rootSessionId?.required, true);
+  assert.deepEqual(await Promise.all(paths.map(item => readFile(item))), before);
+});
+
+test("configured rotation suggestion reuses the report and returns prepare as the legal next action", async () => {
+  const directory = await project();
+  const start = (await readOrchestration(directory)).events[0]!;
+  await setRotationPolicy({
+    directory,
+    rootSessionId: "root-old",
+    startEvent: start.id,
+    thresholds: { compactions: 1 },
+    reason: "Bound the phase",
+    evidence: ["test:configured-suggestion"]
+  });
+  const now = () => "2026-08-12T10:02:00.000Z";
+  const usageCollector = collector(directory, now, { compactions: 1 });
+
+  const suggestion = await suggestProjectRotation({ directory }, { clock: now, usageCollector });
+  const report = await reportProjectRotation({ directory }, { clock: now, usageCollector });
+
+  assert.equal(suggestion.configured, true);
+  assert.equal(suggestion.report?.reportHash, report.reportHash);
+  assert.deepEqual(suggestion.observations, report.metrics);
+  assert.equal(suggestion.nextAction.operation, "rotation.prepare");
+  assert.deepEqual(suggestion.nextAction.arguments, {});
 });
 
 test("reports every configured metric deterministically and missing context cannot trigger", async () => {
@@ -420,6 +488,11 @@ test("rotation CLI exposes set, report, prepare, and verify envelopes", async ()
     })
   };
 
+  assert.equal(await run(["rotation", "suggest", "--cwd", directory, "--json"], output, dependencies), 0);
+  const unconfiguredSuggestion = JSON.parse(messages.pop()!);
+  assert.equal(unconfiguredSuggestion.data.suggestion.configured, false);
+  assert.equal(unconfiguredSuggestion.data.suggestion.nextAction.operation, "rotation.set");
+
   assert.equal(await run([
     "rotation", "set", "--session", "root-old", "--since-event", start.id,
     "--compactions", "1", "--reason", "CLI phase", "--evidence", "cli:set", "--cwd", directory, "--json"
@@ -428,6 +501,8 @@ test("rotation CLI exposes set, report, prepare, and verify envelopes", async ()
   now = "2026-08-12T10:02:00.000Z";
   assert.equal(await run(["rotation", "report", "--cwd", directory, "--json"], output, dependencies), 0);
   assert.equal(JSON.parse(messages.pop()!).data.report.recommended, true);
+  assert.equal(await run(["rotation", "suggest", "--cwd", directory, "--json"], output, dependencies), 0);
+  assert.equal(JSON.parse(messages.pop()!).data.suggestion.nextAction.operation, "rotation.prepare");
   assert.equal(await run(["rotation", "prepare", "--cwd", directory, "--json"], output, dependencies), 0);
   const prepared = JSON.parse(messages.pop()!);
   now = "2026-08-12T10:03:00.000Z";

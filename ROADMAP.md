@@ -1,19 +1,24 @@
 # Synod Roadmap
 
 Last updated: 2026-08-13
-Current release baseline: `v0.9.0`
+Current source release: `v0.9.2`
+Last verified public release at this update: `v0.9.1`
 
 This roadmap converts the advisor loop's remaining operational risks into
-versioned, testable increments. Entries at or below the current release
-baseline are delivered; later increments describe intended outcomes, not
-shipped commands. Exact CLI spelling remains provisional until an increment is
-implemented and released.
+versioned, testable increments. Entries at or below the last verified public
+release are delivered; the current source release may be complete locally while
+protected publication gates remain pending. Later increments describe intended
+outcomes, not shipped commands. Exact CLI spelling remains provisional until an
+increment is implemented and released.
 
-The `v0.9.1` release candidate adds pre-spawn lease reservations and corrects
+The `v0.9.1` release delivered pre-spawn lease reservations and corrected
 task-session, thread-count, coordination-outcome, and exact-boundary usage
-semantics. Its reviewed implementation is merged against the `v0.9.0`
-baseline, but it is not a delivered release until the signed tag, protected
-publication, and installed-package proof complete.
+semantics. The `v0.9.1` release is publicly delivered. The current `v0.9.2`
+source includes the supervisor-efficiency P1—task-aware waiting, adaptive
+rotation preflight, and typed task/proposal commands—plus bounded summary
+output, activation-handoff, and nested-help hardening. This source is complete
+for the protected release and becomes publicly delivered only after its signed
+tag, protected publication, and installed-package proof complete.
 
 ## Evidence behind this revision
 
@@ -39,7 +44,7 @@ exposing the next constraints:
   interruption recovery, and correction-round limits were still enforced by
   agent instructions rather than durable leases.
 
-The resulting order is: a behavior-preserving TypeScript 7 foundation,
+The resulting order was: a behavior-preserving TypeScript 7 foundation,
 recoverability, concurrency control, and then economics/adaptive orchestration.
 
 ## Product principles
@@ -137,6 +142,27 @@ Release gate: a multi-task fixture can attribute marginal usage and coordination
 overhead without double counting, then produce a reproducible phase-handoff
 recommendation while leaving orchestration state unchanged.
 
+## v0.9.2 — Supervisor-efficiency P1 and bounded hardening
+
+Goal: reduce routine supervisor coordination while preserving exact canonical
+state, independent review, and strict lease fencing.
+
+Status: source-complete; public delivery pending protected release proof.
+
+| ID | Outcome | Acceptance gate |
+|---|---|---|
+| SYN-P1-WAIT-001 | Task-aware repeatable waiting resolves canonical bound owners, preserves exact lease identity, and reports honest host fallback. | Mixed task/thread waits remain bounded, read-only, and compatible with explicit thread selectors. |
+| SYN-P1-ROTATE-002 | Read-only adaptive rotation preflight returns deterministic thresholds and typed actions without configuring or preparing rotation. | Configured and unconfigured projects return the legal next action without changing canonical state. |
+| SYN-P1-TYPED-003 | `task next --json` and `proposal submit` expose canonical legal actions and reuse the existing ACTIVE-to-REVIEW proposal transition. | Guidance never advertises stale or invalid lease/reservation transitions and proposal submission derives the current fence. |
+| SYN-092-OUTPUT-001 | Opt-in summary JSON materially reduces routine output while full JSON remains the default and exact fences are retained. | Status, mutation, wait, handoff, and usage views remain schema-compatible and read-only. |
+| SYN-092-ACTIVATE-002 | Bind returns an activation handoff tied to the existing `lease.bound` event without claiming supervisor notification. | The receipt exposes a typed task-aware wait follow-up and no reservation token. |
+| SYN-092-HELP-003 | Recognized nested command help succeeds before positional validation. | Unknown actions and options continue to fail deterministically. |
+| SYN-092-WAITVIEW-005 | Summary wait output preserves task selector identity and exact lease fields. | Every resolved task retains task ID, state, revision, lease ID, generation, and owner thread. |
+
+Release gate: focused and full deterministic tests, installed-package smoke, and
+Codex compatibility checks pass on the exact release checkout; documentation
+and generated advisor guidance match the shipped CLI behavior.
+
 ## v1.0 readiness criteria
 
 Synod reaches a 1.0 candidate only after all of the following are demonstrated:
@@ -187,6 +213,13 @@ Synod reaches a 1.0 candidate only after all of the following are demonstrated:
   budgets, deterministic phase-rotation handoffs, and optional dated local
   cost estimates, with installed production-shaped reset, reroute, archived
   thread, incomplete-session, and schema-migration drills.
+- `v0.9.1`: schema-4 pre-spawn lease reservations, exact bind/cancel/expiry
+  fencing, and corrected task-session, thread-count, coordination-outcome, and
+  exact-boundary usage semantics.
+- `v0.9.2` source: task-aware waiting, read-only adaptive rotation suggestions,
+  typed task/proposal commands, summary JSON output, truthful bind activation
+  handoffs, nested-help routing, and the corresponding canonical-fence and
+  package compatibility hardening, pending protected public release proof.
 
 The worktrees/leases and economics originally associated with `v0.6` were not
 discarded. They are deliberately sequenced after recoverable phase boundaries

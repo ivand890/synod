@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AppServerEvent } from "../src/app-server.js";
 import {
+  resolveWaitSelection,
   waitForThreads,
   type ObservedThreadStatus,
   type ThreadStatusAdapter,
@@ -62,6 +63,84 @@ const active = (threadId: string): ObservedThreadStatus => ({
 });
 const idle = (threadId: string): ObservedThreadStatus => ({ threadId, status: { type: "idle" } });
 
+test("task-aware selection resolves exact active lease owners read-only and deduplicates mixed selectors", async () => {
+  let reads = 0;
+  const canonical = { state: { tasks: {
+    "T-API": {
+      state: "ACTIVE",
+      revision: 2,
+      lease: { id: "lease:api", generation: 3, ownerThread: "thread:shared", status: "ACTIVE", expiresAt: "2030-01-01T00:00:00.000Z" }
+    },
+    "T-UI": {
+      state: "ACTIVE",
+      revision: 1,
+      lease: { id: "lease:ui", generation: 1, ownerThread: "thread:ui", status: "ACTIVE", expiresAt: "2030-01-01T00:00:00.000Z" }
+    }
+  } } };
+  const before = structuredClone(canonical);
+  const selection = await resolveWaitSelection({
+    directory: "/tmp/project",
+    taskIds: ["t-api", "T-API", "t-ui"],
+    threadIds: ["thread:shared", "thread:reader", "thread:reader"]
+  }, {
+    canonicalReader: async directory => {
+      reads += 1;
+      assert.equal(directory, "/tmp/project");
+      return canonical;
+    }
+  });
+
+  assert.equal(reads, 1);
+  assert.deepEqual(canonical, before);
+  assert.deepEqual(selection.requestedTaskIds, ["T-API", "T-UI"]);
+  assert.deepEqual(selection.tasks, [
+    { taskId: "T-API", state: "ACTIVE", revision: 2, leaseId: "lease:api", generation: 3, ownerThread: "thread:shared" },
+    { taskId: "T-UI", state: "ACTIVE", revision: 1, leaseId: "lease:ui", generation: 1, ownerThread: "thread:ui" }
+  ]);
+  assert.deepEqual(selection.threadIds, ["thread:shared", "thread:ui", "thread:reader"]);
+});
+
+test("task-aware selection rejects missing, unbound, recovery-pending, and inactive tasks", async () => {
+  const tasks = {
+    RESERVED: {
+      state: "READY",
+      revision: 0,
+      leaseReservation: { id: "lease:reserved", generation: 1 }
+    },
+    RECOVERY: {
+      state: "BLOCKED",
+      revision: 0,
+      recovery: { status: "PENDING", endedLease: { id: "lease:ended", generation: 2 } }
+    },
+    EXPIRED: {
+      state: "ACTIVE",
+      revision: 1,
+      lease: {
+        id: "lease:expired",
+        generation: 1,
+        ownerThread: "thread:expired",
+        status: "ACTIVE",
+        expiresAt: "2000-01-01T00:00:00.000Z"
+      }
+    },
+    IDLE: { state: "READY", revision: 0 }
+  };
+  const canonicalReader = async () => ({ state: { tasks } });
+
+  for (const [taskId, code] of [
+    ["MISSING", "SYNOD_TASK_NOT_FOUND"],
+    ["RESERVED", "SYNOD_LEASE_REQUIRED"],
+    ["RECOVERY", "SYNOD_LEASE_STALE"],
+    ["EXPIRED", "SYNOD_LEASE_STALE"],
+    ["IDLE", "SYNOD_LEASE_REQUIRED"]
+  ] as const) {
+    await assert.rejects(
+      resolveWaitSelection({ taskIds: [taskId] }, { canonicalReader }),
+      error => error instanceof Error && (error as Error & { code?: string }).code === code
+    );
+  }
+});
+
 test("notification wait registers before its initial read and cannot lose completion", async () => {
   const adapter = new FakeAdapter({ notification: true, reads: [
     { statuses: [active("thread:a")] },
@@ -116,9 +195,10 @@ test("the App Server adapter preserves a notification that races thread/read", a
 
   const report = await waitForThreads({ threadIds: ["thread:a"], cwd: "/tmp/project", timeoutMs: 100 }, {
     clientFactory: options => {
-      assert.deepEqual(options, { cwd: "/tmp/project" });
+      assert.deepEqual(options, { cwd: "/tmp/project", codexBin: "/tmp/codex" });
       return client;
-    }
+    },
+    runtimeResolver: () => ({ surface: "cli", executable: "/tmp/codex", resolved: true })
   });
 
   assert.equal(report.mode, "notification");
@@ -225,7 +305,7 @@ test("poll fallback is bounded and observable", async () => {
   assert.equal(report.incomplete, false);
 });
 
-test("a successfully read unloaded thread is already quiescent", async () => {
+test("a successfully read unloaded thread requires attention instead of claiming completion", async () => {
   const adapter = new FakeAdapter({
     notification: true,
     reads: [{ statuses: [{ threadId: "thread:a", status: { type: "notLoaded" } }] }]
@@ -236,9 +316,56 @@ test("a successfully read unloaded thread is already quiescent", async () => {
   });
 
   assert.equal(report.timedOut, false);
-  assert.equal(report.incomplete, false);
+  assert.equal(report.incomplete, true);
+  assert.equal(report.hostFallbackRequired, true);
+  assert.deepEqual(report.hostFallbackThreadIds, ["thread:a"]);
   assert.equal(report.wakeCount, 0);
   assert.equal(adapter.closed, 1);
+});
+
+test("wait resolves the active Codex runtime before creating an App Server client", async () => {
+  let received: { cwd?: string; codexBin?: string } | undefined;
+  const report = await waitForThreads({ threadIds: ["thread:a"], cwd: "/tmp/project", timeoutMs: 100 }, {
+    runtimeResolver: () => ({
+      surface: "desktop",
+      executable: "/Applications/Codex Desktop/codex",
+      executableSource: "desktop-process",
+      resolved: true
+    }),
+    clientFactory: options => {
+      received = options;
+      return {
+        async start() {},
+        async request() { return { thread: { id: "thread:a", status: { type: "idle" } } }; },
+        async close() {},
+        supportsThreadStatusNotifications: () => false
+      };
+    }
+  });
+
+  assert.deepEqual(received, { cwd: "/tmp/project", codexBin: "/Applications/Codex Desktop/codex" });
+  assert.equal(report.incomplete, false);
+});
+
+test("wait fails closed when the active Desktop App Server executable is unresolved", async () => {
+  let clientCreated = false;
+  await assert.rejects(
+    waitForThreads({ threadIds: ["thread:a"], timeoutMs: 100 }, {
+      runtimeResolver: () => ({
+        surface: "desktop",
+        executable: "codex",
+        executableSource: "PATH-fallback",
+        resolved: false
+      }),
+      clientFactory: () => {
+        clientCreated = true;
+        throw new Error("must not create client");
+      }
+    }),
+    error => error instanceof Error
+      && (error as Error & { code?: string }).code === "SYNOD_CODEX_RUNTIME_AMBIGUOUS"
+  );
+  assert.equal(clientCreated, false);
 });
 
 test("the overall deadline bounds an initial status read", async () => {

@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-08-13
+
+### Added
+
+- Added repeatable `wait --task` selectors that resolve active canonical writer leases, preserve exact task/revision/lease/generation/owner identity, and wait mixed task/thread sets in one bounded operation.
+- Added read-only `rotation suggest` preflight with deterministic thresholds and typed actions for unconfigured phases, plus the current legal next action for configured phases.
+- Added typed `task next --json` and `proposal submit` façades over the canonical task/proposal state machine, deriving the active revision and bound lease internally.
+
+### Changed
+
+- Added an opt-in `--view summary` JSON projection while keeping full output as the default; summary output retains canonical lifecycle state and exact next-operation fences while reducing historical bulk.
+- Updated advisor guidance, generated templates, and package smoke to use task-aware completion, adaptive rotation preflight, typed delivery, and the summary view.
+- Extended wait/runtime routing to select the active Codex surface and report explicit host fallback when a separate App Server returns `notLoaded`.
+
+### Fixed
+
+- Fixed canonical task guidance to suppress invalid transitions for unbound or expired reservations and leases, returning the exact bind, expire, or recover action instead.
+- Fixed bind receipts to derive activation from the existing `lease.bound` event, include the exact event identity and required follow-up wait, and state that supervisor notification remains unobserved.
+- Fixed nested subcommand help to render before required positional validation while preserving unknown-action and unknown-option errors.
+- Fixed usage and canonical-action routing to keep `--view` CLI-only and reject stale, repeated, or ambiguous selectors before mutation or Codex discovery.
+
+### Security
+
+- Preserved strict fencing and read-only behavior for task waits, rotation suggestions, task guidance, and summary projections; exact mutation fences remain available for the next legal operation.
+- Bind activation never claims that Codex notification, receipt, or execution was observed, and its response does not repeat the opaque reservation token.
+- Expired, unbound, or stale lease/reservation state cannot authorize task waiting, delivery, or a misleading legal transition.
+
 ## [0.9.1] - 2026-08-13
 
 ### Added
@@ -201,7 +228,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/ivand890/synod/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/ivand890/synod/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/ivand890/synod/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/ivand890/synod/compare/v0.7.0...v0.8.0
