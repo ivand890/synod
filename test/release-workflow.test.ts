@@ -8,6 +8,10 @@ const workflowPath = new URL("../.github/workflows/publish.yml", import.meta.url
 const ciWorkflowPath = new URL("../.github/workflows/ci.yml", import.meta.url);
 const packagePath = new URL("../package.json", import.meta.url);
 const packageSmokePath = new URL("../scripts/package-smoke.ts", import.meta.url);
+const changelogPath = new URL("../CHANGELOG.md", import.meta.url);
+const roadmapPath = new URL("../ROADMAP.md", import.meta.url);
+const readmePath = new URL("../README.md", import.meta.url);
+const releasingPath = new URL("../RELEASING.md", import.meta.url);
 
 test("Git dependency build lifecycles do not require pnpm or Corepack", async () => {
   const packageJson = parseJson(await readFile(packagePath, "utf8"));
@@ -84,6 +88,51 @@ test("installed-package smoke covers the v0.9 production-shaped release contract
   assert.match(packageSmoke, /verifyProjectRotation/);
   assert.match(packageSmoke, /projectUsageCost/);
   assert.match(packageSmoke, /readFileSync\(statePath\)/);
+});
+
+test("0.9.3 source metadata keeps public version and dormant contract boundaries explicit", async () => {
+  const [packageText, changelog, roadmap, readme, releasing, packageSmoke] = await Promise.all([
+    readFile(packagePath, "utf8"),
+    readFile(changelogPath, "utf8"),
+    readFile(roadmapPath, "utf8"),
+    readFile(readmePath, "utf8"),
+    readFile(releasingPath, "utf8"),
+    readFile(packageSmokePath, "utf8")
+  ]);
+  const packageJson = parseJson(packageText);
+  assert.ok(isRecord(packageJson));
+  assert.equal(packageJson.version, "0.9.3");
+
+  assert.match(changelog, /^## \[0\.9\.3\] - 2026-08-14$/m);
+  assert.match(changelog, /\[Unreleased\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.3\.\.\.HEAD/);
+  assert.match(changelog, /\[0\.9\.3\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.2\.\.\.v0\.9\.3/);
+  assert.match(roadmap, /Current source release: `v0\.9\.3`/);
+  assert.match(roadmap, /Last verified public release at this update: `v0\.9\.2`/);
+  assert.match(roadmap, /source prepared; the last verified public package remains `v0\.9\.2`/);
+  assert.match(roadmap, /\| SYN-093-VERSIONS-001 \|/);
+
+  for (const phrase of [
+    "runtimeVersion",
+    "installedTemplateVersion",
+    "stateTemplateVersion",
+    "`templateVersion` as an alias",
+    "Wait authority and transport are separate fields",
+    "hostWaitRequired",
+    "canonical` authority on a selection/event",
+    "There is no Synod thread/resume observer.",
+    "schema-1 `JobHandle`/`JobEvent` contract",
+    "does not persist job records",
+    "App Server provenance has `transport`",
+    "canonical provenance has `sourceSequence`",
+    "host provenance has `observationId`",
+    "The `mode` field belongs to `WaitReport`, not `JobEvent`.",
+  ]) {
+    assert.ok(readme.includes(phrase), `README must document ${phrase}`);
+  }
+  assert.equal(releasing.match(/release_version=0\.9\.3/g)?.length, 2);
+  assert.ok(packageSmoke.includes("hostWaitRequired"));
+  assert.ok(packageSmoke.includes("validateJobHandle"));
+  assert.ok(packageSmoke.includes("stateTemplateVersion"));
 });
 
 test("durable release turn selects the oldest pending stable tag", () => {

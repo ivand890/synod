@@ -189,6 +189,37 @@ test("a global command delegates to the pinned local version", async () => {
   assert.deepEqual(delegated, { version: packageVersion, args: ["check", directory, "--json"] });
 });
 
+test("read-only status bypasses invalid runtime metadata without repair or delegation", async () => {
+  const malformedDescriptorDirectory = await temporaryProject();
+  await mkdir(path.dirname(path.join(malformedDescriptorDirectory, LOCAL_RUNTIME_DESCRIPTOR_PATH)), { recursive: true });
+  await writeFile(path.join(malformedDescriptorDirectory, LOCAL_RUNTIME_DESCRIPTOR_PATH), "{ malformed\n", "utf8");
+  const invalidCacheDirectory = await temporaryProject();
+  await writePinnedRuntime(invalidCacheDirectory, packageVersion);
+  await rm(path.join(invalidCacheDirectory, LOCAL_RUNTIME_DIRECTORY, "node_modules"), { recursive: true });
+
+  for (const directory of [malformedDescriptorDirectory, invalidCacheDirectory]) {
+    let installerCalls = 0;
+    let executorCalls = 0;
+    let currentRuntimeCalls = 0;
+    const status = await prepareLocalRuntime(["status", directory, "--json"], {
+      cwd: directory,
+      installer: async () => { installerCalls += 1; throw new Error("status attempted runtime repair"); },
+      executor: () => { executorCalls += 1; return 0; },
+      currentRuntime: async () => { currentRuntimeCalls += 1; return false; }
+    });
+
+    assert.deepEqual(status, { action: "current", targetDirectory: directory, local: false });
+    assert.equal(installerCalls, 0);
+    assert.equal(executorCalls, 0);
+    assert.equal(currentRuntimeCalls, 0);
+  }
+
+  await assert.rejects(
+    prepareLocalRuntime(["check", malformedDescriptorDirectory, "--json"], { cwd: malformedDescriptorDirectory }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LOCAL_RUNTIME_INVALID
+  );
+});
+
 test("status explain selects and delegates to the pinned project runtime", async () => {
   const callerDirectory = await temporaryProject();
   const projectDirectory = await temporaryProject();

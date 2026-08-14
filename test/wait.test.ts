@@ -92,6 +92,7 @@ test("task-aware selection resolves exact active lease owners read-only and dedu
 
   assert.equal(reads, 1);
   assert.deepEqual(canonical, before);
+  assert.equal(selection.waitAuthority, "canonical");
   assert.deepEqual(selection.requestedTaskIds, ["T-API", "T-UI"]);
   assert.deepEqual(selection.tasks, [
     { taskId: "T-API", state: "ACTIVE", revision: 2, leaseId: "lease:api", generation: 3, ownerThread: "thread:shared" },
@@ -154,6 +155,7 @@ test("notification wait registers before its initial read and cannot lose comple
   const report = await waitForThreads({ threadIds: ["thread:a"], timeoutMs: 100 }, { adapterFactory: () => adapter });
 
   assert.equal(report.mode, "notification");
+  assert.equal(report.waitAuthority, "appServer");
   assert.equal(report.incomplete, false);
   assert.equal(report.wakeCount, 1);
   assert.equal(report.fallbackPollCount, 0);
@@ -202,6 +204,7 @@ test("the App Server adapter preserves a notification that races thread/read", a
   });
 
   assert.equal(report.mode, "notification");
+  assert.equal(report.waitAuthority, "appServer");
   assert.equal(report.incomplete, false);
   assert.equal(report.wakeCount, 1);
   assert.deepEqual(report.statuses, [idle("thread:a")]);
@@ -319,12 +322,15 @@ test("a successfully read unloaded thread requires attention instead of claiming
   assert.equal(report.incomplete, true);
   assert.equal(report.hostFallbackRequired, true);
   assert.deepEqual(report.hostFallbackThreadIds, ["thread:a"]);
+  assert.equal(report.waitAuthority, "appServer");
+  assert.equal(report.hostWaitRequired, true);
+  assert.deepEqual(report.hostWaitThreadIds, ["thread:a"]);
   assert.equal(report.wakeCount, 0);
   assert.equal(adapter.closed, 1);
 });
 
-test("wait resolves the active Codex runtime before creating an App Server client", async () => {
-  let received: { cwd?: string; codexBin?: string } | undefined;
+test("Desktop selects host authority before creating an App Server client", async () => {
+  let clientCreated = false;
   const report = await waitForThreads({ threadIds: ["thread:a"], cwd: "/tmp/project", timeoutMs: 100 }, {
     runtimeResolver: () => ({
       surface: "desktop",
@@ -333,7 +339,7 @@ test("wait resolves the active Codex runtime before creating an App Server clien
       resolved: true
     }),
     clientFactory: options => {
-      received = options;
+      clientCreated = true;
       return {
         async start() {},
         async request() { return { thread: { id: "thread:a", status: { type: "idle" } } }; },
@@ -343,14 +349,20 @@ test("wait resolves the active Codex runtime before creating an App Server clien
     }
   });
 
-  assert.deepEqual(received, { cwd: "/tmp/project", codexBin: "/Applications/Codex Desktop/codex" });
-  assert.equal(report.incomplete, false);
+  assert.equal(clientCreated, false);
+  assert.equal(report.waitAuthority, "host");
+  assert.equal(report.mode, "handoff");
+  assert.equal(report.incomplete, true);
+  assert.equal(report.hostWaitRequired, true);
+  assert.deepEqual(report.hostWaitThreadIds, ["thread:a"]);
+  assert.deepEqual(report.hostFallbackThreadIds, ["thread:a"]);
+  assert.equal(report.diagnostics.codexSurface, "desktop");
+  assert.equal(report.diagnostics.codexExecutableSource, "desktop-process");
 });
 
-test("wait fails closed when the active Desktop App Server executable is unresolved", async () => {
+test("Desktop host handoff does not require an App Server executable", async () => {
   let clientCreated = false;
-  await assert.rejects(
-    waitForThreads({ threadIds: ["thread:a"], timeoutMs: 100 }, {
+  const report = await waitForThreads({ threadIds: ["thread:a"], timeoutMs: 100 }, {
       runtimeResolver: () => ({
         surface: "desktop",
         executable: "codex",
@@ -361,11 +373,45 @@ test("wait fails closed when the active Desktop App Server executable is unresol
         clientCreated = true;
         throw new Error("must not create client");
       }
-    }),
-    error => error instanceof Error
-      && (error as Error & { code?: string }).code === "SYNOD_CODEX_RUNTIME_AMBIGUOUS"
-  );
+    });
   assert.equal(clientCreated, false);
+  assert.equal(report.waitAuthority, "host");
+  assert.equal(report.mode, "handoff");
+  assert.equal(report.incomplete, true);
+  assert.equal(report.diagnostics.codexExecutableSource, "PATH-fallback");
+});
+
+test("an already-aborted Desktop wait does not request a host handoff", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let clientCreated = false;
+  const report = await waitForThreads({
+    threadIds: ["thread:a"],
+    timeoutMs: 100,
+    signal: controller.signal
+  }, {
+    runtimeResolver: () => ({
+      surface: "desktop",
+      executable: "/Applications/Codex Desktop/codex",
+      executableSource: "desktop-process",
+      resolved: true
+    }),
+    clientFactory: () => {
+      clientCreated = true;
+      throw new Error("must not create client");
+    }
+  });
+
+  assert.equal(clientCreated, false);
+  assert.equal(report.aborted, true);
+  assert.equal(report.incomplete, true);
+  assert.equal(report.hostWaitRequired, false);
+  assert.deepEqual(report.hostWaitThreadIds, []);
+  assert.equal(report.hostFallbackRequired, false);
+  assert.deepEqual(report.hostFallbackThreadIds, []);
+  assert.equal(report.diagnostics.hostWaitRequired, false);
+  assert.deepEqual(report.diagnostics.hostWaitThreadIds, []);
+  assert.deepEqual(report.statuses, [{ threadId: "thread:a", status: { type: "notLoaded" } }]);
 });
 
 test("the overall deadline bounds an initial status read", async () => {
@@ -411,6 +457,38 @@ test("an abort during a blocked notification wait stops the wait", async () => {
 
   assert.equal(report.aborted, true);
   assert.equal(report.incomplete, true);
+  assert.equal(adapter.unsubscribed, 1);
+  assert.equal(adapter.closed, 1);
+});
+
+test("an App Server abort after a snapshot does not request a host handoff", async () => {
+  const controller = new AbortController();
+  const adapter = new FakeAdapter({
+    notification: true,
+    reads: [{ statuses: [
+      { threadId: "thread:desktop", status: { type: "notLoaded" } },
+      active("thread:active")
+    ] }]
+  });
+  adapter.onRead = () => setImmediate(() => controller.abort());
+
+  const report = await waitForThreads({
+    threadIds: ["thread:desktop", "thread:active"],
+    timeoutMs: 1_000,
+    signal: controller.signal
+  }, { adapterFactory: () => adapter });
+
+  assert.equal(report.waitAuthority, "appServer");
+  assert.equal(report.aborted, true);
+  assert.equal(report.incomplete, true);
+  assert.equal(report.hostWaitRequired, false);
+  assert.deepEqual(report.hostWaitThreadIds, []);
+  assert.equal(report.hostFallbackRequired, false);
+  assert.deepEqual(report.hostFallbackThreadIds, []);
+  assert.deepEqual(report.statuses, [
+    { threadId: "thread:desktop", status: { type: "notLoaded" } },
+    active("thread:active")
+  ]);
   assert.equal(adapter.unsubscribed, 1);
   assert.equal(adapter.closed, 1);
 });

@@ -15,6 +15,7 @@ import { migrateManifest } from "../src/migrations/index.js";
 import { LEGACY_V1_HASHES } from "../src/migrations/legacy-v1-hashes.js";
 import { packageName, packageVersion } from "../src/package.js";
 import {
+  ORCHESTRATION_STATE_PATH,
   acquireTaskLease,
   addTask,
   orchestrationStatus,
@@ -158,6 +159,41 @@ test("check permits user drift and rejects Synod-owned drift", async () => {
   assert.equal(result.healthy, false);
   assert.equal(result.checks.find(item => item.path === "docs/synod/GOAL.md")?.status, "modified-user");
   assert.equal(result.checks.find(item => item.path === ".codex/agents/synod-reviewer.toml")?.status, "modified");
+});
+
+test("check keeps installed and historical state template versions distinct", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory });
+  const manifestPath = path.join(directory, ".synod/manifest.json");
+  const statePath = path.join(directory, ORCHESTRATION_STATE_PATH);
+  const runtimePath = path.join(directory, ".synod/runtime.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  await writeFile(runtimePath, `${JSON.stringify({
+    schemaVersion: 1,
+    runtimeVersion: "0.9.3",
+    packageSpec: packageVersion,
+    packageName,
+    packageManager: "pnpm",
+    runtimeDirectory: ".synod/runtime",
+    executable: `.synod/runtime/node_modules/${packageName}/bin/synod.js`
+  }, null, 2)}\n`, "utf8");
+  manifest.templateVersion = "0.9.1";
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+
+  const result = await checkProject({ directory });
+  assert.equal(result.runtimeVersion, "0.9.3");
+  assert.equal(result.installedTemplateVersion, "0.9.1");
+  assert.equal(result.stateTemplateVersion, state.templateVersion);
+  assert.equal(result.templateVersion, "0.9.1");
+  assert.equal(result.upgradeAvailable, true);
+  assert.equal(JSON.parse(await readFile(statePath, "utf8")).templateVersion, state.templateVersion);
+
+  const status = await orchestrationStatus({ directory });
+  assert.equal(status.runtimeVersion, "0.9.3");
+  assert.equal(status.installedTemplateVersion, "0.9.1");
+  assert.equal(status.stateTemplateVersion, state.templateVersion);
+  assert.equal(status.templateVersion, state.templateVersion);
 });
 
 test("check rejects inconsistent canonical orchestration records", async () => {

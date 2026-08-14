@@ -52,11 +52,29 @@ If `AGENTS.md` contains multiple complete Synod managed blocks, initialization s
 
 Synod keeps canonical orchestration state in `.synod/state.json`, an append-only audit stream in `.synod/events.jsonl`, exact lease baselines in `.synod/lease-baselines.json`, the normalized acknowledged checkout snapshot in `.synod/checkpoint.json`, task-worktree history in `.synod/task-worktrees.json`, sealed proposals under `.synod/proposals/` and `.synod/worktree-proposals/`, and a generated human view in `docs/synod/STATUS.md`. Goal, decision, plan, state-note, and worklog Markdown remain user-owned supporting context. Upgrades and uninstall preserve these durable records.
 
-The bootstrap records `.synod/runtime.json` schema 1 and creates an isolated pnpm project under `.synod/runtime/`. Its `package.json` and `pnpm-lock.yaml` pin the runtime, while its `.gitignore` excludes only `node_modules/`. Runtime metadata is deliberately separate from `.synod/manifest.json`: `runtimeVersion` identifies the executable, `templateVersion` identifies installed project content, and each descriptor keeps its own `schemaVersion`.
+The bootstrap records `.synod/runtime.json` schema 1 and creates an isolated pnpm project under `.synod/runtime/`. Its `package.json` and `pnpm-lock.yaml` pin the runtime, while its `.gitignore` excludes only `node_modules/`. Runtime metadata is deliberately separate from `.synod/manifest.json` and `.synod/state.json`: `runtimeVersion` identifies the executable package in the local runtime descriptor, `installedTemplateVersion` identifies the installed project content from the manifest, and `stateTemplateVersion` identifies the orchestration state's template. Each descriptor keeps its own `schemaVersion`.
 
 ## Safe project lifecycle
 
 Every installation records `.synod/manifest.json` schema 3 with the template version, selected profile, ownership, and a normalized SHA-256 hash for each managed path. Synod owns its generated infrastructure, shares ownership of only the marked block in `AGENTS.md`, and classifies canonical state, its event log, and the generated status view as mutable durable records that are preserved on uninstall.
+
+### Three version truths
+
+Lifecycle and orchestration output keeps three independently meaningful version
+truths:
+
+- `runtimeVersion` is the executable package version recorded in
+  `.synod/runtime.json`; it tells you which installed runtime is running.
+- `installedTemplateVersion` is the managed project-content version recorded by
+  `.synod/manifest.json`; it tells you which templates are installed.
+- `stateTemplateVersion` is the template version recorded in
+  `.synod/state.json`; it tells you which template shaped canonical
+  orchestration state.
+
+For compatibility, `check` retains `templateVersion` as an alias of
+`installedTemplateVersion`, while orchestration `status` retains it as an alias
+of `stateTemplateVersion`. Do not use that legacy alias to infer the runtime
+package or collapse these three identities into one value.
 
 Verify project integrity and runtime capabilities:
 
@@ -399,9 +417,32 @@ synod wait --task T-API --task T-UI --timeout-seconds 300 --json
 synod wait --task T-API --thread thread:reviewer --poll-interval-ms 1000 --json
 ```
 
-`--task` is repeatable and may be combined with repeatable `--thread`; duplicate owner identities collapse into one multi-thread wait. JSON preserves each observed task revision, lease ID, generation, and owner alongside the resolved unique thread list. Selection validates canonical state but never mutates it, heartbeats a lease, or advances acceptance.
+`--task` is repeatable and may be combined with repeatable `--thread`; duplicate owner identities collapse into one multi-thread wait. JSON preserves each selected task's revision, lease ID, generation, and owner alongside the resolved unique thread list. Task selection reads canonical state only: it does not observe a thread, claim completion, heartbeat a lease, or advance acceptance. A `canonical` authority on a selection/event therefore means identity provenance, never a runtime observation.
 
-Synod resolves the active Codex surface before starting App Server, prefers status notifications, and otherwise uses a bounded polling fallback of at most five seconds. A separate App Server process may report a thread as `notLoaded` even while the Codex host still runs it; Synod therefore returns attention with `hostFallbackRequired` and the exact affected thread IDs instead of claiming completion. The advisor must then use the host's direct wait primitive for those IDs. Text and JSON also report `mode`, `wakeCount`, `fallbackPollCount`, elapsed time, timeout/abort state, and whether approval or user input is required. An unresolved Desktop executable fails closed, and every path bounds startup, waiting, listener removal, and client cleanup.
+Wait authority and transport are separate fields. `waitAuthority` identifies who owns the observation—`appServer` for a Synod-started App Server, `host` for the Codex host that owns a Desktop thread, or `canonical` for read-only task identity—and `mode` identifies the bounded transport: `notification`, `cursor`, `poll`, or `handoff`. Synod resolves the active Codex surface before starting an App Server and prefers status notifications, with a polling fallback bounded to at most five seconds.
+
+Desktop is host authority, not an accidental App Server fallback. The wait path hands off before constructing a child App Server and returns `mode: "handoff"`, `waitAuthority: "host"`, `hostWaitRequired: true`, and the exact `hostWaitThreadIds`; `hostFallbackRequired` and `hostFallbackThreadIds` remain compatibility aliases. The CLI cannot invoke the Desktop host primitive, so this result stays incomplete until the host performs its direct wait. Conversely, a separate App Server reporting `notLoaded` means that server has not loaded the thread; it is incomplete attention with `waitAuthority: "appServer"`, not proof that the thread finished. There is no Synod thread/resume observer. Text and JSON also report wake/fallback counts, elapsed time, timeout/abort state, and approval or user-input requirements. Every path bounds startup, waiting, listener removal, and client cleanup.
+
+`doctor` remains a diagnostic capability check: it may probe the active executable and its App Server and fails closed when Desktop resolution is unavailable. That probe does not change the wait authority or turn a handoff into an observation.
+
+## Durable job contract (validation-only)
+
+The package exports a strict schema-1 `JobHandle`/`JobEvent` contract through
+`@ivand890/synod/src/jobs.js`. Handles bind a task or thread to its explicit
+wait authority and identity; events bind ordered observations to that handle
+with authority-specific provenance. App Server provenance has `transport`,
+canonical provenance has `sourceSequence`, and host provenance has `observationId`.
+The `mode` field belongs to `WaitReport`, not `JobEvent`.
+Validators reject unknown fields, malformed identity, invalid provenance shape,
+broken event links, and non-monotonic timestamps. Canonical task events use
+`status: { type: "notObserved" }` and `outcome: "incomplete"` because selecting
+a task is not observing its runtime.
+
+This is a dormant public contract for validation and durable-shape checks only.
+Synod does not persist job records, add a `jobs` command, start a job runner or
+execution plane, or provide a thread/resume observer. A validated handle or
+event is evidence that a caller supplied a valid shape; it is not an execution
+request or completion claim.
 
 ## JSON contract
 
@@ -415,7 +456,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
   "data": {},
   "warnings": [],
   "diagnostics": {
-    "synodVersion": "0.9.2",
+    "synodVersion": "0.9.3",
     "nodeVersion": "24.12.0",
     "platform": "darwin",
     "codexVersion": "0.142.0"
@@ -451,7 +492,7 @@ synod profiles --json
 - `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. Its global subagent fallback is Terra because current Codex 0.147 validates that fallback against the narrower spawn override set before applying a selected custom-agent file; Luna remains valid inside the implementer and mechanical agent files. The profile requires Codex 0.147.0 or later within the supported range, including eligible previews such as `0.147.1-alpha.1`, and verifies the fallback plus each role model and reasoning effort through `model/list`.
 - `portable` uses GPT-5.5 at role-specific reasoning efforts. It is the conservative fallback verified across both known-good Codex versions and account-specific model catalogs.
 
-`synod doctor` identifies whether Synod is running from Codex CLI or Codex Desktop and probes that surface's own App Server executable. It resolves the active Codex process from the process ancestry, falling back to `codex` from `PATH` for a standalone CLI invocation. An explicit `SYNOD_CODEX_BIN` still takes precedence. If Desktop is detected but its executable cannot be resolved, `doctor` fails closed instead of silently reporting the CLI version as the Desktop version.
+`synod doctor` identifies whether Synod is running from Codex CLI or Codex Desktop and probes that surface's own App Server executable. It resolves the active Codex process from the process ancestry, falling back to `codex` from `PATH` for a standalone CLI invocation. An explicit `SYNOD_CODEX_BIN` still takes precedence. If Desktop is detected but its executable cannot be resolved, `doctor` fails closed instead of silently reporting the CLI version as the Desktop version. This diagnostic executable/App Server probe is separate from wait authority and does not observe thread completion.
 
 CLI and Desktop may share `~/.codex` while running different Codex versions. Inspect the `codex` object under `data` on success or `error.details` on failure—especially `surface`, `version`, `executable`, `executableSource`, and `home`—instead of assuming the two installations match.
 

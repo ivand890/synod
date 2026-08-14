@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-08-14
+
+### Added
+
+- Added explicit runtime, installed-template, and orchestration-state version
+  truths as `runtimeVersion`, `installedTemplateVersion`, and
+  `stateTemplateVersion`; the legacy `templateVersion` field remains a
+  documented output-specific compatibility alias.
+- Added `WaitAuthority` values `host`, `appServer`, and `canonical`, kept
+  separate from transport/mode; Desktop waits now hand off to the host with
+  positive `hostWaitRequired` and `hostWaitThreadIds` fields while retaining
+  the legacy `hostFallbackRequired` and `hostFallbackThreadIds` aliases.
+- Added strict schema-1 durable `JobHandle` and `JobEvent` contracts as a
+  dormant, validation-only public surface. No execution plane is activated.
+
+### Changed
+
+- Documented that canonical task selection is read-only identity resolution,
+  not runtime observation or completion, and that no thread/resume observer is
+  provided.
+- Extended installed-package smoke coverage for version truth, wait authority
+  and host handoff, and dormant job-contract validation.
+
 ## [0.9.2] - 2026-08-13
 
 ### Added
@@ -228,7 +251,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/ivand890/synod/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/ivand890/synod/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/ivand890/synod/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/ivand890/synod/compare/v0.8.0...v0.9.0

@@ -243,7 +243,8 @@ function printLifecycleResult(command: string, result: LifecycleResult, output: 
 function textCheck(result: CheckResult): string {
   const lines = [`Synod project check: ${result.healthy ? "healthy" : "failed"}`];
   lines.push(`Runtime: ${result.runtimeVersion || "external"}`);
-  lines.push(`Template: ${result.templateVersion} (manifest schema ${result.manifestSchemaVersion})`);
+  lines.push(`Installed template: ${result.installedTemplateVersion} (manifest schema ${result.manifestSchemaVersion})`);
+  lines.push(`State template: ${result.stateTemplateVersion || "unavailable"}`);
   lines.push(`Profile: ${result.profile}`);
   for (const item of result.checks) lines.push(`${item.status.padEnd(13)} ${item.ownership.padEnd(6)} ${item.path}`);
   return lines.join("\n");
@@ -258,6 +259,11 @@ function textDoctor(result: DoctorResult): string {
   lines.push(`Supported Codex: ${result.codex.range}`);
   lines.push(`Known-good Codex: ${result.codex.knownGood.join(", ")}`);
   lines.push(`Recommended profile: ${result.recommendedProfile || "none"}`);
+  if (result.project) {
+    lines.push(`Project runtime: ${result.project.runtimeVersion || "external"}`);
+    lines.push(`Project installed template: ${result.project.installedTemplateVersion} (manifest schema ${result.project.manifestSchemaVersion})`);
+    lines.push(`Project state template: ${result.project.stateTemplateVersion || "unavailable"}`);
+  }
   for (const profile of result.profiles) {
     const status = profile.compatible
       ? "compatible"

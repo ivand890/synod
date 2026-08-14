@@ -805,9 +805,11 @@ export async function checkProject({ directory = "." }: { directory?: string } =
   const localRuntimeDescriptor = await readLocalRuntimeDescriptor(targetDirectory);
   const rawManifest = await readManifest(targetDirectory);
   if (!rawManifest) throw new SynodError(ERROR_CODES.NOT_INSTALLED, `Synod is not installed in ${targetDirectory}.`);
+  const installedTemplateVersion = rawManifest.templateVersion;
   const { manifest, applied } = await migrateManifest(targetDirectory, rawManifest);
   const checks: ProjectCheck[] = [];
   const warnings: Warning[] = [];
+  let orchestrationResult: Awaited<ReturnType<typeof orchestrationStatus>> | undefined;
 
   if (localRuntimeDescriptor) {
     const runtimeCheck: ProjectCheck = {
@@ -892,7 +894,7 @@ export async function checkProject({ directory = "." }: { directory?: string } =
   if (orchestrationRecordsPresent) {
     let orchestrationValid = false;
     try {
-      await orchestrationStatus({ directory: targetDirectory });
+      orchestrationResult = await orchestrationStatus({ directory: targetDirectory });
       orchestrationValid = true;
       checks.push({
         path: ".synod/orchestration",
@@ -955,12 +957,12 @@ export async function checkProject({ directory = "." }: { directory?: string } =
     }
   }
 
-  const upgradeAvailable = manifest.templateVersion !== packageVersion || rawManifest.schemaVersion !== MANIFEST_SCHEMA_VERSION;
+  const upgradeAvailable = installedTemplateVersion !== packageVersion || rawManifest.schemaVersion !== MANIFEST_SCHEMA_VERSION;
   if (upgradeAvailable) {
     warnings.push(warning(
       WARNING_CODES.PROJECT_UPGRADE_AVAILABLE,
-      `Project template ${manifest.templateVersion} can be upgraded to ${packageVersion}.`,
-      { installed: manifest.templateVersion, available: packageVersion }
+      `Project template ${installedTemplateVersion} can be upgraded to ${packageVersion}.`,
+      { installed: installedTemplateVersion, available: packageVersion }
     ));
   }
   const healthy = !checks.some(item => item.severity === "error");
@@ -968,7 +970,9 @@ export async function checkProject({ directory = "." }: { directory?: string } =
     targetDirectory,
     healthy,
     runtimeVersion: localRuntimeDescriptor?.runtimeVersion || null,
-    templateVersion: manifest.templateVersion,
+    installedTemplateVersion,
+    stateTemplateVersion: orchestrationResult?.stateTemplateVersion || null,
+    templateVersion: installedTemplateVersion,
     profile: manifest.profile,
     manifestSchemaVersion: rawManifest.schemaVersion,
     upgradeAvailable,

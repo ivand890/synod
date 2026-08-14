@@ -662,6 +662,12 @@ function directoryArgument(args: string[], cwd: string): string {
   return path.resolve(cwd);
 }
 
+function canBypassRuntimeForStatus(command: string, error: unknown): boolean {
+  return command === "status"
+    && error instanceof SynodError
+    && error.code === ERROR_CODES.LOCAL_RUNTIME_INVALID;
+}
+
 function executeLocalRuntime(
   localRuntime: LocalRuntimeInspection,
   args: string[],
@@ -703,8 +709,27 @@ export async function prepareLocalRuntime(args: string[], {
   const dryRun = args.includes("--dry-run");
   const helpRequested = args.includes("--help") || args.includes("-h");
   if (helpRequested) return { action: "current", targetDirectory, local: false };
-  const descriptor = await readLocalRuntimeDescriptor(targetDirectory);
-  let localRuntime = descriptor ? await inspectLocalRuntime(targetDirectory, descriptor) : undefined;
+  let descriptor: LocalRuntimeDescriptor | undefined;
+  try {
+    descriptor = await readLocalRuntimeDescriptor(targetDirectory);
+  } catch (error) {
+    if (canBypassRuntimeForStatus(command || "", error)) {
+      return { action: "current", targetDirectory, local: false };
+    }
+    throw error;
+  }
+  let localRuntime: LocalRuntimeInspection | undefined;
+  try {
+    localRuntime = descriptor ? await inspectLocalRuntime(targetDirectory, descriptor) : undefined;
+  } catch (error) {
+    if (canBypassRuntimeForStatus(command || "", error)) {
+      return { action: "current", targetDirectory, local: false };
+    }
+    throw error;
+  }
+  if (command === "status" && localRuntime && !localRuntime.ready) {
+    return { action: "current", targetDirectory, local: false };
+  }
   const activeLocal = Boolean(
     localRuntime?.ready
     && env.SYNOD_LOCAL_RUNTIME_ACTIVE
