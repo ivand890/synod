@@ -1,6 +1,6 @@
 import { errorEnvelope, successEnvelope } from "./contracts.js";
 import type { Warning } from "./contracts.js";
-import { parseBudgetArgs, parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseRotationArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs, parseWorktreeArgs } from "./command-options.js";
+import { parseBudgetArgs, parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseProposalArgs, parseRotationArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs, parseWorktreeArgs } from "./command-options.js";
 import type { HelpOptions, LifecycleOptions } from "./command-options.js";
 import { doctorProject } from "./doctor.js";
 import type { DoctorClient, DoctorDependencies } from "./doctor.js";
@@ -29,11 +29,14 @@ import {
   decideTaskBudget,
   formatTaskBudgetReport,
   observeTaskBudget,
+  nextTaskGuidance,
   prepareProjectRotation,
   reportProjectRotation,
+  suggestProjectRotation,
   reportTaskBudget,
   setRotationPolicy,
   setTaskBudgetPolicy,
+  submitTaskProposal,
   transitionTask,
   orchestrationStatusWithArtifacts,
   verifyProjectRotation
@@ -44,12 +47,14 @@ import { isRecord } from "./validation.js";
 import { exportRecoveryBundle, verifyRecoveryBundle } from "./recovery.js";
 import { restoreRecoveryBundle } from "./restore.js";
 import { formatHandoff, generateHandoff } from "./handoff.js";
-import { formatWaitReport, waitForThreads } from "./wait.js";
-import type { ThreadStatusAdapter, WaitClient } from "./wait.js";
+import { formatWaitReport, resolveWaitSelection, waitForThreads } from "./wait.js";
+import type { ThreadStatusAdapter, WaitClient, WaitRuntime, WaitSelection } from "./wait.js";
 import { cleanupTaskWorktree, createTaskWorktree, integrateTaskWorktreeProposal, sealTaskWorktreeProposal, taskWorktreeStatus } from "./worktrees.js";
 import type { TaskWorktreeDependencies } from "./worktrees.js";
-import { formatRotationReport } from "./rotation.js";
+import { formatRotationReport, formatRotationSuggestion } from "./rotation.js";
 import { formatCostReport, projectUsageCost, readPriceFile } from "./costs.js";
+import { parseOutputViewArgs, projectJsonEnvelope } from "./output-view.js";
+import type { JsonEnvelopeLike, OutputView } from "./output-view.js";
 
 const HELP = `Synod ${packageVersion}
 
@@ -69,6 +74,8 @@ Usage:
   synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
   synod task override <task-id> --additional-rounds <n> --approver <id> --reference <ref> --reason <text> --evidence <ref> [--cwd <directory>] [--json]
   synod task split <task-id> --replacement <task-id> --replacement <task-id> --reason <text> --evidence <ref> [--cwd <directory>] [--json]
+  synod task next [--cwd <directory>] [--json]
+  synod proposal submit <task-id> --evidence <ref> [--actor <id>] [--cwd <directory>] [--json]
   synod budget set <task-id> --session <thread-id> --since-event <sequence|id> [--soft-tokens <n>] [--hard-tokens <n>] --reason <text> --evidence <ref> [--actor <id>] [--cwd <directory>] [--json]
   synod budget replace <task-id> --session <thread-id> --since-event <sequence|id> [--soft-tokens <n>] [--hard-tokens <n>] --reason <text> --evidence <ref> [--actor <id>] [--cwd <directory>] [--json]
   synod budget report <task-id> [--cwd <directory>] [--json]
@@ -76,6 +83,7 @@ Usage:
   synod budget decide <task-id> --observation <sequence|id> --decision <continue|split|supersede|rotate> [--additional-tokens <n>] --reason <text> --evidence <ref> [--actor <id>] [--cwd <directory>] [--json]
   synod rotation set --session <thread-id> --since-event <sequence|id> [--context-percent <n>] [--compactions <n>] [--wait-calls <n>] [--wait-duration-ms <n>] [--completed-tasks <n>] --reason <text> --evidence <ref> [--actor <id>] [--cwd <directory>] [--json]
   synod rotation replace --session <thread-id> --since-event <sequence|id> [thresholds...] --reason <text> --evidence <ref> [--actor <id>] [--cwd <directory>] [--json]
+  synod rotation suggest [--cwd <directory>] [--json]
   synod rotation report [--cwd <directory>] [--json]
   synod rotation prepare [--actor <id>] [--cwd <directory>] [--json]
   synod rotation verify --recommendation <sequence|id> --session <new-root-thread-id> [--actor <id>] [--cwd <directory>] [--json]
@@ -98,7 +106,7 @@ Usage:
   synod uninstall [directory] [--dry-run] [--force] [--json]
   synod profiles [--json]
   synod usage [--session <thread-id>] [--cwd <directory>] [--since-event <sequence|id> | --since-checkpoint | --task <task-id>] [--until-event <sequence|id>] [--price-file <path>] [--by-model] [--json]
-  synod wait --thread <thread-id> [--thread <thread-id>] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
+  synod wait (--task <task-id> | --thread <thread-id>) [--task <task-id>] [--thread <thread-id>] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
   synod --help
   synod --version
 
@@ -145,7 +153,8 @@ Options:
               Add a bounded hard allowance for a continue decision.
   --price-file
               Project a complete usage report using an explicit dated local price file.
-  --thread    Add a Codex thread ID to a bounded status wait.
+  --thread    Add an explicit Codex thread ID to a bounded status wait.
+  --task      Resolve a canonical active task's bound owner into a bounded status wait.
   --revision  Require the exact task revision for a transition.
   --evidence  Attach evidence to the exact task revision and current checkpoint.
   --owner-thread
@@ -175,8 +184,10 @@ export interface CliDependencies extends LifecycleDependencies, OrchestrationDep
   clientFactory?: (options?: { codexBin: string }) => UsageClient;
   doctorClientFactory?: NonNullable<DoctorDependencies["clientFactory"]>;
   doctorRuntimeResolver?: NonNullable<DoctorDependencies["runtimeResolver"]>;
-  waitClientFactory?: (options?: { cwd?: string }) => WaitClient;
+  waitClientFactory?: (options?: { cwd?: string; codexBin?: string }) => WaitClient;
   waitAdapterFactory?: () => ThreadStatusAdapter;
+  waitRuntimeResolver?: () => WaitRuntime;
+  waitSelectionResolver?: typeof resolveWaitSelection;
   worktreeDependencies?: TaskWorktreeDependencies;
 }
 
@@ -201,6 +212,14 @@ function isDoctorClient(value: unknown): value is DoctorClient {
 
 function printWarnings(warnings: Warning[] | undefined, output: CliOutput): void {
   for (const item of warnings || []) output.warn(`Warning [${item.code}]: ${item.message}`);
+}
+
+function printJsonEnvelope(
+  envelope: JsonEnvelopeLike,
+  output: CliOutput,
+  view: OutputView
+): void {
+  output.log(JSON.stringify(projectJsonEnvelope(envelope, view), null, 2));
 }
 
 function printLifecycleResult(command: string, result: LifecycleResult, output: CliOutput): void {
@@ -256,7 +275,8 @@ async function emitLifecycle(
   options: LifecycleOptions,
   output: CliOutput,
   action: LifecycleAction,
-  dependencies: LifecycleDependencies
+  dependencies: LifecycleDependencies,
+  view: OutputView
 ): Promise<number> {
   const result = await action(options, dependencies);
   if (options.json) {
@@ -267,10 +287,10 @@ async function emitLifecycle(
         `Synod ${command} found conflicts and made no changes.`,
         { details: { paths: result.conflicts } }
       );
-      output.log(JSON.stringify(errorEnvelope(command, error, { warnings }), null, 2));
+      printJsonEnvelope(errorEnvelope(command, error, { warnings }), output, view);
       return 1;
     }
-    output.log(JSON.stringify(successEnvelope(command, data, { warnings }), null, 2));
+    printJsonEnvelope(successEnvelope(command, data, { warnings }), output, view);
   } else {
     printLifecycleResult(command, result, output);
   }
@@ -283,8 +303,13 @@ export async function run(
   dependencies: CliDependencies = {}
 ): Promise<number> {
   const jsonRequested = args.includes("--json");
-  const command = args[0] && !args[0].startsWith("-") ? args[0] : null;
+  let view: OutputView = "full";
+  let command: string | null = args[0] && !args[0].startsWith("-") ? args[0] : null;
   try {
+    const parsedOutputView = parseOutputViewArgs(args);
+    args = parsedOutputView.args;
+    view = parsedOutputView.view;
+    command = args[0] && !args[0].startsWith("-") ? args[0] : null;
     if (args.length === 0 || args[0] === "-h" || args[0] === "--help") {
       output.log(HELP);
       return 0;
@@ -305,7 +330,7 @@ export async function run(
       const cost = priceFile ? projectUsageCost(report, await readPriceFile(priceFile, options.cwd)) : undefined;
       if (options.json) {
         const { warnings, diagnostics, ...data } = report;
-        output.log(JSON.stringify(successEnvelope("usage", { ...data, ...(cost ? { cost } : {}) }, { warnings, diagnostics }), null, 2));
+        printJsonEnvelope(successEnvelope("usage", { ...data, ...(cost ? { cost } : {}) }, { warnings, diagnostics }), output, view);
       } else {
         output.log(`${formatUsageReport(report)}${cost ? `\n\n${formatCostReport(cost)}` : ""}`);
         printWarnings(report.warnings, output);
@@ -323,18 +348,18 @@ export async function run(
       if (options.action === "set" || options.action === "replace") {
         const result = await setTaskBudgetPolicy(options, budgetDependencies);
         const data = { action: options.action, task: result.task, policy: result.policy, lastEvent: result.state.lastEvent };
-        if (options.json) output.log(JSON.stringify(successEnvelope("budget", data), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("budget", data), output, view);
         else output.log(`${options.action === "set" ? "Set" : "Replaced"} token budget for ${result.task.id} at policy revision ${result.policy.revision}.`);
       } else if (options.action === "report") {
         const report = await reportTaskBudget(options, budgetDependencies);
         const warnings: Warning[] = [...report.usage.warnings, ...report.warnings];
-        if (options.json) output.log(JSON.stringify(successEnvelope("budget", { action: "report", report }, { warnings, diagnostics: report.usage.diagnostics }), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("budget", { action: "report", report }, { warnings, diagnostics: report.usage.diagnostics }), output, view);
         else { output.log(formatTaskBudgetReport(report)); printWarnings(warnings, output); }
       } else if (options.action === "observe") {
         const result = await observeTaskBudget(options, budgetDependencies);
         const warnings: Warning[] = [...result.report.usage.warnings, ...result.report.warnings];
         const data = { action: "observe", task: result.task, observation: result.observation, report: result.report, lastEvent: result.state.lastEvent };
-        if (options.json) output.log(JSON.stringify(successEnvelope("budget", data, { warnings, diagnostics: result.report.usage.diagnostics }), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("budget", data, { warnings, diagnostics: result.report.usage.diagnostics }), output, view);
         else { output.log(`Observed ${result.observation.totalTokens} raw tokens for ${result.task.id}: ${result.observation.thresholdStatus}.`); printWarnings(warnings, output); }
       } else if (options.action === "decide") {
         const result = await decideTaskBudget({
@@ -342,7 +367,7 @@ export async function run(
           action: options.decision
         }, budgetDependencies);
         const data = { action: "decide", task: result.task, decision: result.decision, lastEvent: result.state.lastEvent };
-        if (options.json) output.log(JSON.stringify(successEnvelope("budget", data), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("budget", data), output, view);
         else output.log(`Recorded ${result.decision.action} for ${result.task.id} observation ${result.decision.observation.sequence}.`);
       } else throw new SynodError(ERROR_CODES.INTERNAL, "Budget action was not parsed.");
       return 0;
@@ -358,23 +383,42 @@ export async function run(
       if (options.action === "set" || options.action === "replace") {
         const result = await setRotationPolicy(options, rotationDependencies);
         const data = { action: options.action, policy: result.policy, rotation: result.rotation, lastEvent: result.state.lastEvent };
-        if (options.json) output.log(JSON.stringify(successEnvelope("rotation", data), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("rotation", data), output, view);
         else output.log(`${options.action === "set" ? "Set" : "Replaced"} phase-rotation policy revision ${result.policy.revision}.`);
+      } else if (options.action === "suggest") {
+        const suggestion = await suggestProjectRotation(options, rotationDependencies);
+        if (options.json) {
+          const warnings = suggestion.report?.usage.warnings || [];
+          const diagnostics = suggestion.report?.usage.diagnostics || {};
+          const report = suggestion.report
+            ? (() => {
+                const { warnings: _warnings, diagnostics: _diagnostics, ...usage } = suggestion.report.usage;
+                return { ...suggestion.report, usage };
+              })()
+            : undefined;
+          printJsonEnvelope(successEnvelope("rotation", {
+            action: "suggest",
+            suggestion: { ...suggestion, ...(report ? { report } : {}) }
+          }, { warnings, diagnostics }), output, view);
+        } else {
+          output.log(formatRotationSuggestion(suggestion));
+          if (suggestion.report) printWarnings(suggestion.report.usage.warnings, output);
+        }
       } else if (options.action === "report") {
         const report = await reportProjectRotation(options, rotationDependencies);
         if (options.json) {
           const { warnings, diagnostics, ...usage } = report.usage;
-          output.log(JSON.stringify(successEnvelope("rotation", { action: "report", report: { ...report, usage } }, { warnings, diagnostics }), null, 2));
+          printJsonEnvelope(successEnvelope("rotation", { action: "report", report: { ...report, usage } }, { warnings, diagnostics }), output, view);
         } else { output.log(formatRotationReport(report)); printWarnings(report.usage.warnings, output); }
       } else if (options.action === "prepare") {
         const result = await prepareProjectRotation(options, rotationDependencies);
         const data = { action: "prepare", recommendation: result.recommendation, report: result.report, lastEvent: result.state.lastEvent };
-        if (options.json) output.log(JSON.stringify(successEnvelope("rotation", data, { warnings: result.report.usage.warnings, diagnostics: result.report.usage.diagnostics }), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("rotation", data, { warnings: result.report.usage.warnings, diagnostics: result.report.usage.diagnostics }), output, view);
         else output.log(`Prepared phase rotation ${result.recommendation.event.sequence}:${result.recommendation.event.id} for ${result.recommendation.reasons.join(", ")}.`);
       } else if (options.action === "verify") {
         const result = await verifyProjectRotation(options, rotationDependencies);
         const data = { action: "verify", verification: result.verification, session: result.session, lastEvent: result.state.lastEvent };
-        if (options.json) output.log(JSON.stringify(successEnvelope("rotation", data, { warnings: result.session.warnings, diagnostics: result.session.diagnostics }), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("rotation", data, { warnings: result.session.warnings, diagnostics: result.session.diagnostics }), output, view);
         else output.log(`Verified phase rotation from ${result.verification.oldRootSessionId} to ${result.verification.newRootSessionId}.`);
       } else throw new SynodError(ERROR_CODES.INTERNAL, "Rotation action was not parsed.");
       return 0;
@@ -383,15 +427,21 @@ export async function run(
     if (command === "wait") {
       const options = parseWaitArgs(args.slice(1));
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      const report = await waitForThreads(options, {
+      const selection: WaitSelection = await (dependencies.waitSelectionResolver || resolveWaitSelection)({
+        directory: options.cwd,
+        taskIds: options.taskIds,
+        threadIds: options.threadIds
+      });
+      const report = await waitForThreads({ ...options, threadIds: selection.threadIds }, {
         ...(dependencies.waitClientFactory ? { clientFactory: dependencies.waitClientFactory } : {}),
-        ...(dependencies.waitAdapterFactory ? { adapterFactory: dependencies.waitAdapterFactory } : {})
+        ...(dependencies.waitAdapterFactory ? { adapterFactory: dependencies.waitAdapterFactory } : {}),
+        ...(dependencies.waitRuntimeResolver ? { runtimeResolver: dependencies.waitRuntimeResolver } : {})
       });
       if (options.json) {
         const { warnings, diagnostics, ...data } = report;
-        output.log(JSON.stringify(successEnvelope("wait", data, { warnings, diagnostics }), null, 2));
+        printJsonEnvelope(successEnvelope("wait", { selection, ...data }, { warnings, diagnostics }), output, view);
       } else {
-        output.log(formatWaitReport(report));
+        output.log(formatWaitReport(report, selection));
         printWarnings(report.warnings, output);
       }
       return report.incomplete ? 1 : 0;
@@ -409,7 +459,7 @@ export async function run(
               "Synod checkpoint drift was detected.",
               { details: result }
             ));
-        output.log(JSON.stringify(envelope, null, 2));
+        printJsonEnvelope(envelope, output, view);
       } else {
         output.log(formatOrchestrationStatus(result));
       }
@@ -420,7 +470,7 @@ export async function run(
       const options = parseHandoffArgs(args.slice(1));
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
       const result = await generateHandoff(options, dependencies);
-      if (options.json) output.log(JSON.stringify(successEnvelope("handoff", result), null, 2));
+      if (options.json) printJsonEnvelope(successEnvelope("handoff", result), output, view);
       else output.log(formatHandoff(result));
       return 0;
     }
@@ -430,7 +480,7 @@ export async function run(
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
       const result = await recordCheckpoint(options, dependencies);
       const data = { checkpoint: result.checkpoint, lastEvent: result.state.lastEvent };
-      if (options.json) output.log(JSON.stringify(successEnvelope("checkpoint", data), null, 2));
+      if (options.json) printJsonEnvelope(successEnvelope("checkpoint", data), output, view);
       else output.log(`Recorded checkpoint ${result.state.lastEvent.sequence}: ${result.checkpoint.head || "no Git HEAD"}`);
       return 0;
     }
@@ -451,7 +501,7 @@ export async function run(
           bytes: result.bytes,
           manifest: result.manifest
         };
-        if (options.json) output.log(JSON.stringify(successEnvelope("bundle", { action: "export", ...data }), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("bundle", { action: "export", ...data }), output, view);
         else {
           const base = `${result.manifest.source.branch || "detached"}@${result.manifest.source.head || "no HEAD"}`;
           output.log(`Exported recovery bundle ${result.bundleId} to ${result.destination} (${result.entries} paths, ${result.objects} objects; base ${base}; fingerprint ${result.manifest.checkpoint.fingerprint}; untracked ${result.manifest.includeUntracked ? "included" : "excluded"}).`);
@@ -469,7 +519,7 @@ export async function run(
           bytes: result.bytes,
           manifest: result.manifest
         };
-        if (options.json) output.log(JSON.stringify(successEnvelope("bundle", { action: "verify", ...data }), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("bundle", { action: "verify", ...data }), output, view);
         else output.log(`Verified recovery bundle ${result.bundleId} (${result.entries} paths, ${result.objects} objects, ${result.bytes} bytes).`);
       } else {
         const result = await restoreRecoveryBundle(options, dependencies);
@@ -485,7 +535,7 @@ export async function run(
           bytes: result.bytes,
           manifest: result.manifest
         };
-        if (options.json) output.log(JSON.stringify(successEnvelope("bundle", { action: "restore", ...data }), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("bundle", { action: "restore", ...data }), output, view);
         else output.log(`Restored recovery bundle ${result.bundleId} into ${result.destination} (${result.entries} paths; base ${result.baseHead}; fingerprint ${result.fingerprint}).`);
       }
       return 0;
@@ -494,15 +544,21 @@ export async function run(
     if (command === "task") {
       const options = parseTaskArgs(args.slice(1));
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      if (options.action === "add") {
+      if (options.action === "next") {
+        const guidance = await nextTaskGuidance(options);
+        if (options.json) printJsonEnvelope(successEnvelope("task", { action: "next", guidance }), output, view);
+        else output.log(guidance.recommendedTaskId
+          ? `Next task: ${guidance.recommendedTaskId}`
+          : "No actionable canonical task.");
+      } else if (options.action === "add") {
         const result = await addTask(options, dependencies);
         const data = { task: result.task, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
-        if (options.json) output.log(JSON.stringify(successEnvelope("task", { action: "add", ...data }), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("task", { action: "add", ...data }), output, view);
         else output.log(`Added ${result.task.id} in ${result.task.state} at revision ${result.task.revision}.`);
       } else if (options.action === "transition") {
         const result = await transitionTask(options, dependencies);
         const data = { task: result.task, evidence: result.evidence, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
-        if (options.json) output.log(JSON.stringify(successEnvelope("task", { action: "transition", ...data }), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("task", { action: "transition", ...data }), output, view);
         else {
           output.log(`Transitioned ${result.task.id} to ${result.task.state} at revision ${result.task.revision}.`);
           for (const item of result.evidence) output.log(`Recorded evidence ${item.id}: ${item.kind} @ revision ${item.revision}.`);
@@ -510,14 +566,24 @@ export async function run(
       } else if (options.action === "override") {
         const result = await overrideCorrectionPolicy(options, dependencies);
         const data = { task: result.task, override: result.override, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
-        if (options.json) output.log(JSON.stringify(successEnvelope("task", { action: "override", ...data }), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("task", { action: "override", ...data }), output, view);
         else output.log(`Added ${result.override.added} correction round(s) to ${result.task.id}; limit ${result.task.correctionPolicy.limit}.`);
       } else {
         const result = await splitTask(options, dependencies);
         const data = { task: result.task, replacements: result.replacements, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
-        if (options.json) output.log(JSON.stringify(successEnvelope("task", { action: "split", ...data }), null, 2));
+        if (options.json) printJsonEnvelope(successEnvelope("task", { action: "split", ...data }), output, view);
         else output.log(`Split ${result.task.id} into ${result.replacements.map(item => item.id).join(", ")}.`);
       }
+      return 0;
+    }
+
+    if (command === "proposal") {
+      const options = parseProposalArgs(args.slice(1));
+      if (isHelpOptions(options)) { output.log(HELP); return 0; }
+      const result = await submitTaskProposal(options, dependencies);
+      const data = { task: result.task, proposal: result.task.proposal, evidence: result.evidence, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
+      if (options.json) printJsonEnvelope(successEnvelope("proposal", { action: "submit", ...data }), output, view);
+      else output.log(`Submitted ${result.task.id} proposal revision ${result.task.revision} for review.`);
       return 0;
     }
 
@@ -548,11 +614,29 @@ export async function run(
         task: result.task,
         ...("lease" in result ? { lease: result.lease } : { reservation: result.reservation }),
         ...("writeAuthorized" in result ? { writeAuthorized: result.writeAuthorized } : {}),
+        ...(options.action === "bind" && "lease" in result ? {
+          activation: {
+            taskId: result.task.id,
+            revision: result.task.revision,
+            leaseId: result.lease.id,
+            generation: result.lease.generation,
+            ownerThread: result.lease.ownerThread,
+            boundAt: result.lease.acquiredAt,
+            event: result.state.lastEvent,
+            writeAuthorized: true,
+            supervisorNotification: { status: "required-not-observed" as const },
+            followUp: {
+              operation: "wait",
+              arguments: { taskIds: [result.task.id] },
+              requirements: []
+            }
+          }
+        } : {}),
         ...("evidence" in result ? { evidence: result.evidence } : {}),
         checkpoint: result.state.checkpoint,
         lastEvent: result.state.lastEvent
       };
-      if (options.json) output.log(JSON.stringify(successEnvelope("lease", data), null, 2));
+      if (options.json) printJsonEnvelope(successEnvelope("lease", data), output, view);
       else {
         const authority = "lease" in result ? result.lease : result.reservation;
         const authorization = "writeAuthorized" in result
@@ -594,7 +678,7 @@ export async function run(
             };
       }
       const data = { action: options.action, ...result };
-      if (options.json) output.log(JSON.stringify(successEnvelope("worktree", data), null, 2));
+      if (options.json) printJsonEnvelope(successEnvelope("worktree", data), output, view);
       else if (options.action === "create") {
         output.log(`Created detached worktree for ${result.record.taskId} at ${result.record.worktreePath} (${result.record.baseHead}).`);
       } else if (options.action === "seal") {
@@ -617,7 +701,7 @@ export async function run(
         throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${options.directory}`);
       }
       const profiles = listProfiles();
-      if (options.json) output.log(JSON.stringify(successEnvelope("profiles", { profiles }), null, 2));
+      if (options.json) printJsonEnvelope(successEnvelope("profiles", { profiles }), output, view);
       else for (const profile of profiles) output.log(`${profile.id}: ${profile.description} (Codex >=${profile.minimumCodexVersion})`);
       return 0;
     }
@@ -625,17 +709,17 @@ export async function run(
     if (command === "init") {
       const options = parseLifecycleArgs(args.slice(1), { allowDryRun: true, allowForce: true, allowProfile: true });
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      return emitLifecycle("init", options, output, initProject, dependencies);
+      return emitLifecycle("init", options, output, initProject, dependencies, view);
     }
     if (command === "upgrade") {
       const options = parseLifecycleArgs(args.slice(1), { allowDryRun: true, allowForce: true, allowProfile: true });
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      return emitLifecycle("upgrade", options, output, upgradeProject, dependencies);
+      return emitLifecycle("upgrade", options, output, upgradeProject, dependencies, view);
     }
     if (command === "uninstall") {
       const options = parseLifecycleArgs(args.slice(1), { allowDryRun: true, allowForce: true });
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      return emitLifecycle("uninstall", options, output, uninstallProject, dependencies);
+      return emitLifecycle("uninstall", options, output, uninstallProject, dependencies, view);
     }
     if (command === "check") {
       const options = parseLifecycleArgs(args.slice(1));
@@ -650,7 +734,7 @@ export async function run(
               "Synod project integrity check failed.",
               { details: data }
             ), { warnings });
-        output.log(JSON.stringify(envelope, null, 2));
+        printJsonEnvelope(envelope, output, view);
       } else {
         output.log(textCheck(result));
         printWarnings(result.warnings, output);
@@ -683,7 +767,7 @@ export async function run(
               "Synod doctor found an unsupported or unhealthy runtime.",
               { details: data }
             ), { warnings, diagnostics });
-        output.log(JSON.stringify(envelope, null, 2));
+        printJsonEnvelope(envelope, output, view);
       } else {
         output.log(textDoctor(result));
         printWarnings(result.warnings, output);
@@ -697,10 +781,10 @@ export async function run(
   } catch (error) {
     const synodError = asSynodError(error);
     if (jsonRequested) {
-      output.log(JSON.stringify(errorEnvelope(command, synodError, {
+      printJsonEnvelope(errorEnvelope(command, synodError, {
         ...(synodError.warnings ? { warnings: synodError.warnings } : {}),
         ...(synodError.diagnostics ? { diagnostics: synodError.diagnostics } : {})
-      }), null, 2));
+      }), output, view);
       return 1;
     }
     printWarnings(synodError.warnings || [], output);

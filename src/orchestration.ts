@@ -92,11 +92,14 @@ import {
   currentRotationPhase,
   isProjectRotation,
   isRotationThresholds,
+  recommendedRotationThresholds,
   type ProjectRotation,
   type RotationHandoffIdentity,
+  type RotationMetric,
   type RotationPolicy,
   type RotationRecommendation,
   type RotationReport,
+  type RotationSuggestion,
   type RotationThresholds
 } from "./rotation.js";
 
@@ -538,6 +541,177 @@ export function legalTaskTransitions(
     }
   }
   return allowed;
+}
+
+export async function nextTaskGuidance(
+  { directory = "." }: { directory?: string } = {},
+  { clock = () => Date.now() }: { clock?: () => number } = {}
+) {
+  const targetDirectory = path.resolve(directory);
+  const canonical = await readOrchestration(targetDirectory);
+  const tasks = canonical.state.taskOrder
+    .map(taskId => canonical.state.tasks[taskId])
+    .filter((task): task is OrchestrationTask => task !== undefined)
+    .filter(task => !["DONE", "SUPERSEDED"].includes(task.state))
+    .map(task => {
+      const nominalTransitions = legalTaskTransitions(task, canonical.state.tasks);
+      const correctionReady = ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state);
+      const leaseActivationReady = !task.lease
+        && (task.state === "READY" || correctionReady);
+      const expiredReservation = task.leaseReservation?.status === "RESERVED"
+        && Date.parse(task.leaseReservation.expiresAt) <= clock();
+      const expiredLease = task.lease?.status === "ACTIVE" && Date.parse(task.lease.expiresAt) <= clock();
+      const legalTransitions = task.leaseReservation || expiredLease
+        ? []
+        : nominalTransitions.filter(to => !(task.state === "ACTIVE" && to === "REVIEW" && !task.lease));
+      const incompleteDependencies = task.dependsOn.filter(taskId => canonical.state.tasks[taskId]?.state !== "DONE");
+      const transitionActions = legalTransitions.map(to => ({
+        ...(leaseActivationReady && to === "ACTIVE"
+          ? {
+              operation: "lease.reserve",
+              arguments: {
+                taskId: task.id,
+                write: [],
+                writeTree: [],
+                read: [],
+                readTree: []
+              },
+              requirements: ["write-scope"]
+            }
+          : {
+              operation: task.state === "ACTIVE" && to === "REVIEW" ? "proposal.submit" : "task.transition",
+              arguments: task.state === "ACTIVE" && to === "REVIEW"
+                ? { taskId: task.id, evidence: [] }
+                : {
+                    taskId: task.id,
+                    to,
+                    revision: task.state === "ACTIVE" && to === "REVIEW" ? task.revision + 1 : task.revision,
+                    evidence: [],
+                    ...(to === "BLOCKED" || to === "SUPERSEDED" ? { reason: null } : {})
+                  },
+              requirements: [
+                ...(to === "ACTIVE" && !task.lease ? ["active-writer-lease"] : []),
+                ...((task.state === "ACTIVE" && to === "REVIEW")
+                  || (task.state === "REVIEW" && to === "ACCEPTED")
+                  || (task.state === "ACCEPTED" && to === "VERIFIED")
+                  || (to === "ACTIVE" && correctionReady) ? ["evidence"] : []),
+                ...(["BLOCKED", "SUPERSEDED"].includes(to) ? ["reason"] : [])
+              ]
+            })
+      }));
+      const bindRequirements = ["owner-thread", ...(correctionReady ? ["evidence"] : [])];
+      const actions = expiredReservation && task.leaseReservation
+        ? [{
+            operation: "lease.expire",
+            arguments: {
+              taskId: task.id,
+              reservationToken: task.leaseReservation.token,
+              leaseId: task.leaseReservation.id,
+              generation: task.leaseReservation.generation,
+              revision: task.leaseReservation.taskRevision,
+              expectedReservedAt: task.leaseReservation.reservedAt,
+              baselineHash: task.leaseReservation.baseline.snapshotContentHash,
+              reason: null
+            },
+            requirements: ["reason"]
+          }]
+        : task.leaseReservation
+        ? [{
+            operation: "lease.bind",
+            arguments: {
+              taskId: task.id,
+              reservationToken: task.leaseReservation.token,
+              leaseId: task.leaseReservation.id,
+              generation: task.leaseReservation.generation,
+              revision: task.leaseReservation.taskRevision,
+              expectedReservedAt: task.leaseReservation.reservedAt,
+              baselineHash: task.leaseReservation.baseline.snapshotContentHash,
+              ownerThread: null,
+              evidence: []
+            },
+            requirements: bindRequirements
+          }]
+        : expiredLease && task.lease
+          ? [{
+              operation: "lease.expire",
+              arguments: {
+                taskId: task.id,
+                leaseId: task.lease.id,
+                generation: task.lease.generation,
+                revision: task.revision,
+                expectedHeartbeatAt: task.lease.heartbeatAt,
+                reason: null
+              },
+              requirements: ["reason"]
+            }]
+          : task.recovery?.status === "PENDING"
+            ? [{
+                operation: "lease.recover",
+                arguments: {
+                  taskId: task.id,
+                  leaseId: task.recovery.endedLease.id,
+                  generation: task.recovery.endedLease.generation,
+                  revision: task.revision,
+                  expectedHeartbeatAt: task.recovery.endedLease.heartbeatAt,
+                  decision: null,
+                  reason: null
+                },
+                requirements: ["decision", "reason"]
+              }]
+            : transitionActions;
+      return {
+        id: task.id,
+        state: task.state,
+        revision: task.revision,
+        dependsOn: [...task.dependsOn],
+        incompleteDependencies,
+        correction: structuredClone(task.correctionPolicy),
+        budget: task.budget ? {
+          policyRevision: task.budget.policy.revision,
+          thresholdStatus: task.budget.thresholdStatus,
+          decisionRequired: task.budget.thresholdStatus === "decision-required"
+        } : null,
+        recovery: task.recovery ? {
+          status: task.recovery.status,
+          priorGeneration: task.recovery.endedLease.generation,
+          priorOwnerThread: task.recovery.endedLease.ownerThread
+        } : null,
+        lease: task.lease ? {
+          id: task.lease.id,
+          generation: task.lease.generation,
+          status: task.lease.status,
+          ownerThread: task.lease.ownerThread,
+          expiresAt: task.lease.expiresAt
+        } : null,
+        reservation: task.leaseReservation ? {
+          id: task.leaseReservation.id,
+          generation: task.leaseReservation.generation,
+          status: task.leaseReservation.status,
+          expiresAt: task.leaseReservation.expiresAt
+        } : null,
+        proposal: task.proposal ? {
+          revision: task.proposal.revision,
+          generation: task.proposal.generation,
+          status: task.proposal.status,
+          bundleId: task.proposal.bundleId
+        } : null,
+        constraints: {
+          reservationRequiresBind: Boolean(task.leaseReservation),
+          reservationExpired: Boolean(expiredReservation),
+          leaseExpired: Boolean(expiredLease),
+          recoveryDecisionRequired: task.recovery?.status === "PENDING",
+          budgetDecisionRequired: task.budget?.thresholdStatus === "decision-required",
+          correctionExhausted: task.correctionPolicy.used >= task.correctionPolicy.limit
+        },
+        legalTransitions,
+        actions
+      };
+    });
+  return {
+    recommendedTaskId: tasks.find(task => task.actions.length > 0)?.id || null,
+    tasks,
+    lastEvent: canonical.state.lastEvent
+  };
 }
 
 const execFileAsync = promisify(execFile);
@@ -3671,6 +3845,73 @@ export async function reportProjectRotation(
   return rotationReportFromCanonical(targetDirectory, await readOrchestration(targetDirectory), dependencies);
 }
 
+export async function suggestProjectRotation(
+  { directory = "." }: { directory?: string } = {},
+  dependencies: OrchestrationDependencies = {}
+): Promise<RotationSuggestion> {
+  const targetDirectory = path.resolve(directory);
+  const canonical = await readOrchestration(targetDirectory);
+  const phaseTaskCount = canonical.state.taskOrder.filter(taskId => canonical.state.tasks[taskId]?.state !== "SUPERSEDED").length;
+  const recommendedThresholds = recommendedRotationThresholds(phaseTaskCount);
+  if (canonical.state.rotation) {
+    const report = await rotationReportFromCanonical(targetDirectory, canonical, dependencies);
+    const pending = pendingRotationRecommendation(canonical.state.rotation);
+    return {
+      configured: true,
+      phaseTaskCount,
+      recommendedThresholds,
+      observations: report.metrics,
+      report,
+      nextAction: pending
+        ? {
+            operation: "rotation.verify",
+            arguments: {
+              recommendation: { value: pending.event.id, required: false },
+              rootSessionId: { value: null, required: true }
+            }
+          }
+        : report.recommended
+          ? { operation: "rotation.prepare", arguments: {} }
+          : { operation: "rotation.report", arguments: {} }
+    };
+  }
+  const metricThresholds: Array<[RotationMetric["name"], number | undefined]> = [
+    ["supervisor-context-percent", recommendedThresholds.supervisorContextPercent],
+    ["compactions", recommendedThresholds.compactions],
+    ["wait-calls", recommendedThresholds.waitCalls],
+    ["completed-tasks", recommendedThresholds.completedTasks]
+  ];
+  const observations: RotationMetric[] = metricThresholds.map(([name, threshold]) => ({
+    name,
+    status: "unavailable",
+    threshold: threshold!,
+    triggered: false
+  }));
+  return {
+    configured: false,
+    phaseTaskCount,
+    recommendedThresholds,
+    observations,
+    nextAction: {
+      operation: "rotation.set",
+      arguments: {
+        rootSessionId: { value: null, required: true },
+        startEvent: {
+          value: {
+            sequence: canonical.state.lastEvent.sequence,
+            id: canonical.state.lastEvent.id,
+            hash: canonical.state.lastEvent.hash
+          },
+          required: false
+        },
+        thresholds: { value: recommendedThresholds, required: false },
+        reason: { value: null, required: true },
+        evidence: { value: [], required: true }
+      }
+    }
+  };
+}
+
 export async function prepareProjectRotation(
   { directory = ".", actor = "supervisor" }: { directory?: string; actor?: string } = {},
   dependencies: OrchestrationDependencies = {}
@@ -5719,6 +5960,31 @@ export async function transitionTask({
       },
       result: { task, evidence: createdEvidence }
     };
+  }, dependencies);
+}
+
+export async function submitTaskProposal({
+  directory = ".",
+  id,
+  evidence = [],
+  actor = "supervisor"
+}: { directory?: string; id?: string; evidence?: unknown[]; actor?: string } = {}, dependencies: OrchestrationDependencies = {}) {
+  const taskId = String(id || "").trim().toUpperCase();
+  const canonical = await readOrchestration(path.resolve(directory));
+  const task = canonical.state.tasks[taskId];
+  if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+  if (task.state !== "ACTIVE" || !task.lease || task.lease.status !== "ACTIVE") {
+    throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} requires an active bound writer lease before proposal submission.`, {
+      details: { taskId, state: task.state, hasLease: Boolean(task.lease) }
+    });
+  }
+  return transitionTask({
+    directory,
+    id: taskId,
+    to: "REVIEW",
+    revision: task.revision + 1,
+    evidence,
+    actor
   }, dependencies);
 }
 

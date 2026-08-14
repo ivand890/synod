@@ -727,11 +727,34 @@ process.stdout.write(JSON.stringify({ notification: notification.mode, fallbackP
   const boundData = nestedRecord(jsonRecord(boundOutput, "bind envelope"), "data", "bind envelope");
   const boundLease = nestedRecord(boundData, "lease", "bind envelope.data");
   const boundTask = nestedRecord(boundData, "task", "bind envelope.data");
+  const activation = nestedRecord(boundData, "activation", "bind envelope.data");
+  const activationEvent = nestedRecord(activation, "event", "bind envelope.data.activation");
+  const activationNotification = nestedRecord(activation, "supervisorNotification", "bind envelope.data.activation");
+  const activationFollowUp = nestedRecord(activation, "followUp", "bind envelope.data.activation");
+  const activationArguments = nestedRecord(activationFollowUp, "arguments", "bind envelope.data.activation.followUp");
+  const boundLastEvent = nestedRecord(boundData, "lastEvent", "bind envelope.data");
   if (
     boundData.writeAuthorized !== true
     || boundTask.state !== "ACTIVE"
     || boundLease.id !== reservation.id
     || boundLease.ownerThread !== "thread:simulated-spawn"
+    || activation.taskId !== "T-RESERVE-BIND"
+    || activation.revision !== boundTask.revision
+    || activation.leaseId !== boundLease.id
+    || activation.generation !== boundLease.generation
+    || activation.ownerThread !== boundLease.ownerThread
+    || activation.boundAt !== boundLease.acquiredAt
+    || activation.writeAuthorized !== true
+    || activationNotification.status !== "required-not-observed"
+    || activationEvent.sequence !== boundLastEvent.sequence
+    || activationEvent.id !== boundLastEvent.id
+    || activationEvent.hash !== boundLastEvent.hash
+    || activationFollowUp.operation !== "wait"
+    || !Array.isArray(activationArguments.taskIds)
+    || activationArguments.taskIds.length !== 1
+    || activationArguments.taskIds[0] !== "T-RESERVE-BIND"
+    || !Array.isArray(activationFollowUp.requirements)
+    || boundOutput.includes(String(reservation.token))
   ) {
     throw new Error(`Installed reservation did not bind atomically: ${boundOutput}`);
   }
@@ -993,6 +1016,23 @@ process.stdout.write(JSON.stringify({ notification: notification.mode, fallbackP
     || statusWorktrees.sealedProposals !== 1
   ) {
     throw new Error(`Installed CLI returned an invalid orchestration status: ${statusOutput}`);
+  }
+  const summaryStatusOutput = runSynod(["status", targetDirectory, "--json", "--view", "summary"], {
+    cwd: consumerDirectory,
+    capture: true,
+  });
+  const summaryStatusEnvelope = jsonRecord(summaryStatusOutput, "summary status envelope");
+  const summaryStatusData = nestedRecord(summaryStatusEnvelope, "data", "summary status envelope");
+  const summaryTasks = summaryStatusData.tasks;
+  if (
+    summaryStatusEnvelope.ok !== true
+    || summaryStatusData.healthy !== true
+    || typeof summaryStatusData.eventCount !== "number"
+    || !Array.isArray(summaryTasks)
+    || (summaryTasks.length > 0 && isRecord(summaryTasks[0]) && Object.hasOwn(summaryTasks[0], "evidence"))
+    || !isRecord(summaryStatusData.lastEvent)
+  ) {
+    throw new Error(`Installed CLI returned an invalid summary orchestration status: ${summaryStatusOutput}`);
   }
   const explainedStatusOutput = runSynod(["status", targetDirectory, "--explain", "--json"], {
     cwd: consumerDirectory,

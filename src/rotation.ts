@@ -108,6 +108,35 @@ export interface RotationReport {
   completedTaskIds: string[];
 }
 
+export interface RotationActionArgument {
+  value: string | string[] | number | RotationThresholds | CanonicalEventIdentity | null;
+  required: boolean;
+}
+
+export interface RotationTypedAction {
+  operation: "rotation.set" | "rotation.report" | "rotation.prepare" | "rotation.verify";
+  arguments: Record<string, RotationActionArgument>;
+}
+
+export interface RotationSuggestion {
+  configured: boolean;
+  phaseTaskCount: number;
+  recommendedThresholds: RotationThresholds;
+  observations: RotationMetric[];
+  report?: RotationReport;
+  nextAction: RotationTypedAction;
+}
+
+export function recommendedRotationThresholds(phaseTaskCount: number): RotationThresholds {
+  const normalizedPhaseSize = Number.isSafeInteger(phaseTaskCount) && phaseTaskCount > 0 ? phaseTaskCount : 1;
+  return {
+    supervisorContextPercent: 80,
+    compactions: 3,
+    waitCalls: 50,
+    completedTasks: Math.min(3, normalizedPhaseSize)
+  };
+}
+
 function isPositiveInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
 }
@@ -429,5 +458,18 @@ export function formatRotationReport(report: RotationReport): string {
     `Completeness: ${report.usage.completeness.status}${report.usage.completeness.reasons.length > 0 ? ` (${report.usage.completeness.reasons.join(", ")})` : ""}`,
     ...metrics,
     `Report: ${report.reportHash}`
+  ].join("\n");
+}
+
+export function formatRotationSuggestion(suggestion: RotationSuggestion): string {
+  const observations = suggestion.observations.map(item => {
+    const current = item.current === undefined ? "unavailable" : Math.round(item.current * 100) / 100;
+    return `- ${item.name}: ${current}/${item.threshold} (${item.status})${item.triggered ? " TRIGGERED" : ""}`;
+  });
+  return [
+    `Phase rotation preflight: ${suggestion.configured ? "configured" : "unconfigured"}`,
+    `Canonical phase tasks: ${suggestion.phaseTaskCount}`,
+    ...observations,
+    `Next typed action: ${suggestion.nextAction.operation}`
   ].join("\n");
 }

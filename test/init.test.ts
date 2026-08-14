@@ -43,6 +43,8 @@ test("initializes a fresh project with durable state, agents, and skill", async 
   assert.match(agents, /Before spawning a writer, reserve/);
   assert.match(agents, /writes, worktrees, and implementation commands must wait/);
   assert.match(agents, /Keep `lease acquire` only for an already-known worker identity/);
+  assert.match(agents, /proposal summary returns a typed exact-revision acceptance action/);
+  assert.doesNotMatch(agents, /receipt preserves the exact next-operation lease fence/);
 
   const manifest = JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8"));
   assert.equal(manifest.schemaVersion, 3);
@@ -218,8 +220,13 @@ test("keeps the primary agent supervisory and delegates routine implementation",
   assert.match(skill, /usage --task <task-id> --session <session-id>/);
   assert.match(skill, /incomplete usage fails closed/);
   assert.match(skill, /Before spawning a writer, run `[^`]+ lease reserve/);
-  assert.match(skill, /Only then tell the worker that writes are authorized/);
+  assert.match(skill, /wait --task <task-id>/);
+  assert.match(skill, /use direct platform `wait_agent` for exactly the returned thread IDs/);
+  assert.match(skill, /Only after a successful bind may the supervisor send explicit write authorization/);
+  assert.match(skill, /activation receipt does not claim that notification was observed/);
   assert.match(skill, /atomic `delegate start` remains deferred/);
+  assert.match(skill, /summary returns a typed exact-revision acceptance action/);
+  assert.doesNotMatch(skill, /receipt preserves the exact next-operation lease fence/);
   assert.match(agents, /Do not use the supervising model as the default implementation worker\./);
   assert.match(decisions, /Cost-efficient agents perform implementation/);
 });

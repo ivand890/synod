@@ -1,9 +1,11 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { CodexAppServerClient } from "./app-server.js";
 import type { AppServerDiagnostics, AppServerEvent } from "./app-server.js";
+import { resolveCodexRuntime } from "./codex-runtime.js";
 import { WARNING_CODES, warning } from "./contracts.js";
 import type { Warning } from "./contracts.js";
 import { ERROR_CODES, SynodError, asSynodError } from "./errors.js";
+import { validateOrchestrationReadOnly } from "./orchestration.js";
 import { errorMessage, isRecord } from "./validation.js";
 
 export type ThreadStatus =
@@ -50,6 +52,8 @@ export interface WaitReport {
   incomplete: boolean;
   approvalNeeded: boolean;
   userInputNeeded: boolean;
+  hostFallbackRequired: boolean;
+  hostFallbackThreadIds: string[];
   statuses: ObservedThreadStatus[];
   warnings: Warning[];
   diagnostics: AppServerDiagnostics | Record<string, unknown>;
@@ -66,9 +70,63 @@ export interface WaitClient {
   getDiagnostics?(): AppServerDiagnostics | Record<string, unknown>;
 }
 
+export interface WaitRuntime {
+  surface?: string;
+  executable: string;
+  executableSource?: string;
+  resolved: boolean;
+}
+
+export interface WaitTaskSelection {
+  taskId: string;
+  state: string;
+  revision: number;
+  leaseId: string;
+  generation: number;
+  ownerThread: string;
+}
+
+export interface WaitSelection {
+  requestedTaskIds: string[];
+  requestedThreadIds: string[];
+  tasks: WaitTaskSelection[];
+  threadIds: string[];
+}
+
+export interface WaitSelectionOptions {
+  directory?: string;
+  taskIds?: string[];
+  threadIds?: string[];
+}
+
+export interface WaitSelectionDependencies {
+  canonicalReader?: (directory: string) => Promise<{
+    state: { tasks: Record<string, WaitSelectableTask | undefined> };
+  }>;
+  clock?: () => number;
+}
+
+interface WaitSelectableTask {
+  state: string;
+  revision: number;
+  lease?: {
+    id: string;
+    generation: number;
+    ownerThread: string;
+    status: string;
+    expiresAt: string;
+  };
+  leaseReservation?: { id: string; generation: number };
+  recovery?: {
+    status: string;
+    endedLease: { id: string; generation: number };
+  };
+}
+
 export interface WaitDependencies {
   adapterFactory?: () => ThreadStatusAdapter;
-  clientFactory?: (options?: { cwd?: string }) => WaitClient;
+  clientFactory?: (options?: { cwd?: string; codexBin?: string }) => WaitClient;
+  runtimeResolver?: () => WaitRuntime;
   clock?: () => number;
   cleanupTimeoutMs?: number;
 }
@@ -151,12 +209,74 @@ function completion(statuses: ObservedThreadStatus[]): {
     item.status.type === "notLoaded" || item.status.type === "idle" || item.status.type === "systemError"
   );
   const systemError = statuses.some(item => item.status.type === "systemError");
+  const notLoaded = statuses.some(item => item.status.type === "notLoaded");
   const attentionNeeded = approvalNeeded || userInputNeeded;
   return {
     done: attentionNeeded || terminal,
     approvalNeeded,
     userInputNeeded,
-    incomplete: attentionNeeded || systemError || !terminal
+    incomplete: attentionNeeded || systemError || notLoaded || !terminal
+  };
+}
+
+export async function resolveWaitSelection({
+  directory = ".",
+  taskIds = [],
+  threadIds = []
+}: WaitSelectionOptions = {}, {
+  canonicalReader = async selectedDirectory => validateOrchestrationReadOnly({ directory: selectedDirectory }),
+  clock = () => Date.now()
+}: WaitSelectionDependencies = {}): Promise<WaitSelection> {
+  const requestedTaskIds = [...new Set(taskIds.map(value => String(value).trim().toUpperCase()).filter(Boolean))];
+  const requestedThreadIds = [...new Set(threadIds.map(value => String(value).trim()).filter(Boolean))];
+  if (requestedTaskIds.length === 0 && requestedThreadIds.length === 0) {
+    throw new SynodError(ERROR_CODES.WAIT_INVALID, "Wait requires at least one canonical task or explicit thread.");
+  }
+
+  const tasks: WaitTaskSelection[] = [];
+  if (requestedTaskIds.length > 0) {
+    const canonical = await canonicalReader(directory);
+    for (const taskId of requestedTaskIds) {
+      const task = canonical.state.tasks[taskId];
+      if (!task) {
+        throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+      }
+      if (task.recovery?.status === "PENDING") {
+        throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} has a pending abandoned-owner recovery and cannot be waited on by task.`, {
+          details: { taskId, leaseId: task.recovery.endedLease.id, generation: task.recovery.endedLease.generation }
+        });
+      }
+      if (task.leaseReservation) {
+        throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} has not bound its writer reservation to an owner thread.`, {
+          details: { taskId, leaseId: task.leaseReservation.id, generation: task.leaseReservation.generation }
+        });
+      }
+      const lease = task.lease;
+      if (!lease || lease.status !== "ACTIVE" || task.state !== "ACTIVE") {
+        throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} has no active bound writer lease to wait for.`, {
+          details: { taskId, state: task.state, hasLease: Boolean(lease) }
+        });
+      }
+      if (Date.parse(lease.expiresAt) <= clock()) {
+        throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} bound writer lease has expired.`, {
+          details: { taskId, leaseId: lease.id, generation: lease.generation, expiresAt: lease.expiresAt }
+        });
+      }
+      tasks.push({
+        taskId,
+        state: task.state,
+        revision: task.revision,
+        leaseId: lease.id,
+        generation: lease.generation,
+        ownerThread: lease.ownerThread
+      });
+    }
+  }
+  return {
+    requestedTaskIds,
+    requestedThreadIds,
+    tasks,
+    threadIds: [...new Set([...tasks.map(task => task.ownerThread), ...requestedThreadIds])]
   };
 }
 
@@ -319,11 +439,22 @@ export async function waitForThreads({
     || !Number.isSafeInteger(cleanupTimeoutMs) || cleanupTimeoutMs <= 0) {
     throw new SynodError(ERROR_CODES.WAIT_INVALID, "Wait requires thread IDs, a positive timeout, and a poll interval of at most 5000ms.");
   }
-  const adapter = dependencies.adapterFactory?.()
-    || appServerThreadStatusAdapter(
-      dependencies.clientFactory?.(cwd ? { cwd } : undefined)
-      || new CodexAppServerClient(cwd ? { cwd } : {})
+  let adapter = dependencies.adapterFactory?.();
+  if (!adapter) {
+    const runtime = (dependencies.runtimeResolver || resolveCodexRuntime)();
+    if (runtime.surface === "desktop" && !runtime.resolved) {
+      throw new SynodError(
+        ERROR_CODES.CODEX_RUNTIME_AMBIGUOUS,
+        "Synod wait detected Codex Desktop but could not resolve its App Server executable.",
+        { details: runtime }
+      );
+    }
+    const clientOptions = { ...(cwd ? { cwd } : {}), codexBin: runtime.executable };
+    adapter = appServerThreadStatusAdapter(
+      dependencies.clientFactory?.(clientOptions)
+      || new CodexAppServerClient(clientOptions)
     );
+  }
   const now = dependencies.clock || (() => Date.now());
   const startedAt = now();
   const deadline = startedAt + timeoutMs;
@@ -432,6 +563,9 @@ export async function waitForThreads({
 
     const statuses = projectStatuses(ids, byId);
     const final = completion(statuses);
+    const hostFallbackThreadIds = statuses
+      .filter(item => item.status.type === "notLoaded")
+      .map(item => item.threadId);
     report = {
       mode,
       threadIds: ids,
@@ -443,6 +577,8 @@ export async function waitForThreads({
       incomplete: timedOut || aborted || final.incomplete,
       approvalNeeded: final.approvalNeeded,
       userInputNeeded: final.userInputNeeded,
+      hostFallbackRequired: hostFallbackThreadIds.length > 0,
+      hostFallbackThreadIds,
       statuses,
       warnings: [],
       diagnostics: {}
@@ -500,12 +636,19 @@ export async function waitForThreads({
   };
 }
 
-export function formatWaitReport(report: WaitReport): string {
-  const lines = [
+export function formatWaitReport(report: WaitReport, selection?: WaitSelection): string {
+  const lines: string[] = [];
+  for (const task of selection?.tasks || []) {
+    lines.push(`${task.taskId}: ${task.state} r${task.revision}; lease ${task.leaseId} g${task.generation}; owner ${task.ownerThread}`);
+  }
+  lines.push(
     `Synod wait: ${report.incomplete ? "attention required" : "complete"}`,
     `Mode: ${report.mode}; wakes ${report.wakeCount}; fallback polls ${report.fallbackPollCount}; elapsed ${report.elapsedMs}ms`,
     `Timed out: ${report.timedOut ? "yes" : "no"}; aborted: ${report.aborted ? "yes" : "no"}; approval needed: ${report.approvalNeeded ? "yes" : "no"}; user input needed: ${report.userInputNeeded ? "yes" : "no"}`
-  ];
+  );
+  if (report.hostFallbackRequired) {
+    lines.push(`Host fallback required: ${report.hostFallbackThreadIds.join(", ")}`);
+  }
   for (const item of report.statuses) {
     const flags = item.status.type === "active" && item.status.activeFlags.length > 0
       ? ` (${item.status.activeFlags.join(", ")})`

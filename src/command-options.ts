@@ -1,5 +1,6 @@
 import process from "node:process";
 import { ERROR_CODES, SynodError } from "./errors.js";
+import { parseOutputViewArgs } from "./output-view.js";
 
 export interface HelpOptions {
   help: true;
@@ -29,6 +30,7 @@ export interface WaitCommandOptions {
   cwd: string;
   json: boolean;
   threadIds: string[];
+  taskIds: string[];
   timeoutMs: number;
   pollIntervalMs: number;
 }
@@ -221,7 +223,23 @@ export interface TaskSplitOptions extends TaskCommonOptions {
   evidence: string[];
 }
 
-export type TaskOptions = TaskAddOptions | TaskTransitionOptions | TaskOverrideOptions | TaskSplitOptions;
+export interface TaskNextOptions {
+  action: "next";
+  directory: string;
+  json: boolean;
+  actor: string;
+}
+
+export type TaskOptions = TaskAddOptions | TaskTransitionOptions | TaskOverrideOptions | TaskSplitOptions | TaskNextOptions;
+
+export interface ProposalSubmitOptions {
+  action: "submit";
+  id: string;
+  directory: string;
+  json: boolean;
+  actor: string;
+  evidence: string[];
+}
 
 interface BudgetCommonOptions {
   id: string;
@@ -279,7 +297,7 @@ export interface RotationPolicyCommandOptions extends RotationCommonOptions {
 }
 
 export interface RotationReadCommandOptions extends RotationCommonOptions {
-  action: "report" | "prepare";
+  action: "suggest" | "report" | "prepare";
 }
 
 export interface RotationVerifyCommandOptions extends RotationCommonOptions {
@@ -302,6 +320,10 @@ function optionValue(args: string[], index: number, option: string): string {
   return value;
 }
 
+function hasHelpFlagAfterAction(args: string[]): boolean {
+  return args[1] === "-h" || args[1] === "--help";
+}
+
 export function parseLifecycleArgs(
   args: string[],
   { allowDryRun = false, allowForce = false, allowProfile = false, allowExplain = false }: {
@@ -311,6 +333,7 @@ export function parseLifecycleArgs(
     allowExplain?: boolean;
   } = {}
 ): LifecycleOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
   const options: LifecycleOptions = { directory: ".", json: false };
   let hasDirectory = false;
   for (let index = 0; index < args.length; index += 1) {
@@ -342,6 +365,7 @@ export function parseUsageArgs(
   args: string[],
   { cwd = process.cwd() }: { cwd?: string } = {}
 ): UsageOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
   const options: UsageOptions = { cwd, json: false };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -400,10 +424,12 @@ export function parseWaitArgs(
   args: string[],
   { cwd = process.cwd() }: { cwd?: string } = {}
 ): WaitCommandOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
   const options: WaitCommandOptions = {
     cwd,
     json: false,
     threadIds: [],
+    taskIds: [],
     timeoutMs: 5 * 60_000,
     pollIntervalMs: 1_000
   };
@@ -412,9 +438,10 @@ export function parseWaitArgs(
     if (!arg) continue;
     if (arg === "-h" || arg === "--help") return { help: true };
     if (arg === "--json") options.json = true;
-    else if (["--thread", "--cwd", "--timeout-seconds", "--poll-interval-ms"].includes(arg)) {
+    else if (["--thread", "--task", "--cwd", "--timeout-seconds", "--poll-interval-ms"].includes(arg)) {
       const value = optionValue(args, index, arg);
       if (arg === "--thread") options.threadIds.push(value);
+      else if (arg === "--task") options.taskIds.push(value);
       else if (arg === "--cwd") options.cwd = value;
       else if (arg === "--timeout-seconds") {
         const seconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
@@ -437,13 +464,15 @@ export function parseWaitArgs(
     }
   }
   options.threadIds = [...new Set(options.threadIds.map(value => value.trim()).filter(Boolean))];
-  if (options.threadIds.length === 0) {
-    throw new SynodError(ERROR_CODES.WAIT_INVALID, "Wait requires at least one --thread <thread-id>.");
+  options.taskIds = [...new Set(options.taskIds.map(value => value.trim().toUpperCase()).filter(Boolean))];
+  if (options.threadIds.length === 0 && options.taskIds.length === 0) {
+    throw new SynodError(ERROR_CODES.WAIT_INVALID, "Wait requires at least one --task <task-id> or --thread <thread-id>.");
   }
   return options;
 }
 
 export function parseCheckpointArgs(args: string[]): CheckpointOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
   const options: CheckpointOptions = { directory: ".", json: false, actor: "supervisor" };
   let hasDirectory = false;
   for (let index = 0; index < args.length; index += 1) {
@@ -470,6 +499,7 @@ export function parseCheckpointArgs(args: string[]): CheckpointOptions | HelpOpt
 }
 
 export function parseHandoffArgs(args: string[]): HandoffCommandOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
   const options: HandoffCommandOptions = { directory: ".", json: false };
   let hasDirectory = false;
   for (let index = 0; index < args.length; index += 1) {
@@ -499,6 +529,7 @@ export function parseHandoffArgs(args: string[]): HandoffCommandOptions | HelpOp
 }
 
 export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
   if (action !== "export" && action !== "verify" && action !== "restore") {
@@ -541,11 +572,13 @@ export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOpti
 }
 
 export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
   if (!["reserve", "bind", "cancel", "acquire", "heartbeat", "release", "expire", "revoke", "recover"].includes(action)) {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown lease action: ${action}`, { details: { action } });
   }
+  if (hasHelpFlagAfterAction(args)) return { help: true };
   const id = args[1];
   if (!id || id.startsWith("-")) {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Lease ${action} is missing its task ID.`);
@@ -764,11 +797,13 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
 }
 
 export function parseWorktreeArgs(args: string[]): WorktreeCommandOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
   if (!["create", "seal", "integrate", "cleanup", "status"].includes(action)) {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown worktree action: ${action}`, { details: { action } });
   }
+  if (hasHelpFlagAfterAction(args)) return { help: true };
   const id = args[1];
   if (!id || id.startsWith("-")) {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Worktree ${action} is missing its task ID.`);
@@ -848,10 +883,25 @@ export function parseWorktreeArgs(args: string[]): WorktreeCommandOptions | Help
 }
 
 export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
-  if (!["add", "transition", "override", "split"].includes(action)) {
+  if (!["add", "transition", "override", "split", "next"].includes(action)) {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown task action: ${action}`, { details: { action } });
+  }
+  if (hasHelpFlagAfterAction(args)) return { help: true };
+  if (action === "next") {
+    let directory = ".";
+    let json = false;
+    for (let index = 1; index < args.length; index += 1) {
+      const arg = args[index];
+      if (arg === "-h" || arg === "--help") return { help: true };
+      if (arg === "--json") json = true;
+      else if (arg === "--cwd") { directory = optionValue(args, index, arg); index += 1; }
+      else if (arg?.startsWith("-")) throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
+      else throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
+    }
+    return { action, directory, json, actor: "supervisor" };
   }
   const id = args[1];
   const to = action === "transition" ? args[2] : undefined;
@@ -880,6 +930,7 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   for (let index = start; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg) continue;
+    if (arg === "-h" || arg === "--help") return { help: true };
     if (arg === "--json") {
       json = true;
       continue;
@@ -951,7 +1002,37 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   return { action: "transition", id, to, directory, json, actor, reason, revision, evidence };
 }
 
+export function parseProposalArgs(args: string[]): ProposalSubmitOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
+  const action = args[0];
+  if (!action || action === "-h" || action === "--help") return { help: true };
+  if (action !== "submit") throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown proposal action: ${action}`, { details: { action } });
+  if (hasHelpFlagAfterAction(args)) return { help: true };
+  const id = args[1];
+  if (!id || id.startsWith("-")) throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, "Proposal submit requires a task ID.");
+  let directory = ".";
+  let json = false;
+  let actor = "supervisor";
+  const evidence: string[] = [];
+  for (let index = 2; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "-h" || arg === "--help") return { help: true };
+    if (arg === "--json") json = true;
+    else if (["--cwd", "--actor", "--evidence"].includes(String(arg))) {
+      const value = optionValue(args, index, String(arg));
+      if (arg === "--cwd") directory = value;
+      else if (arg === "--actor") actor = value;
+      else evidence.push(value);
+      index += 1;
+    } else if (arg?.startsWith("-")) throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
+    else throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
+  }
+  if (evidence.length === 0) throw new SynodError(ERROR_CODES.EVIDENCE_REQUIRED, "Proposal submit requires at least one --evidence reference.");
+  return { action, id, directory, json, actor, evidence: [...new Set(evidence)] };
+}
+
 export function parseBudgetArgs(args: string[]): BudgetCommandOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
   if (!["set", "replace", "report", "observe", "decide"].includes(action)) {
@@ -1037,9 +1118,10 @@ export function parseBudgetArgs(args: string[]): BudgetCommandOptions | HelpOpti
 }
 
 export function parseRotationArgs(args: string[]): RotationCommandOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
-  if (!["set", "replace", "report", "prepare", "verify"].includes(action)) {
+  if (!["set", "replace", "suggest", "report", "prepare", "verify"].includes(action)) {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown rotation action: ${action}`, { details: { action } });
   }
   let directory = ".";
@@ -1087,7 +1169,7 @@ export function parseRotationArgs(args: string[]): RotationCommandOptions | Help
     index += 1;
   }
   const common = { directory, json, actor };
-  if (action === "report" || action === "prepare") {
+  if (action === "suggest" || action === "report" || action === "prepare") {
     if (rootSessionId !== undefined || startEvent !== undefined || recommendation !== undefined || reason !== undefined
       || evidence.length > 0 || Object.keys(thresholds).length > 0) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Rotation ${action} received a mutation-only option.`);
