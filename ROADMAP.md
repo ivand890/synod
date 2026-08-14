@@ -2,23 +2,21 @@
 
 Last updated: 2026-08-13
 Current source release: `v0.9.2`
-Last verified public release at this update: `v0.9.1`
+Last verified public release at this update: `v0.9.2`
 
 This roadmap converts the advisor loop's remaining operational risks into
 versioned, testable increments. Entries at or below the last verified public
-release are delivered; the current source release may be complete locally while
-protected publication gates remain pending. Later increments describe intended
-outcomes, not shipped commands. Exact CLI spelling remains provisional until an
-increment is implemented and released.
+release are delivered. Later increments describe intended outcomes, not shipped
+commands. Exact CLI spelling remains provisional until an increment is
+implemented and released.
 
 The `v0.9.1` release delivered pre-spawn lease reservations and corrected
 task-session, thread-count, coordination-outcome, and exact-boundary usage
-semantics. The `v0.9.1` release is publicly delivered. The current `v0.9.2`
-source includes the supervisor-efficiency P1—task-aware waiting, adaptive
-rotation preflight, and typed task/proposal commands—plus bounded summary
-output, activation-handoff, and nested-help hardening. This source is complete
-for the protected release and becomes publicly delivered only after its signed
-tag, protected publication, and installed-package proof complete.
+semantics. The `v0.9.1` release is publicly delivered. The `v0.9.2` release
+includes the supervisor-efficiency P1—task-aware waiting, adaptive rotation
+preflight, and typed task/proposal commands—plus bounded summary output,
+activation-handoff, and nested-help hardening. Its reviewed merge, signed tag,
+npm/GitHub publication, installed-package proof, and CLI proof are verified.
 
 ## Evidence behind this revision
 
@@ -147,7 +145,8 @@ recommendation while leaving orchestration state unchanged.
 Goal: reduce routine supervisor coordination while preserving exact canonical
 state, independent review, and strict lease fencing.
 
-Status: source-complete; public delivery pending protected release proof.
+Status: delivered; reviewed merge, signed tag, npm/GitHub publication,
+installed-package proof, and CLI proof are verified.
 
 | ID | Outcome | Acceptance gate |
 |---|---|---|
@@ -216,10 +215,11 @@ Synod reaches a 1.0 candidate only after all of the following are demonstrated:
 - `v0.9.1`: schema-4 pre-spawn lease reservations, exact bind/cancel/expiry
   fencing, and corrected task-session, thread-count, coordination-outcome, and
   exact-boundary usage semantics.
-- `v0.9.2` source: task-aware waiting, read-only adaptive rotation suggestions,
-  typed task/proposal commands, summary JSON output, truthful bind activation
+- `v0.9.2`: task-aware waiting, read-only adaptive rotation suggestions, typed
+  task/proposal commands, summary JSON output, truthful bind activation
   handoffs, nested-help routing, and the corresponding canonical-fence and
-  package compatibility hardening, pending protected public release proof.
+  package compatibility hardening. The reviewed merge, signed tag, npm/GitHub
+  publication, installed-package proof, and CLI proof are verified.
 
 The worktrees/leases and economics originally associated with `v0.6` were not
 discarded. They are deliberately sequenced after recoverable phase boundaries
