@@ -2,15 +2,14 @@
 
 Last updated: 2026-08-14
 Current source release: `v0.9.3`
-Last verified public release at this update: `v0.9.2`
+Last verified public release at this update: `v0.9.3`
 
 This roadmap converts the advisor loop's remaining operational risks into
 versioned, testable increments. Entries at or below the last verified public
 release are delivered. Later increments describe intended outcomes, not shipped
 commands. Exact CLI spelling remains provisional until an increment is
-implemented and released. The current source version may be ahead of the last
-verified public package; this roadmap does not claim publication for that
-source version.
+implemented and released. The source and public package are both verified at
+`v0.9.3` for this update.
 
 The `v0.9.1` release delivered pre-spawn lease reservations and corrected
 task-session, thread-count, coordination-outcome, and exact-boundary usage
@@ -169,21 +168,19 @@ and generated advisor guidance match the shipped CLI behavior.
 Goal: make runtime/version identity and wait ownership explicit while shipping a
 strict, validation-only durable job contract with no execution plane.
 
-Status: source prepared; the last verified public package remains `v0.9.2`.
-This entry is a release contract and documentation boundary, not publication
-evidence.
+Status: delivered and publicly verified. The reviewed merge, signed tag,
+npm/GitHub publication, installed-package proof, and CLI proof are verified.
 
 | ID | Outcome | Acceptance gate |
 |---|---|---|
 | SYN-093-VERSIONS-001 | Lifecycle output distinguishes `runtimeVersion`, `installedTemplateVersion`, and `stateTemplateVersion` while preserving the legacy `templateVersion` alias. | Installed-package smoke and release assertions preserve all three truths and alias behavior without lockfile or dependency drift. |
 | SYN-093-WAIT-002 | Wait authority is explicit (`host`, `appServer`, or `canonical`) and remains separate from transport/mode; Desktop handoff uses positive host fields and legacy aliases. | Host-owned waits never construct a child App Server; canonical task selection remains read-only identity resolution rather than observation. |
 | SYN-093-JOBS-003 | Schema-1 `JobHandle`/`JobEvent` contracts validate strict durable observations without persistence, commands, runners, or a thread/resume observer. | Source and installed-package checks validate the dormant public contract and reject unknown fields. |
-| SYN-093-RELEASE-004 | Package metadata, changelog, documentation, release instructions, and smoke fixtures describe the source `v0.9.3` contract. | Deterministic release/doc assertions and the full required test commands pass while public verification remains `v0.9.2`. |
+| SYN-093-RELEASE-004 | Package metadata, changelog, documentation, release instructions, and smoke fixtures describe the public `v0.9.3` contract. | Deterministic release/doc assertions, installed-package smoke, and the full required test commands pass on the verified release checkout. |
 
-Release gate: publish only through the protected workflow after this source
-contract is independently reviewed and the exact release checkout has its
-required CI, npm, and GitHub evidence. No publication is implied by this
-source-preparation entry.
+Release gate: satisfied by the protected workflow, exact signed release tag,
+CI, npm/GitHub parity, installed-package smoke, and public CLI evidence recorded
+for `v0.9.3`.
 
 ## v1.0 readiness criteria
 
@@ -243,6 +240,9 @@ Synod reaches a 1.0 candidate only after all of the following are demonstrated:
   handoffs, nested-help routing, and the corresponding canonical-fence and
   package compatibility hardening. The reviewed merge, signed tag, npm/GitHub
   publication, installed-package proof, and CLI proof are verified.
+- `v0.9.3`: explicit runtime/template/state version truths, host/app-server/
+  canonical wait authority, dormant strict `JobHandle`/`JobEvent` contracts,
+  and the corresponding installed-package and public-release verification.
 
 The worktrees/leases and economics originally associated with `v0.6` were not
 discarded. They are deliberately sequenced after recoverable phase boundaries

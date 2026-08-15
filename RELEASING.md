@@ -2,9 +2,11 @@
 
 Synod publishes `@ivand890/synod` and its matching GitHub Release from GitHub Actions. npm uses trusted publishing; no npm publish token is stored in GitHub.
 
-The commands below are release instructions only. This source-preparation change
-targets `0.9.3`; it does not create a tag, publish to npm, or create a GitHub
-Release.
+The `v0.9.3` source-preparation entry is closed: its protected workflow,
+signed tag, npm/GitHub publication, installed-package proof, and public CLI
+parity are complete. The commands below remain the protected release procedure
+for a future version; do not rerun the historical `0.9.3` tag or publication
+commands.
 
 ## Prepare a release
 
@@ -19,7 +21,7 @@ Release.
 Update local `main`, then create a signed annotated tag for the exact release commit:
 
 ```bash
-release_version=0.9.3
+release_version="${RELEASE_VERSION:?Set RELEASE_VERSION to the next version}"
 git switch main
 git pull --ff-only origin main
 git tag -s "v$release_version" -m "v$release_version"
@@ -42,7 +44,7 @@ GitHub Releases and npm do not share an atomic transaction. A failure after npm 
 Approve the `npm` environment deployment in GitHub, then verify the release:
 
 ```bash
-release_version=0.9.3
+release_version="${RELEASE_VERSION:?Set RELEASE_VERSION to the next version}"
 npm view @ivand890/synod version dist-tags --json
 gh release view "v$release_version" --json tagName,isDraft,isPrerelease,url
 gh release list --limit 1

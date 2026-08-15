@@ -131,17 +131,33 @@ Acceptance criteria, verification commands, evidence, and dependencies are repea
 Task state follows a validated graph:
 
 ```text
-PLANNED → READY → ACTIVE → REVIEW → ACCEPTED → VERIFIED → DONE
-                         ↘ ACTIVE (correction)
+PLANNED → READY
+READY -- reserve → read-only spawn -- bind → ACTIVE
+ACTIVE -- explicit authorization → task-aware wait → proposal submit → REVIEW
+REVIEW → ACCEPTED → VERIFIED → DONE
+reviewed/accepted/verified -- ordinary correction (advisor policy) → fresh reservation + lease generation -- bind → same worker (when available) → ACTIVE
 ```
 
 Non-terminal tasks can be blocked or superseded. A blocked task can resume only its recorded prior state. Terminal tasks cannot transition.
 
-Every transition requires an exact task revision. Submitting work from `ACTIVE` to `REVIEW` advances it by one and requires delivery evidence. Acceptance and verification each require separate evidence tied to that same revision. Returning reviewed, accepted, or verified work to `ACTIVE` increments the correction round and clears current acceptance and verification:
+The executable delegated lifecycle is `READY → reserve → read-only spawn → bind-driven ACTIVE → explicit write authorization → task-aware wait → proposal submit → REVIEW → ACCEPTED → VERIFIED → DONE`. `lease bind` is the lifecycle step that moves a reserved task into `ACTIVE`; do not copy a direct `task transition ... ACTIVE` command into an operator workflow. The supervisor sends explicit write authorization only after bind succeeds, then waits on the bound task before submitting its proposal. The advisor/supervisor policy for an ordinary correction is to return work to the same available worker; that policy is not a runtime owner-continuity guarantee. The correction still requires a fresh reservation, lease-generation bind, authorization, and wait boundary; a stopped or unavailable worker requires explicit recovery before a replacement thread is assigned.
+
+Every transition requires an exact task revision. Submitting work from `ACTIVE` to `REVIEW` advances it by one and requires delivery evidence. Acceptance and verification each require separate evidence tied to that same revision. Returning reviewed, accepted, or verified work to `ACTIVE` increments the correction round and clears current acceptance and verification. Under the advisor/supervisor policy, an ordinary correction returns work to the same worker when it remains available; this is not a runtime owner-continuity guarantee. Reserve a fresh lease generation, bind it to that worker, then explicitly authorize writes and wait again. If the worker stopped or is unavailable, use explicit recovery; only that recovery path reassigns a replacement thread:
 
 ```bash
 synod task transition T-001 READY --revision 0
-synod task transition T-001 ACTIVE --revision 0
+synod lease reserve T-001 \
+  --write src/api.ts --read test/api.test.ts \
+  --reservation-ttl-seconds 300 --json
+# Spawn the configured worker with a read-only contract; analysis may begin,
+# but writes and implementation commands wait for bind.
+synod lease bind T-001 \
+  --reservation-token <token> --lease-id <id> --generation 1 --revision 0 \
+  --expected-reserved-at <iso> --baseline-hash <sha256> \
+  --owner-thread thread:019f... --ttl-seconds 300 --heartbeat-seconds 60 \
+  --json
+# After bind, the supervisor explicitly authorizes writes, then waits:
+synod wait --task T-001 --timeout-seconds 300 --json
 synod proposal submit T-001 --evidence "commit:abc123"
 synod task transition T-001 ACCEPTED --revision 1 --evidence "review:approved"
 synod task transition T-001 VERIFIED --revision 1 --evidence "test:pnpm-test:pass"
@@ -314,7 +330,7 @@ An active leased task can execute in an explicit detached Git worktree outside t
 synod worktree create T-001 --destination ../task-T-001 \
   --lease-id <id> --generation 1 --revision 0 \
   --expected-heartbeat-at <iso> --owner-thread thread:019f...
-synod task transition T-001 ACTIVE --revision 0
+# `lease bind` has already moved T-001 into ACTIVE; this reuses that exact lease.
 ```
 
 After the worker stops editing, the supervisor seals its exact staged, unstaged, deleted, renamed, and allowed untracked delta into a durable proposal, then integrates it transactionally into the control checkout:

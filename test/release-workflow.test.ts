@@ -11,7 +11,10 @@ const packageSmokePath = new URL("../scripts/package-smoke.ts", import.meta.url)
 const changelogPath = new URL("../CHANGELOG.md", import.meta.url);
 const roadmapPath = new URL("../ROADMAP.md", import.meta.url);
 const readmePath = new URL("../README.md", import.meta.url);
+const productPath = new URL("../PRODUCT.md", import.meta.url);
 const releasingPath = new URL("../RELEASING.md", import.meta.url);
+const cyclePath = new URL("../docs/synod/synod-cycle.html", import.meta.url);
+const cycleGifPath = new URL("../docs/synod/assets/synod-cycle-loop.gif", import.meta.url);
 
 test("Git dependency build lifecycles do not require pnpm or Corepack", async () => {
   const packageJson = parseJson(await readFile(packagePath, "utf8"));
@@ -90,12 +93,13 @@ test("installed-package smoke covers the v0.9 production-shaped release contract
   assert.match(packageSmoke, /readFileSync\(statePath\)/);
 });
 
-test("0.9.3 source metadata keeps public version and dormant contract boundaries explicit", async () => {
-  const [packageText, changelog, roadmap, readme, releasing, packageSmoke] = await Promise.all([
+test("0.9.3 public release metadata and product/docs contract stay explicit", async () => {
+  const [packageText, changelog, roadmap, readme, product, releasing, packageSmoke] = await Promise.all([
     readFile(packagePath, "utf8"),
     readFile(changelogPath, "utf8"),
     readFile(roadmapPath, "utf8"),
     readFile(readmePath, "utf8"),
+    readFile(productPath, "utf8"),
     readFile(releasingPath, "utf8"),
     readFile(packageSmokePath, "utf8")
   ]);
@@ -107,9 +111,47 @@ test("0.9.3 source metadata keeps public version and dormant contract boundaries
   assert.match(changelog, /\[Unreleased\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.3\.\.\.HEAD/);
   assert.match(changelog, /\[0\.9\.3\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.2\.\.\.v0\.9\.3/);
   assert.match(roadmap, /Current source release: `v0\.9\.3`/);
-  assert.match(roadmap, /Last verified public release at this update: `v0\.9\.2`/);
-  assert.match(roadmap, /source prepared; the last verified public package remains `v0\.9\.2`/);
+  assert.match(roadmap, /Last verified public release at this update: `v0\.9\.3`/);
+  assert.match(roadmap, /Status: delivered and publicly verified/);
+  assert.doesNotMatch(roadmap, /last verified public package remains `v0\.9\.2`/i);
+  assert.doesNotMatch(roadmap, /public verification remains `v0\.9\.2`/i);
   assert.match(roadmap, /\| SYN-093-VERSIONS-001 \|/);
+
+  const productSections = [
+    "Register",
+    "Users",
+    "Product Purpose",
+    "Brand Personality",
+    "Anti-references",
+    "Design Principles",
+    "Accessibility & Inclusion",
+  ];
+  for (const section of productSections) {
+    assert.match(product, new RegExp(`^## ${section}$`, "m"), `PRODUCT.md must include ${section}`);
+  }
+  assert.match(product, /^product$/m);
+  assert.match(product, /precise, calm, and accountable/);
+  assert.equal(product.match(/^\d+\. /gm)?.length, 5);
+  assert.match(product, /WCAG 2\.2 AA/);
+  assert.match(product, /`JobHandle` and `JobEvent`/);
+
+  const lifecycle = "READY → reserve → read-only spawn → bind-driven ACTIVE → explicit write authorization → task-aware wait → proposal submit → REVIEW → ACCEPTED → VERIFIED → DONE";
+  assert.ok(readme.includes(lifecycle), "README must show the lease-fenced executable lifecycle");
+  assert.match(readme, /synod lease reserve T-001/);
+  assert.match(readme, /read-only contract/);
+  assert.match(readme, /synod lease bind T-001/);
+  assert.match(readme, /synod wait --task T-001/);
+  assert.match(readme, /synod proposal submit T-001/);
+  assert.doesNotMatch(readme, /synod task transition T-001 ACTIVE --revision/);
+  assert.match(readme, /advisor\/supervisor policy for an ordinary correction is to return work to the same available worker/);
+  assert.match(readme, /not a runtime owner-continuity guarantee/);
+  assert.match(readme, /fresh reservation, lease-generation bind, authorization, and wait boundary/);
+  assert.match(readme, /only that recovery path reassigns a replacement thread/);
+  assert.doesNotMatch(readme, /A correction repeats the reservation, read-only spawn/);
+
+  assert.match(releasing, /`v0\.9\.3` source-preparation entry is closed/);
+  assert.match(releasing, /protected release procedure\s+for a future version/);
+  assert.doesNotMatch(releasing, /source-preparation change\s+targets `0\.9\.3`; it does not create a tag, publish to npm, or create a GitHub\s+Release/);
 
   for (const phrase of [
     "runtimeVersion",
@@ -129,10 +171,64 @@ test("0.9.3 source metadata keeps public version and dormant contract boundaries
   ]) {
     assert.ok(readme.includes(phrase), `README must document ${phrase}`);
   }
-  assert.equal(releasing.match(/release_version=0\.9\.3/g)?.length, 2);
+  assert.equal(releasing.match(/release_version="\$\{RELEASE_VERSION/g)?.length, 2);
   assert.ok(packageSmoke.includes("hostWaitRequired"));
   assert.ok(packageSmoke.includes("validateJobHandle"));
   assert.ok(packageSmoke.includes("stateTemplateVersion"));
+});
+
+test("Synod cycle visualizer documents the executable lease and wait boundaries", async () => {
+  const cycle = await readFile(cyclePath, "utf8");
+  const cycleGif = await readFile(cycleGifPath);
+  const lifecycle = "READY → reserve → read-only spawn → bind-driven ACTIVE → explicit supervisor authorization → task-aware wait → proposal submit → REVIEW → ACCEPTED → VERIFIED → DONE → checkpoint";
+
+  assert.ok(cycle.includes(lifecycle), "the visualizer must expose the executable lifecycle");
+  for (const phrase of [
+    "writeAuthorized:false",
+    "bind moves the task to ACTIVE",
+    "waitAuthority: canonical",
+    "waitAuthority: appServer",
+    "waitAuthority: host",
+    "mode",
+    "authority ≠ mode",
+    "notLoaded",
+    "notification",
+    "cursor",
+    "poll",
+    "handoff",
+    "same available worker",
+    "fresh reservation",
+    "lease-generation bind",
+    "explicit recovery",
+    "Acceptance evidence",
+    "Verification evidence",
+    "checkpoint",
+  ]) {
+    assert.ok(cycle.includes(phrase), `cycle visualizer must document ${phrase}`);
+  }
+
+  assert.match(cycle, /<noscript>[\s\S]*READY → reserve[\s\S]*checkpoint[\s\S]*<\/noscript>/);
+  assert.match(cycle, /prefers-reduced-motion/);
+  assert.match(cycle, /window\.history\.replaceState/);
+  assert.match(cycle, /document\.addEventListener\("keydown"/);
+  assert.match(cycle, /mobile-snapshot/);
+  assert.match(cycle, /params\.get\("capture"\) === "gif"/);
+  assert.match(cycle, /gif-capture/);
+  assert.match(cycle, /aria-label=/);
+  assert.doesNotMatch(cycle, /three concurrent agents|run three agents|Fill all three slots/i);
+  assert.doesNotMatch(cycle, /task transition[^\n]*ACTIVE/i);
+
+  assert.equal(cycleGif.subarray(0, 6).toString("ascii"), "GIF89a");
+  assert.equal(cycleGif.readUInt16LE(6), 1120, "GIF logical screen width must remain 1120px");
+  assert.equal(cycleGif.readUInt16LE(8), 622, "GIF logical screen height must remain 622px");
+  let graphicControlFrames = 0;
+  for (let index = 0; index + 2 < cycleGif.length; index += 1) {
+    if (cycleGif[index] === 0x21 && cycleGif[index + 1] === 0xf9 && cycleGif[index + 2] === 0x04) {
+      graphicControlFrames += 1;
+    }
+  }
+  assert.equal(graphicControlFrames, 33, "GIF must contain one graphic-control marker per capture frame");
+  assert.ok(cycleGif.length >= 100_000 && cycleGif.length <= 2_000_000, "GIF size must stay within the reviewed capture bounds");
 });
 
 test("durable release turn selects the oldest pending stable tag", () => {
