@@ -1,9 +1,9 @@
 # Synod Roadmap
 
 Last updated: 2026-08-16
-Current public release: `v0.9.4`
-Current source release: `v0.9.4`
-Last verified public release at this update: `v0.9.4`
+Current public release: `v0.9.5`
+Current source release: `v0.9.5`
+Last verified public release at this update: `v0.9.5`
 
 This roadmap converts the advisor loop's remaining operational risks into
 versioned, testable increments. Entries at or below the last verified public
@@ -11,12 +11,12 @@ release are delivered. Later increments remain unavailable to a public/pinned
 runtime until their release is published and the project is explicitly
 upgraded. Exact CLI spelling remains provisional until an increment is
 implemented and released. Source preparation and post-publication npm,
-GitHub, registry-installed package, and public CLI evidence for `v0.9.4` are
-captured in the versioned `release-closeouts/v0.9.4.json`; the prior `v0.9.3`
-evidence remains recorded in the versioned `release-closeouts/v0.9.3.json`.
+GitHub, registry-installed package, and public CLI evidence for `v0.9.5` are
+captured in the versioned `release-closeouts/v0.9.5.json`; the prior `v0.9.4`
+evidence remains recorded in the versioned `release-closeouts/v0.9.4.json`.
 The signed tag and GitHub Release `isImmutable: true` provide the external
-release anchors; the root `RELEASE-CLOSEOUT.json` is the prepared/pending
-`v0.9.5` candidate; it has no public verification.
+release anchors; the root `RELEASE-CLOSEOUT.json` records the same closed and
+verified `v0.9.5` evidence.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
 workflow; the tag workflow validates only the strict prepared/pending source
 record before publication.
@@ -79,7 +79,7 @@ its own.
 Status: delivered in `v0.6.3`.
 
 The v0.6.3 migration historically supported Node 20/22/24. The current
-v0.9.4 release requires Node `>=22` and removes Node 20
+v0.9.5 release requires Node `>=22` and removes Node 20
 support. Synod will publish compiled ESM JavaScript and keep a minimal
 JavaScript `bin/synod.js` shim; consumers will not need TypeScript and no
 production dependency will be added. Source imports keep their explicit `.js`
@@ -237,6 +237,28 @@ authenticated tag/package/main ancestry check, test and package-smoke run, and
 phase-strict closeout validation before publication. Its phase-2 live verifier
 runs on the protected closeout PR, not the tag workflow, and performs the
 read-only registry/GitHub and public-consumer checks there.
+
+## v0.9.5 — Status bootstrap hotfix
+
+Goal: keep the verified v0.9.4 runtime surfaces intact while making bounded
+status selectors work through the initialized project-local bootstrap.
+
+Status: delivered and publicly verified. The public and pinned `v0.9.5`
+runtime accepts `--task`, `--active-only`, and
+`--changed-since-checkpoint` as mutually exclusive selectors, including when
+the bootstrap delegates to an initialized local runtime; incompatible
+combinations still fail closed. The release requires Node `>=22` and retains
+the support expression `>=0.148.0-0 <0.149.0` for every valid numeric
+`0.148.x` variant, with `0.148.0-alpha.9` known-good.
+
+| ID | Outcome | Acceptance boundary |
+|---|---|---|
+| SYN-095-STATUS-BOOTSTRAP-024 | Make the official project-local bootstrap accept the public status selectors without weakening selector validation. | Initialized-runtime regressions cover all three selectors and fail-closed incompatible combinations; the exact public package and CLI evidence are recorded in `release-closeouts/v0.9.5.json`. |
+
+Release gate: the exact signed tag and immutable latest GitHub Release, npm
+`gitHead`/`latest` parity, registry integrity/attestation/provenance, clean
+consumer install, and public CLI parity are recorded in the root closeout and
+the byte-identical versioned archive.
 
 ## v1.0 readiness criteria
 
