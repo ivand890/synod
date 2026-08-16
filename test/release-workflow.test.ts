@@ -725,6 +725,7 @@ test("public closeout comparisons fail closed on registry and GitHub mismatches"
 test("public closeout verifier validates the exact post-publication record before live reads", async () => {
   const originalToken = process.env.GH_TOKEN;
   process.env.GH_TOKEN = "read-only-test-token";
+  const pnpmArgs: string[][] = [];
   const commandRunner = (command: string, args: readonly string[]): string => {
     if (command === "npm") {
       return JSON.stringify({
@@ -751,8 +752,11 @@ test("public closeout verifier validates the exact post-publication record befor
         immutable: true,
       });
     }
-    if (command === "pnpm" && args[0] === "add") return "";
-    if (command === "pnpm") return "0.9.4\n";
+    if (command === "pnpm") {
+      pnpmArgs.push([...args]);
+      if (args[0] === "add") return "";
+      return "0.9.4\n";
+    }
     throw new Error(`unexpected command ${command} ${args.join(" ")}`);
   };
   try {
@@ -767,6 +771,11 @@ test("public closeout verifier validates the exact post-publication record befor
     });
     assert.equal(result.registryInstallVersion, "0.9.4");
     assert.equal(result.publicCliVersion, "0.9.4");
+    assert.deepEqual(pnpmArgs, [
+      ["add", "--ignore-scripts", "--save-exact", "--registry", "https://registry.npmjs.org", "@ivand890/synod@0.9.4"],
+      ["--reporter=silent", "exec", "synod", "--version"],
+      ["--reporter=silent", "dlx", "--config.registry=https://registry.npmjs.org", "@ivand890/synod@0.9.4", "--version"],
+    ]);
 
     const pendingDirectory = await mkdtemp(path.join(os.tmpdir(), "synod-pending-closeout-test-"));
     const pendingPath = path.join(pendingDirectory, "RELEASE-CLOSEOUT.json");
