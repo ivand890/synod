@@ -680,6 +680,7 @@ test("concurrent cross-version installs cannot commit a downgrade", async () => 
   let releaseNewer: () => void = () => {};
   let reportNewerStarted: () => void = () => {};
   let olderInstallerStarted = false;
+  let olderLockClockCalls = 0;
   let resolveOlderLockAttempted: () => void = () => {};
   const olderLockAttempted = new Promise<void>(resolve => {
     let settled = false;
@@ -712,7 +713,8 @@ test("concurrent cross-version installs cannot commit a downgrade", async () => 
     },
     lockOptions: {
       now: () => {
-        resolveOlderLockAttempted();
+        olderLockClockCalls += 1;
+        if (olderLockClockCalls === 3) resolveOlderLockAttempted();
         return Date.now();
       }
     }
@@ -721,7 +723,21 @@ test("concurrent cross-version installs cannot commit a downgrade", async () => 
     error => ({ error: asSynodError(error) })
   );
 
-  await olderLockAttempted;
+  let contentionTimeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      olderLockAttempted,
+      new Promise<never>((_resolve, reject) => {
+        contentionTimeout = setTimeout(
+          () => reject(new Error("older installer did not reach the held runtime lock")),
+          5_000
+        );
+      })
+    ]);
+  } finally {
+    if (contentionTimeout !== undefined) clearTimeout(contentionTimeout);
+  }
+  assert.equal(olderLockClockCalls, 3);
   assert.equal(olderInstallerStarted, false);
   releaseNewer();
   await newer;
