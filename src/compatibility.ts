@@ -10,10 +10,10 @@ export interface SemanticVersion {
 export type CompatibilityStatus = "unsupported" | "supported" | "known-good";
 
 export const CODEX_COMPATIBILITY = Object.freeze({
-  supported: ">=0.142.0 <0.148.0",
-  knownGood: Object.freeze(["0.142.0", "0.147.0"]),
-  minimum: "0.142.0",
-  maximumExclusive: "0.148.0"
+  supported: ">=0.148.0-0 <0.149.0 (all 0.148.x variants)",
+  knownGood: Object.freeze(["0.148.0-alpha.9"]),
+  minimum: "0.148.0",
+  maximumExclusive: "0.149.0"
 } as const);
 
 export function parseVersion(value: unknown): SemanticVersion | undefined {
@@ -72,20 +72,19 @@ export function compareVersions(left: string | SemanticVersion, right: string | 
 export function classifyCodexVersion(version: unknown): { status: CompatibilityStatus; reason: string } {
   const parsed = parseVersion(version);
   if (!parsed) return { status: "unsupported", reason: "invalid_version" };
-  const rangeVersion = parsed.prerelease === undefined
-    ? parsed
-    : { ...parsed, prerelease: undefined };
-  if (compareVersions(rangeVersion, CODEX_COMPATIBILITY.minimum) < 0) {
+
+  if (parsed.major < 0 || (parsed.major === 0 && parsed.minor < 148)) {
     return { status: "unsupported", reason: "below_supported_range" };
   }
-  if (compareVersions(rangeVersion, CODEX_COMPATIBILITY.maximumExclusive) >= 0) {
+  if (parsed.major > 0 || parsed.minor > 148) {
     return { status: "unsupported", reason: "above_tested_range" };
   }
-  if (parsed.prerelease !== undefined) {
-    return { status: "supported", reason: "preview_inside_supported_range" };
-  }
+
   if (CODEX_COMPATIBILITY.knownGood.some(versionValue => compareVersions(parsed, versionValue) === 0)) {
     return { status: "known-good", reason: "tested_in_ci" };
   }
-  return { status: "supported", reason: "inside_supported_range" };
+  return {
+    status: "supported",
+    reason: parsed.prerelease === undefined ? "inside_supported_range" : "preview_inside_supported_range"
+  };
 }

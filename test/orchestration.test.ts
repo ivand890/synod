@@ -13,6 +13,7 @@ import { contentHash } from "../src/filesystem.js";
 import {
   LEASE_BASELINES_PATH,
   MAX_RETAINED_LEASE_BASELINES,
+  isTaskProposalReference,
   retainLeaseBaselinesLedger
 } from "../src/leases.js";
 import { initProject } from "../src/lifecycle.js";
@@ -36,6 +37,7 @@ import {
   orchestrationStatusWithArtifacts,
   overrideCorrectionPolicy,
   readOrchestration,
+  recordTaskCorrection,
   recordCheckpoint,
   recoverTaskLease,
   releaseTaskLease,
@@ -46,7 +48,7 @@ import {
   transitionTask,
   validateOrchestrationProposalArtifacts
 } from "../src/orchestration.js";
-import type { AddTaskOptions } from "../src/orchestration.js";
+import type { AddTaskOptions, OrchestrationTask } from "../src/orchestration.js";
 import { isRecord } from "../src/validation.js";
 
 const execFileAsync = promisify(execFile);
@@ -641,6 +643,215 @@ test("acceptance rejects owned material changed after proposal sealing", async (
     error => error instanceof SynodError && error.code === ERROR_CODES.PROPOSAL_INVALID
   );
   assert.equal((await readOrchestration(directory)).state.tasks["T-001"]?.state, "REVIEW");
+});
+
+test("ACTIVE supervisor corrections consume rounds and retain scoped evidence before proposal sealing", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+
+  const guidance = await nextTaskGuidance({ directory });
+  const correctionAction = guidance.tasks.find(task => task.id === "T-001")?.actions[0];
+  assert.equal(correctionAction?.operation, "task.correct");
+  assert.deepEqual(correctionAction?.arguments, {
+    taskId: "T-001",
+    revision: 0,
+    reason: null,
+    evidence: []
+  });
+  assert.deepEqual(correctionAction?.requirements, ["revision", "reason", "evidence"]);
+
+  const beforeStale = await readOrchestration(directory);
+  await assert.rejects(
+    recordTaskCorrection({
+      directory,
+      id: "T-001",
+      revision: 1,
+      reason: "Stale supervisor revision",
+      evidence: ["review:stale"]
+    }),
+    error => error instanceof SynodError
+      && error.code === ERROR_CODES.REVISION_MISMATCH
+      && isRecord(error.details)
+      && error.details.expected === 0
+      && error.details.actual === 1
+  );
+  const afterStale = await readOrchestration(directory);
+  assert.equal(afterStale.state.lastEvent.sequence, beforeStale.state.lastEvent.sequence);
+  assert.equal(afterStale.state.tasks["T-001"]?.correctionPolicy.used, 0);
+
+  const first = await recordTaskCorrection({
+    directory,
+    id: "T-001",
+    revision: 0,
+    reason: "Clarify the implementation boundary",
+    evidence: ["review:feedback"]
+  });
+  assert.equal(first.task.state, "ACTIVE");
+  assert.equal(first.task.correctionRound, 1);
+  assert.equal(first.task.correctionPolicy.used, 1);
+  assert.equal(first.correction.reason, "Clarify the implementation boundary");
+  assert.deepEqual(first.correction.paths, []);
+  assert.match(first.correction.scopeFingerprint, /^sha256:/);
+
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/t-001.ts"), "material\n");
+  const second = await recordTaskCorrection({
+    directory,
+    id: "T-001",
+    revision: 0,
+    reason: "Correct the material before delivery",
+    evidence: ["review:material"]
+  });
+  assert.equal(second.task.correctionRound, 2);
+  assert.deepEqual(second.correction.paths, ["src/t-001.ts"]);
+  assert.deepEqual(second.correction.pathEvidence.map(item => item.path), ["src/t-001.ts"]);
+
+  await assert.rejects(
+    recordTaskCorrection({ directory, id: "T-001", revision: 0, reason: "No allowance remains", evidence: ["review:limit"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.CORRECTION_EXHAUSTED
+  );
+  assert.equal((await readOrchestration(directory)).state.tasks["T-001"]?.correctionRound, 2);
+});
+
+test("sealed proposals retain independent Git path lanes and acceptance rejects lane drift", async () => {
+  const directory = await temporaryProject();
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/tracked.ts"), "base\n");
+  await writeFile(path.join(directory, "src/delete.ts"), "delete me\n");
+  await writeFile(path.join(directory, "src/rename-from.ts"), "rename me\n");
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-001", ownerThread: "test:T-001", writeTree: ["src"] });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await writeFile(path.join(directory, "src/tracked.ts"), "changed\n");
+  await writeFile(path.join(directory, "src/untracked.ts"), "new\n");
+  await writeFile(path.join(directory, "src/staged.ts"), "staged\n");
+  await git(directory, "add", "src/staged.ts");
+  await unlink(path.join(directory, "src/delete.ts"));
+  await git(directory, "mv", "src/rename-from.ts", "src/rename-to.ts");
+  const proposalGitArguments: string[][] = [];
+  const delivered = await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery"] }, {
+    gitRunner: async (gitDirectory, args) => {
+      proposalGitArguments.push([...args]);
+      const result = await execFileAsync("git", ["-C", gitDirectory, ...args], { encoding: "utf8" });
+      return String(result.stdout);
+    }
+  });
+  const sealedProposal = delivered.task.proposal;
+  assert.ok(sealedProposal);
+  assert.equal(sealedProposal.pathStatesVersion, 1);
+  assert.deepEqual(sealedProposal.pathStates?.map(item => item.path), sealedProposal.ownedPaths);
+  assert.ok(proposalGitArguments.some(args => args[0] === "ls-files" && args.includes(":(literal)src/tracked.ts")));
+  assert.ok(proposalGitArguments.some(args => args[0] === "ls-tree" && args.includes(":(literal)src/tracked.ts")));
+  assert.equal(isTaskProposalReference({
+    ...sealedProposal,
+    pathStates: sealedProposal.pathStates.slice(1)
+  }), false);
+  assert.equal(isTaskProposalReference({
+    ...sealedProposal,
+    pathStates: sealedProposal.pathStates.map((item, index) => index === 0
+      ? { ...item, sourcePath: "src/not-owned.ts" }
+      : item)
+  }), false);
+  assert.equal(isTaskProposalReference({
+    ...sealedProposal,
+    pathStatesVersion: undefined,
+    pathStates: sealedProposal.pathStates.slice(1)
+  }), true);
+  assert.deepEqual(delivered.task.proposal?.pathStates, [
+    { path: "src/delete.ts", proposalAdded: true, gitTracked: true, staged: false, committed: true },
+    { path: "src/rename-from.ts", proposalAdded: true, gitTracked: false, staged: true, committed: true },
+    { path: "src/rename-to.ts", sourcePath: "src/rename-from.ts", proposalAdded: true, gitTracked: true, staged: true, committed: false },
+    { path: "src/staged.ts", proposalAdded: true, gitTracked: true, staged: true, committed: false },
+    { path: "src/tracked.ts", proposalAdded: true, gitTracked: true, staged: false, committed: true },
+    { path: "src/untracked.ts", proposalAdded: true, gitTracked: false, staged: false, committed: false }
+  ]);
+
+  const guidance = await nextTaskGuidance({ directory });
+  const guidanceProposal = guidance.tasks.find(task => task.id === "T-001")?.proposal;
+  assert.equal(guidanceProposal?.pathStatesVersion, 1);
+  assert.deepEqual(guidanceProposal?.pathStates, delivered.task.proposal?.pathStates);
+
+  await git(directory, "add", "src/tracked.ts");
+  await assert.rejects(
+    transitionTask({ directory, id: "T-001", to: "ACCEPTED", revision: 1, evidence: ["acceptance"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.PROPOSAL_INVALID
+  );
+});
+
+test("Git pathspecs select legal magic-looking filenames literally", async () => {
+  const directory = await temporaryProject();
+  const literalPath = ":(exclude)-lane.ts";
+  await writeFile(path.join(directory, literalPath), "literal\n");
+  await initializeGitHead(directory);
+  const index = await git(directory, "ls-files", "--stage", "-z", "--", `:(literal)${literalPath}`) as { stdout: string };
+  assert.ok(index.stdout.split("\0").some(field => field.endsWith(`\t${literalPath}`)));
+  const head = String((await git(directory, "rev-parse", "HEAD") as { stdout: string }).stdout).trim();
+  const tree = await git(directory, "ls-tree", "-r", "-z", "--name-only", head, "--", `:(literal)${literalPath}`) as { stdout: string };
+  assert.equal(tree.stdout, `${literalPath}\0`);
+});
+
+test("proposal Git path lanes batch literal pathspecs by bytes and union exact results", async () => {
+  const directory = await temporaryProject();
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await initializeGitHead(directory);
+  const paths = Array.from({ length: 300 }, (_, index) =>
+    `src/batch-${String(index).padStart(3, "0")}-${"界".repeat(40)}-${"é".repeat(20)}.ts`
+  );
+  const earlyPath = paths[0]!;
+  const finalPath = paths.at(-1)!;
+  await writeFile(path.join(directory, earlyPath), "export const value0 = 0;\n", "utf8");
+  await writeFile(path.join(directory, finalPath), "export const value299 = 299;\n", "utf8");
+  await git(directory, "add", "--", earlyPath, finalPath);
+  await git(directory, "commit", "--quiet", "-m", "commit representative batch paths");
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-001", ownerThread: "test:T-001", writeTree: ["src"] });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await Promise.all(paths.slice(1, -1).map((relativePath, index) =>
+    writeFile(path.join(directory, relativePath), `export const value${index + 1} = ${index + 1};\n`, "utf8")
+  ));
+  await writeFile(path.join(directory, earlyPath), "export const value0 = 0;\nexport const changedEarly = true;\n", "utf8");
+  await writeFile(path.join(directory, finalPath), "export const value299 = 299;\nexport const changedFinal = true;\n", "utf8");
+  const proposalGitArguments: string[][] = [];
+  const delivered = await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery:batched"] }, {
+    gitRunner: async (gitDirectory, args) => {
+      proposalGitArguments.push([...args]);
+      const result = await execFileAsync("git", ["-C", gitDirectory, ...args], { encoding: "utf8" });
+      return String(result.stdout);
+    }
+  });
+  assert.equal(delivered.task.proposal?.pathStates?.length, paths.length);
+  const indexBatches = proposalGitArguments.filter(args => args[0] === "ls-files" && args.some(arg => arg.startsWith(":(literal)")));
+  const headBatches = proposalGitArguments.filter(args => args[0] === "ls-tree" && args.some(arg => arg.startsWith(":(literal)")));
+  assert.ok(indexBatches.length > 1);
+  assert.ok(headBatches.length > 1);
+  assert.ok(indexBatches[0]?.includes(`:(literal)${earlyPath}`));
+  assert.ok(indexBatches.at(-1)?.includes(`:(literal)${finalPath}`));
+  assert.ok(headBatches[0]?.includes(`:(literal)${earlyPath}`));
+  assert.ok(headBatches.at(-1)?.includes(`:(literal)${finalPath}`));
+  const proposalPathStates = delivered.task.proposal?.pathStates ?? [];
+  for (const representativePath of [earlyPath, finalPath]) {
+    const pathState = proposalPathStates.find(item => item.path === representativePath);
+    assert.ok(pathState);
+    assert.equal(pathState.gitTracked, true);
+    assert.equal(pathState.committed, true);
+  }
+  const argvBytes = (args: readonly string[]) => args.reduce(
+    (total, arg) => total + Buffer.byteLength(arg, "utf8") + 1,
+    0
+  );
+  for (const args of [...indexBatches, ...headBatches]) {
+    assert.ok(argvBytes(args) <= 32 * 1024, `Git argv batch exceeded 32 KiB: ${argvBytes(args)} bytes`);
+  }
+  const pathspecs = (batches: string[][]) => batches.flatMap(args => args.slice(args.indexOf("--") + 1));
+  assert.deepEqual(pathspecs(indexBatches).sort(), paths.map(item => `:(literal)${item}`).sort());
+  assert.deepEqual(pathspecs(headBatches).sort(), paths.map(item => `:(literal)${item}`).sort());
 });
 
 test("a failed delivery commit preserves and reuses its verified immutable proposal", async () => {
@@ -1690,6 +1901,145 @@ test("writer acquisition rejects an exact file scope whose target is a symlink",
   );
 });
 
+test("status selectors bound operational tasks and checkpoint closeout deltas", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await recordCheckpoint({ directory });
+  await addDefaultTask(directory, { id: "T-ACTIVE" });
+  await addDefaultTask(directory, { id: "T-DONE" });
+  await transitionTask({ directory, id: "T-ACTIVE", to: "READY", revision: 0 });
+  await transitionTask({ directory, id: "T-DONE", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory, "T-DONE");
+  await transitionTask({ directory, id: "T-DONE", to: "ACTIVE", revision: 0 });
+  await transitionTask({ directory, id: "T-DONE", to: "REVIEW", revision: 1, evidence: ["delivery:done"] });
+  await transitionTask({ directory, id: "T-DONE", to: "ACCEPTED", revision: 1, evidence: ["acceptance:done"] });
+  await transitionTask({ directory, id: "T-DONE", to: "VERIFIED", revision: 1, evidence: ["verification:done"] });
+  await transitionTask({ directory, id: "T-DONE", to: "DONE", revision: 1 });
+  await recordCheckpoint({ directory });
+
+  const selected = await orchestrationStatus({ directory, taskId: "T-DONE" });
+  assert.deepEqual(selected.tasks.map(task => task.id), ["T-DONE"]);
+  assert.equal(selected.selection?.type, "task");
+  assert.equal(selected.selection?.taskId, "T-DONE");
+
+  const active = await orchestrationStatus({ directory, activeOnly: true });
+  assert.deepEqual(active.tasks.map(task => task.id), ["T-ACTIVE"]);
+  assert.equal(active.tasks.some(task => task.state === "DONE"), false);
+  assert.equal(active.taskCounts.DONE, 0);
+  assert.equal(active.selection?.type, "active-only");
+
+  await addDefaultTask(directory, { id: "T-EXPIRED" });
+  await transitionTask({ directory, id: "T-EXPIRED", to: "READY", revision: 0 });
+  await acquireTaskLease({
+    directory,
+    id: "T-EXPIRED",
+    ownerThread: "test:T-EXPIRED",
+    write: ["src/expired.ts"],
+    ttlSeconds: 60,
+    heartbeatIntervalSeconds: 30
+  }, { clock: () => Date.parse("2020-01-01T00:00:00.000Z") });
+  await transitionTask({ directory, id: "T-EXPIRED", to: "ACTIVE", revision: 0 }, {
+    clock: () => Date.parse("2020-01-01T00:00:01.000Z")
+  });
+  await addDefaultTask(directory, { id: "T-RESERVATION-EXPIRED" });
+  await transitionTask({ directory, id: "T-RESERVATION-EXPIRED", to: "READY", revision: 0 });
+  await reserveTaskLease({
+    directory,
+    id: "T-RESERVATION-EXPIRED",
+    write: ["src/reservation-expired.ts"],
+    reservationTtlSeconds: 60
+  }, { clock: () => "2020-01-01T00:00:00.000Z" });
+
+  await writeFile(path.join(directory, "changed.txt"), "closeout\n", "utf8");
+  const changed = await orchestrationStatus({ directory, changedSinceCheckpoint: true });
+  assert.deepEqual(changed.tasks, []);
+  assert.ok(changed.leaseExpiryCandidates.some(candidate => candidate.taskId === "T-EXPIRED"));
+  assert.ok(changed.leaseReservationExpiryCandidates.some(candidate => candidate.taskId === "T-RESERVATION-EXPIRED"));
+  assert.equal(changed.selection?.type, "changed-since-checkpoint");
+  assert.equal(changed.selection?.pathCount, 1);
+  assert.equal(changed.delta?.counts.untracked, 1);
+  assert.equal(changed.delta?.paths[0]?.path, "changed.txt");
+  assert.equal(Object.hasOwn(changed.delta?.paths[0] || {}, "checkpoint"), false);
+  assert.equal(Object.hasOwn(changed.delta?.paths[0] || {}, "current"), false);
+
+  await assert.rejects(
+    orchestrationStatus({ directory, taskId: "T-MISSING" }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.TASK_NOT_FOUND
+  );
+  await assert.rejects(
+    orchestrationStatus({ directory, taskId: "T-DONE", activeOnly: true }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.UNKNOWN_OPTION
+  );
+});
+
+test("selected status bounds every proposal path lane with explicit totals", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-A" });
+  await addDefaultTask(directory, { id: "T-B" });
+  for (const id of ["T-A", "T-B"]) {
+    await transitionTask({ directory, id, to: "READY", revision: 0 });
+    await acquireTaskLease({
+      directory,
+      id,
+      ownerThread: `test:${id}`,
+      writeTree: [`src/${id === "T-A" ? "a" : "b"}`]
+    });
+    await transitionTask({ directory, id, to: "ACTIVE", revision: 0 });
+  }
+  await mkdir(path.join(directory, "src/a"), { recursive: true });
+  await mkdir(path.join(directory, "src/b"), { recursive: true });
+  await Promise.all(Array.from({ length: 101 }, async (_item, index) => {
+    await writeFile(path.join(directory, `src/a/file-${index}.ts`), `export const a${index} = ${index};\n`, "utf8");
+    await writeFile(path.join(directory, `src/b/file-${index}.ts`), `export const b${index} = ${index};\n`, "utf8");
+  }));
+
+  const delivered = await transitionTask({
+    directory,
+    id: "T-A",
+    to: "REVIEW",
+    revision: 1,
+    evidence: ["delivery:bounded-status"]
+  });
+  assert.equal(delivered.task.proposal?.ownedPaths.length, 101);
+  assert.equal(delivered.task.proposal?.excludedForeignPaths.length, 101);
+  assert.equal(delivered.task.proposal?.pathStates?.length, 101);
+
+  const assertBoundedProposal = (task: OrchestrationTask | undefined) => {
+    assert.ok(task?.proposal);
+    const proposal = task.proposal;
+    for (const key of ["scopes", "ownedPaths", "excludedForeignPaths", "pathStates"] as const) {
+      const collection = proposal[key];
+      assert.ok(Array.isArray(collection));
+      assert.ok(collection.length <= 100);
+    }
+    const pathSummary = (proposal as unknown as { pathSummary: Record<string, unknown> }).pathSummary;
+    assert.equal(pathSummary.limit, 100);
+    for (const key of ["scopes", "ownedPaths", "excludedForeignPaths", "pathStates"]) {
+      assert.deepEqual(pathSummary[key], {
+        total: key === "scopes" ? 1 : 101,
+        returned: key === "scopes" ? 1 : 100,
+        truncated: key !== "scopes",
+        ...(key === "pathStates" ? { present: true } : {})
+      });
+    }
+  };
+
+  const selected = await orchestrationStatus({ directory, taskId: "T-A" });
+  assertBoundedProposal(selected.tasks[0]);
+  const active = await orchestrationStatus({ directory, activeOnly: true });
+  assertBoundedProposal(active.tasks.find(task => task.id === "T-A"));
+
+  const guidance = await nextTaskGuidance({ directory });
+  const guidanceProposal = guidance.tasks.find(task => task.id === "T-A")?.proposal;
+  assert.ok(guidanceProposal?.pathStates);
+  assert.equal(guidanceProposal.pathStates.length, 100);
+  assert.deepEqual(guidanceProposal.pathSummary, {
+    limit: 100,
+    pathStates: { total: 101, returned: 100, truncated: true, present: true }
+  });
+});
+
 test("status detects content-sensitive checkpoint drift and checkpoint reconciles it", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-orchestration-git-test-"));
   temporaryDirectories.add(directory);
@@ -2254,6 +2604,41 @@ test("tampered event logs fail closed", async () => {
     readOrchestration(directory),
     error => error instanceof SynodError && error.code === ERROR_CODES.EVENT_LOG_INVALID
   );
+});
+
+test("tampered correction-history paths fail closed", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await recordTaskCorrection({
+    directory,
+    id: "T-001",
+    revision: 0,
+    reason: "Create a canonical correction fixture",
+    evidence: ["review:fixture"]
+  });
+
+  const statePath = path.join(directory, ORCHESTRATION_STATE_PATH);
+  const originalState = await readFile(statePath, "utf8");
+  const unsafePaths = ["../outside.ts", "/absolute/outside.ts", "src\\outside.ts", "src/\u0000outside.ts"];
+  try {
+    for (const unsafePath of unsafePaths) {
+      const tampered = JSON.parse(originalState) as {
+        tasks: Record<string, { correctionHistory?: Array<{ paths: string[] }> }>;
+      };
+      tampered.tasks["T-001"]!.correctionHistory![0]!.paths = [unsafePath];
+      await writeFile(statePath, `${JSON.stringify(tampered, null, 2)}\n`, "utf8");
+      await assert.rejects(
+        readOrchestration(directory),
+        error => error instanceof SynodError && error.code === ERROR_CODES.ORCHESTRATION_STATE_INVALID
+      );
+    }
+  } finally {
+    await writeFile(statePath, originalState, "utf8");
+  }
 });
 
 test("status fails closed when the generated Markdown view diverges from canonical state", async () => {

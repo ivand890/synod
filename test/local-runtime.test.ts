@@ -680,6 +680,16 @@ test("concurrent cross-version installs cannot commit a downgrade", async () => 
   let releaseNewer: () => void = () => {};
   let reportNewerStarted: () => void = () => {};
   let olderInstallerStarted = false;
+  let olderLockClockCalls = 0;
+  let resolveOlderLockAttempted: () => void = () => {};
+  const olderLockAttempted = new Promise<void>(resolve => {
+    let settled = false;
+    resolveOlderLockAttempted = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+  });
   const newerStarted = new Promise<void>(resolve => { reportNewerStarted = resolve; });
   const holdNewer = new Promise<void>(resolve => { releaseNewer = resolve; });
 
@@ -700,13 +710,34 @@ test("concurrent cross-version installs cannot commit a downgrade", async () => 
     async runPnpm(stageDirectory, context) {
       olderInstallerStarted = true;
       await fakePnpmInstall(stageDirectory, context);
+    },
+    lockOptions: {
+      now: () => {
+        olderLockClockCalls += 1;
+        if (olderLockClockCalls === 3) resolveOlderLockAttempted();
+        return Date.now();
+      }
     }
   }).then(
     value => ({ value }),
     error => ({ error: asSynodError(error) })
   );
 
-  await new Promise(resolve => setTimeout(resolve, 75));
+  let contentionTimeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      olderLockAttempted,
+      new Promise<never>((_resolve, reject) => {
+        contentionTimeout = setTimeout(
+          () => reject(new Error("older installer did not reach the held runtime lock")),
+          5_000
+        );
+      })
+    ]);
+  } finally {
+    if (contentionTimeout !== undefined) clearTimeout(contentionTimeout);
+  }
+  assert.equal(olderLockClockCalls, 3);
   assert.equal(olderInstallerStarted, false);
   releaseNewer();
   await newer;

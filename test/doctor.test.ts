@@ -51,7 +51,7 @@ const models56 = [
 test("doctor detects a known-good Codex runtime and compatible model profile", async () => {
   const result = await doctorProject(
     { project: false },
-    { clientFactory: () => fakeClient("0.147.0", models56), runtimeResolver: () => runtime() }
+    { clientFactory: () => fakeClient("0.148.0-alpha.9", models56), runtimeResolver: () => runtime() }
   );
 
   assert.equal(result.healthy, true);
@@ -63,6 +63,37 @@ test("doctor detects a known-good Codex runtime and compatible model profile", a
   assert.equal(result.codex.status, "known-good");
   assert.equal(result.recommendedProfile, "synod-5.6");
   assert.equal(result.profiles.find(item => item.id === "synod-5.6")?.compatible, true);
+});
+
+test("doctor enforces the Node 22 minimum independently of the host runtime", async () => {
+  const results = [];
+  for (const nodeVersion of ["20.19.0", "21.9.0", "22.x", "22.0.bad", "22.0.0", "24.12.0"]) {
+    results.push(await doctorProject(
+      { project: false },
+      {
+        nodeVersion,
+        clientFactory: () => fakeClient("0.148.0-alpha.9", models56),
+        runtimeResolver: () => runtime()
+      }
+    ));
+  }
+
+  assert.deepEqual(
+    results.map(result => ({
+      version: result.node.version,
+      supported: result.node.supported,
+      range: result.node.range,
+      healthy: result.healthy
+    })),
+    [
+      { version: "20.19.0", supported: false, range: ">=22", healthy: false },
+      { version: "21.9.0", supported: false, range: ">=22", healthy: false },
+      { version: "22.x", supported: false, range: ">=22", healthy: false },
+      { version: "22.0.bad", supported: false, range: ">=22", healthy: false },
+      { version: "22.0.0", supported: true, range: ">=22", healthy: true },
+      { version: "24.12.0", supported: true, range: ">=22", healthy: true }
+    ]
+  );
 });
 
 test("doctor keeps Desktop and CLI versions scoped to their detected surface", async () => {
@@ -102,7 +133,7 @@ test("doctor accepts an in-range Desktop preview when live capabilities satisfy 
   const result = await doctorProject(
     { project: false },
     {
-      clientFactory: () => fakeClient("0.147.0-alpha.6.5", models56, { surface: "desktop" }),
+      clientFactory: () => fakeClient("0.148.0-alpha.1", models56, { surface: "desktop" }),
       runtimeResolver: () => runtime("desktop", "/Applications/ChatGPT.app/Contents/Resources/codex")
     }
   );
@@ -113,6 +144,62 @@ test("doctor accepts an in-range Desktop preview when live capabilities satisfy 
   assert.equal(result.recommendedProfile, "synod-5.6");
   assert.equal(result.profiles.find(item => item.id === "synod-5.6")?.modelCompatible, true);
   assert.ok(!result.warnings.some(item => item.code === WARNING_CODES.CODEX_VERSION_UNSUPPORTED));
+});
+
+test("doctor accepts every 0.148 variant and rejects adjacent minor lines", async () => {
+  const candidate = await doctorProject(
+    { project: false },
+    {
+      clientFactory: () => fakeClient("0.148.0-alpha.9", models56, { surface: "desktop" }),
+      runtimeResolver: () => runtime("desktop", "/Applications/ChatGPT.app/Contents/Resources/codex")
+    }
+  );
+  const nextPreview = await doctorProject(
+    { project: false },
+    {
+      clientFactory: () => fakeClient("0.148.0-alpha.10", models56, { surface: "desktop" }),
+      runtimeResolver: () => runtime("desktop", "/Applications/ChatGPT.app/Contents/Resources/codex")
+    }
+  );
+  const stable = await doctorProject(
+    { project: false },
+    {
+      clientFactory: () => fakeClient("0.148.0", models56, { surface: "desktop" }),
+      runtimeResolver: () => runtime("desktop", "/Applications/ChatGPT.app/Contents/Resources/codex")
+    }
+  );
+  const patchBuild = await doctorProject(
+    { project: false },
+    {
+      clientFactory: () => fakeClient("0.148.1+ci.1", models56, { surface: "desktop" }),
+      runtimeResolver: () => runtime("desktop", "/Applications/ChatGPT.app/Contents/Resources/codex")
+    }
+  );
+  const below = await doctorProject(
+    { project: false },
+    {
+      clientFactory: () => fakeClient("0.147.999", models56, { surface: "desktop" }),
+      runtimeResolver: () => runtime("desktop", "/Applications/ChatGPT.app/Contents/Resources/codex")
+    }
+  );
+
+  assert.equal(candidate.healthy, true);
+  assert.equal(candidate.codex.status, "known-good");
+  assert.equal(candidate.codex.reason, "tested_in_ci");
+  assert.equal(candidate.codex.range, ">=0.148.0-0 <0.149.0 (all 0.148.x variants)");
+  assert.equal(nextPreview.healthy, true);
+  assert.equal(nextPreview.codex.status, "supported");
+  assert.equal(nextPreview.codex.reason, "preview_inside_supported_range");
+  assert.equal(nextPreview.codex.range, candidate.codex.range);
+  assert.equal(stable.healthy, true);
+  assert.equal(stable.codex.status, "supported");
+  assert.equal(stable.codex.reason, "inside_supported_range");
+  assert.equal(patchBuild.healthy, true);
+  assert.equal(patchBuild.codex.status, "supported");
+  assert.equal(patchBuild.codex.reason, "inside_supported_range");
+  assert.equal(below.healthy, false);
+  assert.equal(below.codex.status, "unsupported");
+  assert.equal(below.codex.reason, "below_supported_range");
 });
 
 test("doctor prefers the surface confirmed by the initialized App Server", async () => {
@@ -160,7 +247,7 @@ test("doctor fails closed when Desktop is detected but its executable is ambiguo
 test("doctor fails closed above the tested Codex range", async () => {
   const result = await doctorProject(
     { project: false },
-    { clientFactory: () => fakeClient("0.148.0", models56), runtimeResolver: () => runtime() }
+    { clientFactory: () => fakeClient("0.149.0", models56), runtimeResolver: () => runtime() }
   );
 
   assert.equal(result.healthy, false);

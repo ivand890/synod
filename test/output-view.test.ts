@@ -116,6 +116,49 @@ test("summary status retains live lifecycle while omitting historical bulk", () 
   assert.equal(Object.hasOwn((status.checkpoint as Record<string, unknown>).worktree as Record<string, unknown>, "snapshot"), false);
 });
 
+test("summary status retains bounded selector identity and closeout paths", () => {
+  const summary = projectSummary("status", {
+    healthy: false,
+    tasks: [],
+    selection: {
+      type: "changed-since-checkpoint",
+      rationale: "Closeout path delta",
+      bounded: true,
+      taskCount: 0,
+      totalTaskCount: 4,
+      pathCount: 1,
+      pathsTruncated: false
+    },
+    delta: {
+      changed: true,
+      paths: [{
+        path: "src/changed.ts",
+        untracked: false,
+        binary: false,
+        resolved: false,
+        checkpoint: { status: " M", path: "src/changed.ts", type: "file" },
+        current: { status: " M", path: "src/changed.ts", type: "file" }
+      }],
+      counts: { staged: 0, unstaged: 1, committed: 0, untracked: 0, resolved: 0, binary: 0 }
+    }
+  }) as Record<string, unknown>;
+  assert.deepEqual(summary.selection, {
+    type: "changed-since-checkpoint",
+    rationale: "Closeout path delta",
+    bounded: true,
+    taskCount: 0,
+    totalTaskCount: 4,
+    pathCount: 1,
+    pathsTruncated: false
+  });
+  assert.deepEqual((summary.delta as Record<string, unknown>).paths, [{
+    path: "src/changed.ts",
+    untracked: false,
+    binary: false,
+    resolved: false
+  }]);
+});
+
 test("summary lease mutation keeps the exact next-operation fence", () => {
   const reservation = projectSummary("lease", {
     action: "reserve",
@@ -232,6 +275,41 @@ test("summary proposal submission exposes the exact acceptance action without a 
   });
 });
 
+test("summary proposal output bounds Git path-lane detail while full output retains it", () => {
+  const proposal = {
+    path: ".synod/proposals/lease-1/1",
+    bundleId: "sha256:proposal",
+    leaseId: "lease-1",
+    generation: 1,
+    baseRevision: 0,
+    revision: 1,
+    pathStatesVersion: 1,
+    status: "SEALED",
+    pathStates: [
+      { path: "src/tracked.ts", proposalAdded: true, gitTracked: true, staged: false, committed: true },
+      { path: "src/new.ts", proposalAdded: true, gitTracked: false, staged: false, committed: false }
+    ]
+  };
+  const full = projectJsonEnvelope({ ok: true, command: "proposal", data: { proposal } }, "full") as {
+    data: { proposal: Record<string, unknown> }
+  };
+  assert.deepEqual(full.data.proposal.pathStates, proposal.pathStates);
+  assert.equal(full.data.proposal.pathStatesVersion, 1);
+  const summary = projectJsonEnvelope({ ok: true, command: "proposal", data: { proposal } }, "summary") as {
+    data: { proposal: Record<string, unknown> }
+  };
+  assert.deepEqual(summary.data.proposal.pathStateSummary, {
+    total: 2,
+    proposalAdded: 2,
+    gitTracked: 1,
+    staged: 0,
+    committed: 1,
+    exceptions: [{ path: "src/new.ts", proposalAdded: true, gitTracked: false, staged: false, committed: false }]
+  });
+  assert.equal(summary.data.proposal.pathStatesVersion, 1);
+  assert.equal(Object.hasOwn(summary.data.proposal, "pathStates"), false);
+});
+
 test("summary task-next preserves guidance gates and exact typed actions", () => {
   const action = {
     operation: "lease.bind",
@@ -285,7 +363,17 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
             baseline: { snapshotContentHash: "sha256:baseline", branch: "omit" },
             status: "RESERVED"
           },
-          proposal: { bundleId: "sha256:proposal", revision: 4, status: "SEALED", path: ".synod/proposals/omit" },
+          proposal: {
+            bundleId: "sha256:proposal",
+            revision: 4,
+            status: "SEALED",
+            path: ".synod/proposals/omit",
+            pathStatesVersion: 1,
+            pathStates: [
+              { path: "src/guidance.ts", proposalAdded: true, gitTracked: true, staged: false, committed: true },
+              { path: "src/guidance-new.ts", proposalAdded: true, gitTracked: false, staged: false, committed: false }
+            ]
+          },
           constraints: { reservationRequiresBind: true, recoveryDecisionRequired: true },
           legalTransitions: ["ACTIVE", "BLOCKED"],
           actions: [action],
@@ -299,6 +387,10 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
   };
 
   assert.deepEqual(projectJsonEnvelope(envelope, "full"), envelope);
+  assert.deepEqual(envelope.data.guidance.tasks[0]!.proposal?.pathStates, [
+    { path: "src/guidance.ts", proposalAdded: true, gitTracked: true, staged: false, committed: true },
+    { path: "src/guidance-new.ts", proposalAdded: true, gitTracked: false, staged: false, committed: false }
+  ]);
   const summary = projectJsonEnvelope(envelope, "summary") as typeof envelope;
   const task = summary.data.guidance.tasks[0]!;
   assert.equal(task.id, "T-GUIDANCE");
@@ -335,6 +427,15 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
     path: ".synod/proposals/omit",
     bundleId: "sha256:proposal",
     revision: 4,
+    pathStatesVersion: 1,
+    pathStateSummary: {
+      total: 2,
+      proposalAdded: 2,
+      gitTracked: 1,
+      staged: 0,
+      committed: 1,
+      exceptions: [{ path: "src/guidance-new.ts", proposalAdded: true, gitTracked: false, staged: false, committed: false }]
+    },
     status: "SEALED"
   });
 

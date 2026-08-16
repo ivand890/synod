@@ -6,10 +6,10 @@
     <meta name="theme-color" content="oklch(98% 0.012 82)" />
     <meta
       name="description"
-      content="Interactive Synod trace: one supervisor coordinates three concurrent agents, independent review, correction, and durable evidence."
+      content="Interactive Synod trace: the Synod 0.9.3 lease-fenced lifecycle from READY through bind, task-aware wait, proposal review, verification, and checkpoint."
     />
     <link rel="icon" href="data:," />
-    <title>Synod orchestration · parallel execution</title>
+    <title>Synod orchestration · lease-fenced lifecycle</title>
     <style>
       :root {
         color-scheme: light;
@@ -529,6 +529,41 @@
       .truth-note strong { color: var(--ink); font-size: 0.8rem; white-space: nowrap; }
       .truth-note p { margin-bottom: 0; color: var(--ink-soft); font-size: 0.68rem; }
 
+      .contract-note {
+        margin: 28px 0 0;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 18px 22px 20px;
+        background: var(--surface);
+      }
+
+      .contract-note h2 {
+        max-width: 110ch;
+        margin: 6px 0 8px;
+        color: var(--ink);
+        font-family: var(--mono);
+        font-size: clamp(0.82rem, 1.3vw, 1rem);
+        font-weight: 700;
+        line-height: 1.55;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+
+      .contract-note p { max-width: 100ch; margin-bottom: 0; color: var(--ink-soft); font-size: 0.7rem; }
+      .contract-note code { overflow-wrap: anywhere; }
+
+      .contract-list {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px 22px;
+        margin: 15px 0 0;
+        padding-left: 20px;
+        color: var(--ink-soft);
+        font-size: 0.67rem;
+      }
+
+      .contract-list strong { color: var(--ink); }
+
       .sr-only {
         position: absolute;
         width: 1px;
@@ -549,10 +584,10 @@
       }
 
       @media (max-width: 900px) and (orientation: portrait) {
-        .shell { width: min(100% - 20px, 560px); padding: 22px 0 48px; }
+        .shell { width: calc(100% - 20px); max-width: 560px; padding: 22px 0 48px; }
         .page-head { display: block; margin-bottom: 18px; }
         h1 { font-size: clamp(2.35rem, 13vw, 4rem); }
-        .page-head p { font-size: 0.8rem; }
+        .page-head p { width: 100%; max-width: 100%; overflow-wrap: anywhere; word-break: break-word; font-size: 0.8rem; }
         .page-head .capacity { display: none; }
 
         .toolbar {
@@ -641,6 +676,8 @@
         .truth-note { display: block; }
         .truth-note strong { white-space: normal; }
         .truth-note p { margin-top: 5px; }
+        .contract-note { max-width: 100%; margin-top: 20px; padding: 15px 16px 16px; }
+        .contract-list { grid-template-columns: 1fr; gap: 6px; margin-top: 12px; }
       }
 
       @media (max-width: 980px) and (orientation: landscape) {
@@ -671,9 +708,43 @@
           animation-iteration-count: 1 !important;
         }
       }
+
+      /* The GIF is a derived capture of this same document, not a second storyboard. */
+      .gif-capture body { overflow: hidden; }
+      .gif-capture .shell { width: 100%; max-width: none; padding: 0; }
+      .gif-capture .page-head,
+      .gif-capture .contract-note,
+      .gif-capture .inspector,
+      .gif-capture .legend,
+      .gif-capture .truth-note,
+      .gif-capture .mobile-snapshot { display: none; }
+      .gif-capture .orchestrator { border: 0; border-radius: 0; box-shadow: none; }
+      .gif-capture .toolbar { position: static; gap: 12px; padding: 8px 12px; }
+      .gif-capture .current-event { min-height: 82px; padding: 12px 18px 10px; }
+      .gif-capture .current-event h2 { font-size: 1.35rem; }
+      .gif-capture .trace-viewport { display: block; overflow: hidden; }
+      .gif-capture .trace-board { min-width: 0 !important; }
+      .gif-capture .lane-label,
+      .gif-capture .row-track { min-height: 70px; }
+      .gif-capture .trace-row.durable .lane-label,
+      .gif-capture .trace-row.durable .row-track { min-height: 88px; }
+      .gif-capture .trace-node { min-height: 42px; margin: 0 3px; padding: 5px; }
+      .gif-capture .trace-node strong { font-size: 0.58rem; }
+      .gif-capture .trace-node small { font-size: 0.5rem; }
+      .gif-capture .trace-node strong,
+      .gif-capture .trace-node small { white-space: nowrap; text-overflow: ellipsis; }
+      .gif-capture .lane-label { padding: 10px; }
+      .gif-capture .lane-label strong { font-size: 0.72rem; }
+      .gif-capture .lane-label small { font-size: 0.54rem; }
+      .gif-capture .row-track { padding: 8px 10px; }
+      .gif-capture .axis-track { min-height: 42px; padding: 0 10px; }
+      .gif-capture .axis-label { min-height: 42px; }
+      .gif-capture .axis-tick { padding-top: 19px; font-size: 0.5rem; }
+      .gif-capture .axis-tick::before { top: 11px; height: 6px; }
     </style>
   </head>
   <body>
+    <output id="gif-capture-sentinel" hidden data-gif-capture-valid="false" data-gif-capture-scenario="" data-gif-capture-step="" data-gif-capture-state="">pending</output>
     <a class="skip-link" href="#trace">Skip to trace</a>
 
     <div class="shell">
@@ -681,7 +752,7 @@
         <div>
           <div class="eyebrow">Synod execution trace</div>
           <h1>Synod orchestration</h1>
-          <p>One supervisor coordinates three concurrent agents through delivery, review, correction, and verification.</p>
+          <p>One supervisor coordinates a bound Codex child through reservation, explicit authorization, task-aware waiting, review, correction, and durable evidence.</p>
         </div>
         <span class="capacity" id="header-capacity">0 / 3 active</span>
       </header>
@@ -701,7 +772,7 @@
           </div>
 
           <div class="scenario-controls">
-            <button class="control correction" id="correction" type="button" aria-pressed="false">↻ <span class="control-label">Correction</span></button>
+            <button class="control correction" id="correction" type="button" aria-pressed="false">↻ <span class="control-label">Correction policy</span></button>
             <span class="capacity" id="toolbar-capacity">0 / 3</span>
           </div>
         </nav>
@@ -713,6 +784,20 @@
             <p id="event-summary">Load the goal, rules, and durable state.</p>
           </div>
           <span class="task-state" id="task-state">PLANNED</span>
+        </section>
+
+        <section class="contract-note" aria-labelledby="contract-title">
+          <div class="micro-label">Executable contract · Synod 0.9.3</div>
+          <h2 id="contract-title">READY → reserve → read-only spawn → bind-driven ACTIVE → explicit supervisor authorization → task-aware wait → proposal submit → REVIEW → ACCEPTED → VERIFIED → DONE → checkpoint</h2>
+          <p>Synod owns task contracts, leases, proposals, evidence, and checkpoints. Codex owns child threads. A bind moves a reserved task to ACTIVE; the supervisor still sends the write authorization explicitly after bind.</p>
+          <ol class="contract-list">
+            <li><strong>Reserve:</strong> persist exact scopes, baseline, token, and <code>writeAuthorized:false</code>.</li>
+            <li><strong>Read-only spawn:</strong> the child may inspect; writes wait for bind confirmation.</li>
+            <li><strong>Wait boundary:</strong> <code>waitAuthority: canonical</code> selects identity only; runtime observation is separate.</li>
+            <li><strong>Runtime:</strong> <code>waitAuthority: appServer</code> or <code>waitAuthority: host</code> owns observation; <code>mode</code> reports <code>notification</code>, <code>cursor</code>, <code>poll</code>, or <code>handoff</code>.</li>
+            <li><strong>Incomplete:</strong> <code>notLoaded</code> means the queried App Server has not loaded the thread, not that it finished.</li>
+            <li><strong>Correction:</strong> reuse the same available worker by policy with a fresh reservation, generation, bind, authorization, and wait; replacement requires explicit recovery.</li>
+          </ol>
         </section>
 
         <section class="trace-viewport" id="trace-viewport" tabindex="0" aria-label="Complete time-directed trace; horizontally scrollable when needed">
@@ -777,7 +862,15 @@
     <p class="sr-only" id="announcer" aria-live="polite"></p>
 
     <noscript>
-      <p>Without JavaScript: Supervisor → split work → run three agents → preserve evidence → review → correct if needed → verify → checkpoint.</p>
+      <p><strong>Without JavaScript, the executable lifecycle remains:</strong> READY → reserve → read-only spawn → bind-driven ACTIVE → explicit supervisor authorization → task-aware wait → proposal submit → REVIEW → ACCEPTED → VERIFIED → DONE → checkpoint.</p>
+      <ol>
+        <li>Reserve exact scopes and an immutable baseline; the reservation is not write authority.</li>
+        <li>Spawn a Codex child with a read-only contract. Bind the returned owner thread; bind moves the task to ACTIVE.</li>
+        <li>After bind, the supervisor explicitly authorizes writes, then waits on the bound task.</li>
+        <li>Keep <code>waitAuthority</code> separate from transport: <code>canonical</code> selects task identity only; <code>appServer</code> or <code>host</code> owns runtime observation, and <code>notLoaded</code> is incomplete.</li>
+        <li>Submit the proposal to REVIEW, then record independent ACCEPTED and VERIFIED evidence before DONE; record the Git checkpoint separately.</li>
+        <li>For an ordinary correction, policy reuses the same available worker with a fresh reservation and lease-generation bind. Only explicit recovery may reassign a replacement.</li>
+      </ol>
     </noscript>
 
     <script>
@@ -790,37 +883,43 @@
         const isHtmlPreview = window.location.hostname === "htmlpreview.github.io"
           && window.location.search.startsWith("?https://");
         const lanes = [
-          { id: "supervisor", label: "Supervisor", hint: "split · assign · merge", icon: "S" },
-          { id: "slot1", label: "Slot 1", hint: "reusable thread", icon: "1" },
-          { id: "slot2", label: "Slot 2", hint: "reusable thread", icon: "2" },
-          { id: "slot3", label: "Slot 3", hint: "reusable thread", icon: "3" },
-          { id: "durable", label: "Evidence", hint: "survives threads", icon: "Σ" }
+          { id: "supervisor", label: "Supervisor", hint: "state · lease · evidence", icon: "S" },
+          { id: "slot1", label: "Bound child", hint: "Codex-owned thread", icon: "1" },
+          { id: "slot2", label: "Review + wait", hint: "independent observation", icon: "2" },
+          { id: "slot3", label: "Read-only scout", hint: "canonical context", icon: "3" },
+          { id: "durable", label: "Synod records", hint: "contracts · proposals · evidence", icon: "Σ" }
         ];
 
         const normalFrames = [
           ["intake", "Intake", "Task received", "Load the goal, rules, and durable state.", "PLANNED", "Load task state."],
-          ["decompose", "Split", "Split into API, UI, and tests", "Create three bounded contracts.", "READY", "Create T-API, T-UI, and T-TESTS."],
-          ["fanout", "Spawn", "Fill all three slots", "Two writers and one read-only explorer run together.", "ACTIVE · 3", "Assign three contracts."],
-          ["execute", "Parallel", "Work runs in parallel", "Disjoint leases isolate the writers.", "ACTIVE · 3", "Wait for state changes."],
-          ["api-delivery", "Delivery", "API ships first", "API evidence persists while UI and Tests continue.", "REVIEW · API r1", "Receive API r1."],
-          ["api-review", "Review", "Reuse slot 1 for API review", "Review the exact proposal without changing it.", "REVIEW · API r1", "Assign API review."],
-          ["api-reviewed", "Accept", "API r1 is accepted", "UI remains active; test findings persist.", "ACCEPTED · API r1", "Preserve review and findings."],
-          ["ui-delivery", "Delivery", "UI ships", "Initial workers end; their evidence remains.", "REVIEW · UI r1", "Receive UI r1."],
-          ["ui-review", "Review", "Review UI r1", "Run an independent read-only review.", "REVIEW · UI r1", "Assign UI review."],
-          ["verify", "Verify", "Verify the integrated checkout", "Acceptance and verification are separate gates.", "ACCEPTED · r1", "Integrate and verify."],
-          ["checkpoint", "Checkpoint", "Persist the cycle", "Threads end; evidence remains.", "DONE · r1", "Record Git state."]
+          ["ready", "Ready", "Task is READY", "Confirm acceptance and verification gates before execution.", "READY", "Confirm the task contract."],
+          ["reserve", "Reserve", "Reserve exact scopes", "Persist the baseline, reservation token, and writeAuthorized:false.", "READY · RESERVED", "Reserve the writer lease."],
+          ["readonly-spawn", "Spawn", "Child may inspect read-only", "Codex starts the child with writes, worktrees, and implementation commands fenced.", "READY · RESERVED", "Spawn with a read-only contract."],
+          ["bind", "Bind", "Bind moves the task to ACTIVE", "Bind the returned owner thread to the complete reservation fence and lease generation.", "ACTIVE · BOUND", "Bind the owner thread."],
+          ["authorize", "Authorize", "Supervisor authorizes writes", "Explicit write authorization follows bind; Codex now owns child execution.", "ACTIVE · AUTHORIZED", "Send explicit authorization."],
+          ["wait", "Wait", "Task-aware wait", "Select the bound task canonically, then observe or hand off at runtime.", "ACTIVE · WAIT", "Wait on the bound task."],
+          ["proposal", "Proposal", "Submit the proposal", "The bound worker submits delivery evidence; ACTIVE → REVIEW advances the revision.", "REVIEW", "Submit proposal evidence."],
+          ["accept", "Accept", "Record acceptance", "Independent review evidence moves this exact revision to ACCEPTED.", "ACCEPTED", "Record acceptance evidence."],
+          ["verify", "Verify", "Record verification", "Separate verification evidence moves the same revision to VERIFIED.", "VERIFIED", "Record verification evidence."],
+          ["done", "Done", "Mark local delivery DONE", "DONE closes Synod's local gates; it is not deployment or external proof.", "DONE", "Close the task revision."],
+          ["checkpoint", "Checkpoint", "Record the Git checkpoint", "A checkpoint acknowledges branch, HEAD, and worktree fingerprint separately from DONE.", "CHECKPOINT", "Record the acknowledged state."],
+          ["handoff", "Handoff", "The cycle is durable", "The task remains DONE; the checkpoint is a distinct durable handoff.", "DONE · CHECKPOINT", "Hand off exact evidence."]
         ];
 
         const correctionFrames = [
-          ...normalFrames.slice(0, 6),
-          ["correction", "Correction", "API review finds an issue", "Preserve r1 and open one bounded correction.", "ACTIVE · correction 1", "Open correction round 1."],
-          ["api-gen2", "Generation 2", "Spawn API generation 2", "UI continues while a new lease fences the fix.", "ACTIVE · API gen 2", "Assign the correction."],
-          ["api-gen2-delivery", "Delivery", "API generation 2 ships r2", "Seal r2; keep r1 as history.", "REVIEW · API r2", "Receive API r2."],
-          ["api-review2", "Review", "Review API r2", "Validate the fix while UI continues.", "REVIEW · API r2", "Assign API r2 review."],
-          ["ui-delivery", "Delivery", "UI ships", "API r2 and findings are already preserved.", "REVIEW · UI r1", "Receive UI r1."],
-          ["ui-review", "Review", "Review UI r1", "Review UI independently before integration.", "REVIEW · UI r1", "Assign UI review."],
-          ["verify", "Verify", "Verify the corrected checkout", "Check API r2, UI r1, and findings.", "ACCEPTED · API r2 / UI r1", "Integrate and verify."],
-          ["checkpoint", "Checkpoint", "Persist the full chain", "Keep historical r1 and corrected r2.", "DONE · API r2 / UI r1", "Record Git state."]
+          ...normalFrames.slice(0, 8),
+          ["correction-policy", "Correction", "Return to the same available worker", "Advisor policy reuses the same worker when available; this is not a runtime owner-continuity guarantee.", "REVIEW · finding", "Choose the ordinary correction policy."],
+          ["correction-reserve", "Reserve", "Reserve a fresh lease generation", "A correction requires a fresh reservation and immutable baseline before another bind.", "READY · CORRECTION", "Reserve generation 2."],
+          ["correction-spawn", "Spawn", "Child inspects the finding read-only", "The same available worker may inspect; writes still wait for the new bind.", "READY · CORRECTION", "Spawn the correction contract."],
+          ["correction-bind", "Bind", "Bind generation 2", "Bind the fresh reservation to the same worker when available; the task returns to ACTIVE.", "ACTIVE · GEN 2", "Bind the correction lease."],
+          ["correction-authorize", "Authorize", "Authorize correction writes", "The supervisor explicitly authorizes the correction only after the generation-2 bind.", "ACTIVE · AUTHORIZED", "Authorize the correction."],
+          ["correction-wait", "Wait", "Wait across the correction boundary", "Run task-aware wait again; canonical selection, runtime authority, and transport stay distinct.", "ACTIVE · WAIT", "Wait on generation 2."],
+          ["correction-proposal", "Proposal", "Submit corrected proposal r2", "Preserve r1 as history while the corrected delivery advances to REVIEW.", "REVIEW · r2", "Submit corrected evidence."],
+          ["accept", "Accept", "Record acceptance for r2", "Independent review evidence moves the corrected revision to ACCEPTED.", "ACCEPTED · r2", "Record acceptance evidence."],
+          ["verify", "Verify", "Record verification for r2", "Separate verification evidence moves the corrected revision to VERIFIED.", "VERIFIED · r2", "Record verification evidence."],
+          ["done", "Done", "Mark local delivery DONE", "DONE closes Synod's local gates for r2; it is not deployment or external proof.", "DONE · r2", "Close the corrected task."],
+          ["checkpoint", "Checkpoint", "Record the full Git checkpoint", "Keep r1 history and r2 evidence; the checkpoint remains distinct from DONE.", "CHECKPOINT", "Record the acknowledged state."],
+          ["handoff", "Handoff", "The corrected cycle is durable", "The task remains DONE with r1 history, r2 evidence, and an explicit checkpoint.", "DONE · CHECKPOINT", "Hand off exact evidence."]
         ];
 
         function node(id, lane, start, end, label, subtitle, kind, details = {}) {
@@ -839,32 +938,39 @@
 
         function normalScenario() {
           const nodes = [
-            node("decompose", "supervisor", 1, 2, "Split & assign", "API · UI · Tests", "control", { role: "Supervisor", summary: "Create three bounded contracts.", contract: "Goal + acceptance", scope: "planning", input: "Task + state", output: "3 READY tasks" }),
-            node("collect-api", "supervisor", 4, 5, "Receive API", "proposal r1", "control", { role: "Supervisor", summary: "Validate lease, scope, and revision.", input: "API proposal r1", output: "API → REVIEW" }),
-            node("assign-api-review", "supervisor", 5, 6, "Assign API review", "exact r1", "control", { role: "Supervisor", input: "API proposal r1", output: "Review contract" }),
-            node("integrate", "supervisor", 7, 9, "Integrate", "API r1 + UI r1", "control", { role: "Supervisor", scope: "control checkout", input: "Accepted proposals", output: "Integrated checkout" }),
-            node("close", "supervisor", 9, 11, "Verify & checkpoint", "same revision", "control", { role: "Supervisor", input: "Review + verification", output: "DONE + checkpoint" }),
+            node("ready", "supervisor", 1, 2, "Task READY", "contract gates", "control", { role: "Supervisor", summary: "Confirm acceptance and verification gates.", contract: "Task contract", scope: "canonical state", input: "Goal + rules", output: "READY task" }),
+            node("reserve", "supervisor", 2, 3, "Reserve scopes", "writeAuthorized:false", "control", { role: "Supervisor", summary: "Persist an exact reservation fence.", contract: "Lease reservation", scope: "declared paths", input: "READY task + checkpoint", output: "Reservation token" }),
+            node("bind", "supervisor", 4, 5, "Bind lease", "ACTIVE · generation 1", "control", { role: "Supervisor", summary: "Bind the returned owner thread.", contract: "Complete reservation fence", scope: "writer lease", input: "Owner thread + reservation", output: "ACTIVE task" }),
+            node("authorize", "supervisor", 5, 6, "Authorize writes", "explicit supervisor", "control", { role: "Supervisor", summary: "Send authorization after bind.", contract: "Activation handoff", scope: "bound writer", input: "Bind receipt", output: "Authorized execution" }),
+            node("submit", "supervisor", 7, 8, "Submit proposal", "ACTIVE → REVIEW", "control", { role: "Supervisor", summary: "Receive the exact delivery proposal.", contract: "Proposal submit", scope: ".synod/proposals/", input: "Worker delta + evidence", output: "REVIEW revision" }),
+            node("accept", "supervisor", 8, 9, "Accept revision", "independent evidence", "control", { role: "Supervisor", summary: "Record acceptance separately.", contract: "Acceptance evidence", scope: "canonical state", input: "Review verdict", output: "ACCEPTED" }),
+            node("verify", "supervisor", 9, 10, "Verify revision", "same revision", "control", { role: "Supervisor", summary: "Record independent verification.", contract: "Verification evidence", scope: "canonical state", input: "Test evidence", output: "VERIFIED" }),
+            node("done", "supervisor", 10, 11, "Mark DONE", "local gates closed", "control", { role: "Supervisor", summary: "Close local delivery gates only.", contract: "Task transition", scope: "canonical state", input: "Accepted + verified", output: "DONE" }),
+            node("checkpoint", "supervisor", 11, 12, "Record checkpoint", "branch · HEAD · fingerprint", "control", { role: "Supervisor", summary: "Acknowledge the Git state explicitly.", contract: "Checkpoint", scope: ".synod/checkpoint.json", input: "Accepted checkout", output: "Durable handoff" }),
 
-            node("api-impl", "slot1", 2, 4, "API implementer", "gen 1", "writer", { role: "Implementer", summary: "Atomic API writer.", contract: "T-API r0", scope: "write-tree src/api", input: "Contract + baseline", output: "API proposal r1" }),
-            node("api-review", "slot1", 5, 6, "API reviewer", "read-only r1", "reader", { role: "Reviewer", summary: "Try to refute API r1 without changing it.", contract: "Review T-API r1", scope: "read-only", input: "API proposal r1", output: "API review r1" }),
-            node("verifier", "slot1", 9, 10, "Verifier", "integrated checkout", "reader", { role: "Verifier", contract: "Verification r1", scope: "read-only", input: "Checkout + criteria", output: "Verification evidence" }),
-            node("ui-impl", "slot2", 2, 7, "UI implementer", "gen 1", "writer", { role: "Implementer", summary: "Parallel writer with a disjoint lease.", contract: "T-UI r0", scope: "write-tree src/ui", input: "Contract + baseline", output: "UI proposal r1" }),
-            node("ui-review", "slot2", 8, 9, "UI reviewer", "read-only r1", "reader", { role: "Reviewer", contract: "Review T-UI r1", scope: "read-only", input: "UI proposal r1", output: "UI review r1" }),
-            node("tests-explorer", "slot3", 2, 6, "Test explorer", "read-only", "reader", { role: "Explorer", summary: "Map coverage and risks without writing.", contract: "T-TESTS", scope: "read-only", input: "Repo + contracts", output: "Test findings" }),
+            node("child-inspect", "slot1", 3, 4, "Codex child", "read-only inspect", "reader", { role: "Child thread", summary: "Inspect only until bind confirmation.", contract: "Read-only spawn", scope: "read-only", input: "Contract + baseline", output: "Inspection context" }),
+            node("child-work", "slot1", 5, 7, "Bound child", "authorized writes", "writer", { role: "Child thread", summary: "Execute inside the bound lease.", contract: "Implementation", scope: "reserved write tree", input: "Authorization + findings", output: "Proposal delta" }),
+            node("child-proposal", "slot1", 7, 8, "Delivery evidence", "revision r1", "artifact", { role: "Child evidence", scope: ".synod/proposals/", input: "Bound delta", output: "Sealed proposal" }),
 
-            node("task-snapshot", "durable", 1, 11, "Task graph", "3 contracts", "artifact", { role: "Durable state", contract: "Task graph", scope: ".synod/state.json", input: "Split", output: "Tasks + dependencies" }),
-            node("proposal-api", "durable", 4, 11, "API proposal", "r1", "artifact", { role: "Proposal", scope: ".synod/proposals/", input: "T-API delta", output: "Sealed bundle" }),
-            node("review-api", "durable", 6, 11, "API review", "r1 approved", "artifact", { role: "Review evidence", input: "API proposal r1", output: "Review verdict" }),
-            node("findings", "durable", 6, 11, "Test findings", "read-only", "artifact", { role: "Explorer evidence", input: "Repo + criteria", output: "Risks + commands" }),
-            node("proposal-ui", "durable", 7, 11, "UI proposal", "r1", "artifact", { role: "Proposal", scope: ".synod/proposals/", input: "T-UI delta", output: "Sealed bundle" }),
-            node("review-ui", "durable", 9, 11, "UI review", "r1 approved", "artifact", { role: "Review evidence", input: "UI proposal r1", output: "Review verdict" }),
-            node("checkpoint", "durable", 10, 11, "Checkpoint", "HEAD + fingerprint", "artifact", { role: "Canonical checkpoint", scope: ".synod/checkpoint.json", input: "Verified checkout", output: "Durable handoff" })
+            node("runtime-wait", "slot2", 6, 7, "Runtime observer", "authority + mode", "reader", { role: "Wait boundary", summary: "Observe or hand off without claiming completion.", contract: "Task-aware wait", scope: "Codex runtime", input: "Canonical task selection", output: "Wait report" }),
+            node("reviewer", "slot2", 8, 9, "Independent reviewer", "read-only", "reader", { role: "Reviewer", summary: "Try to refute the exact proposal.", contract: "Review r1", scope: "read-only", input: "Proposal + criteria", output: "Acceptance evidence" }),
+            node("verifier", "slot2", 9, 10, "Independent verifier", "read-only", "reader", { role: "Verifier", summary: "Verify the exact accepted revision.", contract: "Verification r1", scope: "read-only", input: "Checkout + criteria", output: "Verification evidence" }),
+            node("scout", "slot3", 2, 7, "Read-only scout", "canonical context", "reader", { role: "Explorer", summary: "Map constraints without writing.", contract: "Read-only context", scope: "read-only", input: "Repo + contracts", output: "Context evidence" }),
+
+            node("task-contract", "durable", 1, 12, "Task contract", "READY → DONE", "artifact", { role: "Synod state", contract: "Task graph", scope: ".synod/state.json", input: "Goal + acceptance", output: "Validated transitions" }),
+            node("reservation", "durable", 2, 12, "Reservation fence", "baseline + token", "artifact", { role: "Lease reservation", scope: ".synod/lease-baselines.json", input: "Exact scopes", output: "writeAuthorized:false" }),
+            node("lease", "durable", 4, 12, "Bound lease", "gen 1 · ACTIVE", "artifact", { role: "Writer lease", scope: "reserved paths", input: "Owner thread", output: "Bound ACTIVE lease" }),
+            node("wait-report", "durable", 6, 12, "Wait report", "authority ≠ mode", "artifact", { role: "Wait evidence", scope: "runtime boundary", input: "Task selection + status", output: "Observation or handoff" }),
+            node("proposal", "durable", 7, 12, "Proposal", "REVIEW · r1", "artifact", { role: "Sealed proposal", scope: ".synod/proposals/", input: "Delivery evidence", output: "REVIEW revision" }),
+            node("acceptance", "durable", 8, 12, "Acceptance evidence", "ACCEPTED", "artifact", { role: "Acceptance", input: "Independent review", output: "ACCEPTED" }),
+            node("verification", "durable", 9, 12, "Verification evidence", "VERIFIED", "artifact", { role: "Verification", input: "Independent checks", output: "VERIFIED" }),
+            node("checkpoint-record", "durable", 11, 12, "Checkpoint", "HEAD + fingerprint", "artifact", { role: "Canonical checkpoint", scope: ".synod/checkpoint.json", input: "DONE checkout", output: "Durable handoff" })
           ];
           const edges = [
-            ["decompose", "api-impl", 2], ["decompose", "ui-impl", 2], ["decompose", "tests-explorer", 2], ["decompose", "task-snapshot", 1],
-            ["api-impl", "proposal-api", 4], ["proposal-api", "api-review", 5], ["assign-api-review", "api-review", 5], ["api-review", "review-api", 6],
-            ["tests-explorer", "findings", 6], ["ui-impl", "proposal-ui", 7], ["proposal-ui", "ui-review", 8], ["ui-review", "review-ui", 9],
-            ["review-api", "verifier", 9], ["review-ui", "verifier", 9], ["verifier", "checkpoint", 10]
+            ["ready", "reserve", 2], ["reserve", "child-inspect", 3], ["child-inspect", "bind", 4], ["bind", "authorize", 5],
+            ["authorize", "child-work", 5], ["authorize", "runtime-wait", 6], ["child-work", "child-proposal", 7], ["child-proposal", "proposal", 7],
+            ["proposal", "reviewer", 8], ["reviewer", "accept", 8], ["accept", "acceptance", 8], ["accept", "verifier", 9],
+            ["verifier", "verify", 9], ["verify", "verification", 9], ["verify", "done", 10], ["done", "checkpoint", 11], ["checkpoint", "checkpoint-record", 11]
           ];
           return { id: "normal", frames: normalFrames, nodes, edges };
         }
@@ -873,41 +979,53 @@
           const scenario = normalScenario();
           scenario.id = "correction";
           scenario.frames = correctionFrames;
-          scenario.nodes = scenario.nodes.filter(item => !["api-review", "verifier", "ui-impl", "ui-review", "proposal-api", "review-api", "proposal-ui", "review-ui", "checkpoint", "integrate", "close"].includes(item.id));
+          scenario.nodes = scenario.nodes.filter(item => !["bind", "authorize", "child-inspect", "child-work", "child-proposal", "runtime-wait", "reviewer", "verifier", "proposal", "accept", "verify", "done", "checkpoint", "acceptance", "verification", "checkpoint-record", "lease", "wait-report"].includes(item.id));
           scenario.nodes.push(
-            node("api-review", "slot1", 5, 6, "API reviewer", "finding in r1", "reader", { role: "Reviewer", input: "API proposal r1", output: "Material finding" }),
-            node("api-fix", "slot1", 7, 8, "API implementer", "gen 2", "writer", { role: "Implementer", summary: "New writer fenced by a generation-2 lease.", contract: "T-API correction", scope: "write-tree src/api", input: "Finding + r1", output: "API proposal r2", correction: true }),
-            node("api-review2", "slot1", 9, 10, "API reviewer", "read-only r2", "reader", { role: "Reviewer", input: "API proposal r2", output: "API review r2" }),
-            node("verifier", "slot1", 12, 13, "Verifier", "API r2 + UI r1", "reader", { role: "Verifier", input: "Checkout + criteria", output: "Verification evidence" }),
-            node("ui-impl", "slot2", 2, 10, "UI implementer", "gen 1", "writer", { role: "Implementer", contract: "T-UI r0", scope: "write-tree src/ui", input: "Contract + baseline", output: "UI proposal r1" }),
-            node("ui-review", "slot2", 11, 12, "UI reviewer", "read-only r1", "reader", { role: "Reviewer", input: "UI proposal r1", output: "UI review r1" }),
-            node("collect-fix", "supervisor", 6, 7, "Bound correction", "round 1 · gen 2", "control", { role: "Supervisor", input: "API finding r1", output: "Correction contract" }),
-            node("integrate", "supervisor", 10, 12, "Integrate", "API r2 + UI r1", "control", { role: "Supervisor", input: "Accepted proposals", output: "Integrated checkout" }),
-            node("close", "supervisor", 12, 14, "Verify & checkpoint", "exact revisions", "control", { role: "Supervisor", input: "Reviews + verification", output: "DONE + checkpoint" }),
-            node("proposal-api", "durable", 4, 14, "API proposal", "r1 history", "artifact", { role: "Historical proposal", input: "API gen-1 delta", output: "Sealed bundle" }),
-            node("finding-api", "durable", 6, 14, "API finding", "round 1", "artifact", { role: "Review finding", input: "API proposal r1", output: "Correction required" }),
-            node("proposal-api2", "durable", 8, 14, "API proposal", "r2 current", "artifact", { role: "Current proposal", input: "API gen-2 delta", output: "Sealed bundle", correction: true }),
-            node("review-api", "durable", 10, 14, "API review", "r2 approved", "artifact", { role: "Review evidence", input: "API proposal r2", output: "Review verdict" }),
-            node("proposal-ui", "durable", 10, 14, "UI proposal", "r1", "artifact", { role: "Proposal", input: "T-UI delta", output: "Sealed bundle" }),
-            node("review-ui", "durable", 12, 14, "UI review", "r1 approved", "artifact", { role: "Review evidence", input: "UI proposal r1", output: "Review verdict" }),
-            node("checkpoint", "durable", 13, 14, "Checkpoint", "API r2 + UI r1", "artifact", { role: "Canonical checkpoint", scope: ".synod/checkpoint.json", input: "Verified checkout", output: "Durable handoff" })
+            node("correction-policy", "supervisor", 8, 9, "Correction policy", "same worker if available", "control", { role: "Advisor policy", summary: "Return ordinary correction to the same available worker.", contract: "Bounded correction", scope: "canonical state", input: "Review finding", output: "Fresh reservation" }),
+            node("correction-reserve", "supervisor", 9, 10, "Reserve generation 2", "fresh baseline + token", "control", { role: "Supervisor", summary: "Reserve before another bind.", contract: "Fresh lease reservation", scope: "same declared paths", input: "Finding + checkpoint", output: "Generation 2 reservation" }),
+            node("correction-bind", "supervisor", 11, 12, "Bind generation 2", "ACTIVE · same worker", "control", { role: "Supervisor", summary: "Bind the same available worker when possible.", contract: "Lease-generation bind", scope: "writer lease", input: "Owner + fresh reservation", output: "ACTIVE generation 2" }),
+            node("correction-authorize", "supervisor", 12, 13, "Authorize correction", "explicit supervisor", "control", { role: "Supervisor", summary: "Authorize only after generation-2 bind.", contract: "Activation handoff", scope: "bound writer", input: "Bind receipt", output: "Authorized correction" }),
+            node("correction-inspect", "slot1", 10, 11, "Codex child", "read-only finding", "reader", { role: "Child thread", summary: "Inspect the finding without writing.", contract: "Correction spawn", scope: "read-only", input: "Finding + r1", output: "Correction context" }),
+            node("correction-work", "slot1", 12, 14, "Bound child", "authorized gen 2", "writer", { role: "Child thread", summary: "Execute the bounded correction.", contract: "Correction implementation", scope: "fresh write lease", input: "Authorization + finding", output: "Proposal r2", correction: true }),
+            node("correction-proposal", "slot1", 14, 15, "Corrected evidence", "revision r2", "artifact", { role: "Child evidence", scope: ".synod/proposals/", input: "Generation-2 delta", output: "Sealed proposal r2", correction: true }),
+            node("correction-wait", "slot2", 13, 14, "Runtime observer", "authority + mode", "reader", { role: "Wait boundary", summary: "Observe or hand off without claiming completion.", contract: "Task-aware wait", scope: "Codex runtime", input: "Canonical selection", output: "Wait report" }),
+            node("correction-reviewer", "slot2", 15, 16, "Independent reviewer", "read-only r2", "reader", { role: "Reviewer", summary: "Try to refute the corrected proposal.", contract: "Review r2", scope: "read-only", input: "Proposal r2 + criteria", output: "Acceptance evidence" }),
+            node("correction-verifier", "slot2", 16, 17, "Independent verifier", "read-only r2", "reader", { role: "Verifier", summary: "Verify the corrected revision.", contract: "Verification r2", scope: "read-only", input: "Checkout + criteria", output: "Verification evidence" }),
+            node("correction-history", "durable", 7, 19, "Proposal history", "r1 preserved", "artifact", { role: "Historical proposal", scope: ".synod/proposals/", input: "Original delivery", output: "Preserved evidence" }),
+            node("correction-finding", "durable", 8, 19, "Review finding", "correction round 1", "artifact", { role: "Review finding", input: "Proposal r1", output: "Correction required" }),
+            node("correction-lease", "durable", 11, 19, "Bound lease", "gen 2 · ACTIVE", "artifact", { role: "Writer lease", scope: "fresh reserved paths", input: "Same available worker", output: "Bound ACTIVE lease" }),
+            node("correction-wait-report", "durable", 13, 19, "Wait report", "authority ≠ mode", "artifact", { role: "Wait evidence", scope: "runtime boundary", input: "Task selection + status", output: "Observation or handoff" }),
+            node("correction-current", "durable", 14, 19, "Proposal", "REVIEW · r2", "artifact", { role: "Sealed proposal", scope: ".synod/proposals/", input: "Corrected evidence", output: "REVIEW revision r2", correction: true }),
+            node("correction-acceptance", "durable", 15, 19, "Acceptance evidence", "ACCEPTED · r2", "artifact", { role: "Acceptance", input: "Independent review", output: "ACCEPTED", correction: true }),
+            node("correction-verification", "durable", 16, 19, "Verification evidence", "VERIFIED · r2", "artifact", { role: "Verification", input: "Independent checks", output: "VERIFIED", correction: true }),
+            node("correction-checkpoint", "durable", 18, 19, "Checkpoint", "HEAD + fingerprint", "artifact", { role: "Canonical checkpoint", scope: ".synod/checkpoint.json", input: "DONE checkout", output: "Durable handoff" })
           );
           scenario.edges = [
-            ["decompose", "api-impl", 2], ["decompose", "ui-impl", 2], ["decompose", "tests-explorer", 2], ["decompose", "task-snapshot", 1],
-            ["api-impl", "proposal-api", 4], ["proposal-api", "api-review", 5], ["api-review", "finding-api", 6], ["finding-api", "api-fix", 7, "correction"],
-            ["collect-fix", "api-fix", 7, "correction"], ["api-fix", "proposal-api2", 8, "correction"], ["proposal-api2", "api-review2", 9], ["api-review2", "review-api", 10],
-            ["tests-explorer", "findings", 6], ["ui-impl", "proposal-ui", 10], ["proposal-ui", "ui-review", 11], ["ui-review", "review-ui", 12],
-            ["review-api", "verifier", 12], ["review-ui", "verifier", 12], ["verifier", "checkpoint", 13]
+            ["ready", "reserve", 2], ["reserve", "correction-inspect", 10], ["correction-inspect", "correction-bind", 11], ["correction-bind", "correction-authorize", 12],
+            ["correction-policy", "correction-reserve", 9], ["correction-reserve", "correction-inspect", 10], ["correction-authorize", "correction-work", 12],
+            ["correction-authorize", "correction-wait", 13], ["correction-work", "correction-proposal", 14], ["correction-proposal", "correction-current", 14, "correction"],
+            ["correction-current", "correction-reviewer", 15], ["correction-reviewer", "correction-acceptance", 15], ["correction-reviewer", "correction-verifier", 16],
+            ["correction-verifier", "correction-verification", 16], ["correction-verification", "correction-checkpoint", 18]
           ];
           return scenario;
         }
 
         const scenarios = { normal: normalScenario(), correction: correctionScenario() };
         const params = new URLSearchParams(isHtmlPreview ? window.location.hash.slice(1) : window.location.search);
+        const isGifCapture = params.get("capture") === "gif";
+        const requestedScenario = params.get("scenario");
+        const requestedStep = params.get("step");
+        const requestedScenarioKnown = requestedScenario === "normal" || requestedScenario === "correction";
+        const activeScenario = requestedScenarioKnown ? requestedScenario : "normal";
+        const requestedIndex = requestedScenarioKnown
+          ? scenarios[activeScenario].frames.findIndex(item => item[0] === requestedStep)
+          : -1;
+        const captureRequestError = isGifCapture && (!requestedScenarioKnown || requestedIndex < 0);
+        document.documentElement.classList.toggle("gif-capture", isGifCapture);
         const state = {
-          scenario: params.get("scenario") === "correction" ? "correction" : "normal",
+          scenario: activeScenario,
           index: 0,
-          focus: params.get("focus") || "decompose",
+          focus: params.get("focus") || "ready",
           playing: false,
           timer: null,
           renderKey: null,
@@ -1116,7 +1234,7 @@
           const temporalDensity = state.scenario === "correction" ? 108 : 140;
           const traceBoard = $("#trace-board");
           traceBoard.classList.toggle("compact-time", state.scenario === "correction");
-          traceBoard.style.minWidth = `${208 + current.frames.length * temporalDensity}px`;
+          traceBoard.style.minWidth = isGifCapture ? "0" : `${208 + current.frames.length * temporalDensity}px`;
           $("#event-phase").textContent = `${item[1]} · t = ${String(state.index).padStart(2, "0")}`;
           $("#event-title").textContent = item[2];
           $("#event-summary").textContent = item[3];
@@ -1138,6 +1256,14 @@
           renderInspector();
           renderRelationships();
           syncUrl();
+          const captureSentinel = $("#gif-capture-sentinel");
+          captureSentinel.dataset.gifCaptureValid = String(!captureRequestError);
+          captureSentinel.dataset.gifCaptureScenario = state.scenario;
+          captureSentinel.dataset.gifCaptureStep = item[0];
+          captureSentinel.dataset.gifCaptureState = item[4];
+          captureSentinel.textContent = captureRequestError
+            ? `SYNOD-GIF-CAPTURE error requestedScenario=${requestedScenario || ""} requestedStep=${requestedStep || ""} actualScenario=${state.scenario} actualStep=${item[0]}`
+            : `SYNOD-GIF-CAPTURE scenario=${state.scenario} step=${item[0]} state=${item[4]}`;
           if (activeId) {
             const restored = document.getElementById(activeId);
             if (restored && restored !== document.activeElement) restored.focus({ preventScroll: true });
@@ -1233,10 +1359,8 @@
         }));
         resizeObserver.observe($("#diagram-body"));
 
-        const requestedStep = params.get("step");
-        const requestedIndex = scenario().frames.findIndex(item => item[0] === requestedStep);
         if (requestedIndex >= 0) state.index = requestedIndex;
-        if (!scenario().nodes.some(item => item.id === state.focus)) state.focus = "decompose";
+        if (!scenario().nodes.some(item => item.id === state.focus)) state.focus = "ready";
         if (!params.has("focus")) state.focus = suggestedFocus();
         render();
       })();

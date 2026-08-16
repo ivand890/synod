@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "package": "@ivand890/synod",
+  "version": "0.9.4",
+  "tag": "v0.9.4",
+  "sourcePreparation": {
+    "status": "prepared",
+    "mainAncestorRequired": true,
+    "localPackageSmoke": {
+      "artifact": "local tarball",
+      "command": "pnpm test:package",
+      "status": "pending",
+      "version": "0.9.4"
+    }
+  },
+  "publicVerification": {
+    "status": "pending"
+  },
+  "documentation": {
+    "status": "pending",
+    "paths": [
+      "README.md",
+      "ROADMAP.md",
+      "RELEASING.md"
+    ],
+    "rule": "Advance these paths together only when publicVerification is verified."
+  }
+}

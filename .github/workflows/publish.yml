@@ -38,17 +38,36 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
+          package_name="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.name)")"
+          test "$package_name" = "@ivand890/synod"
           package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
           node -e "if (!/^\\d+\\.\\d+\\.\\d+$/.test(process.argv[1])) process.exit(1)" "$package_version"
           test "$RELEASE_TAG" = "v$package_version"
           tagged_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
-          git merge-base --is-ancestor "$tagged_commit" origin/main
+          tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          test "$tagged_commit" = "$tag_commit"
+          main_commit="$(git rev-parse "origin/main^{commit}")"
+          git merge-base --is-ancestor "$tagged_commit" "$main_commit"
           npm_version="$(npm --version)"
           node -e "const [major, minor, patch] = process.argv[1].split('.').map(Number); if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) process.exit(1)" "$npm_version"
       - name: Run tests
         run: pnpm test
-      - name: Test the published package shape
+      - name: Run source-preparation local package smoke
         run: pnpm test:package
+      - name: Verify source closeout contract
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          package_name="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.name)")"
+          package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
+          tagged_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
+          pnpm exec tsx scripts/validate-release-closeout.ts \
+            --phase tag \
+            --package "$package_name" \
+            --version "$package_version" \
+            --tag "$RELEASE_TAG" \
+            --tag-sha "$tagged_commit" \
+            --json
       - name: Inspect existing npm publication
         id: npm_state
         run: |

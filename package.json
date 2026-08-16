@@ -1,6 +1,6 @@
 {
   "name": "@ivand890/synod",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Install the Synod persistent advisor loop in Codex projects.",
   "type": "module",
   "bin": {
@@ -29,11 +29,12 @@
     "test:integration": "pnpm typecheck && tsx --test test/cli.test.ts",
     "test:package": "pnpm build && tsx scripts/package-smoke.ts",
     "test:codex-compatibility": "pnpm build && tsx scripts/codex-compatibility-smoke.ts",
+    "validate:release-closeout": "tsx scripts/validate-release-closeout.ts",
     "prepack": "npm run build",
     "prepare": "npm run build"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "keywords": [
     "codex",

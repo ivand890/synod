@@ -8,6 +8,58 @@ Synod installs a persistent, reviewed advisor loop for Codex projects. The selec
 
 [Open the interactive trace](https://htmlpreview.github.io/?https://github.com/ivand890/synod/blob/main/docs/synod/synod-cycle.html).
 
+The public `v0.9.3` release is verified at tag commit
+`ddbcaf4953f1dd3f0ec5cb82ba6403b6e9699788`. Its immutable source and
+post-publication evidence is archived in
+[`release-closeouts/v0.9.3.json`](release-closeouts/v0.9.3.json). The root
+[`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) is now the `v0.9.4` source
+candidate's pre-tag `prepared`/`pending` record: it intentionally has no tag
+SHA and does not claim a passed package smoke. Public latest remains `v0.9.3`
+until a separately authorized `v0.9.4` tag, publication, and post-publication
+closeout commit are verified.
+The phase-2 live verifier runs on the protected closeout PR, not the tag
+workflow; the tag workflow validates only the immutable prepared/pending source
+record before publication.
+
+## Public release versus source candidate
+
+The public and pinned `@ivand890/synod@0.9.3` is the release described above.
+A project using `pnpm dlx @ivand890/synod@0.9.3`, or a project runtime pinned
+to `0.9.3`, exposes the released command surface only. The current source
+checkout also contains the `v0.9.4` candidate from the SYN-094 tasks. Those
+surfaces are implemented and regression-tested locally, but are not published,
+are not part of the `0.9.3` tarball, and remain unavailable to a pinned
+runtime until a future release is published and that project is explicitly
+upgraded.
+
+Candidate-only source surfaces include:
+
+- `synod task correct`, which records an evidence-backed correction while an
+  active lease remains in force.
+- Independent Git-lane provenance for sealed proposal paths:
+  `proposalAdded`, `gitTracked`, `staged`, and `committed` are separate facts,
+  not one completion claim.
+- Bounded status selectors: `--task`, `--active-only`, and
+  `--changed-since-checkpoint`.
+- `delegate start` through an injected `HostDelegationAdapter`. The standalone
+  CLI has no host adapter, fails closed or reports an incomplete handoff, and
+  never claims execution ownership.
+- The explicit `--include-local-docs` recovery-bundle path and reproducible
+  Chrome + ffmpeg release-closeout recipe.
+
+These candidate commands become available only after a future release and an
+explicit project runtime upgrade. The public/pinned `v0.9.3` `doctor` support
+range remains `>=0.142.0 <0.148.0`. The unreleased `v0.9.4` source candidate
+uses the support expression `>=0.148.0-0 <0.149.0 (all 0.148.x variants)`.
+Every valid `0.148.x` semantic version is accepted, including prerelease,
+stable, patch, and build-metadata variants; `0.148.0-alpha.9` is known-good.
+Valid versions below `0.148` or at and above `0.149`, plus invalid semver, are
+unsupported.
+
+The unreleased `v0.9.4` source candidate requires Node.js `>=22`; Node 20 is
+unsupported by this candidate. Its CI tests Node 22 and 24 on Ubuntu, plus
+Node 24 package smoke on macOS and Windows.
+
 ## Install
 
 The default and supported bootstrap path is `pnpm dlx`:
@@ -131,17 +183,33 @@ Acceptance criteria, verification commands, evidence, and dependencies are repea
 Task state follows a validated graph:
 
 ```text
-PLANNED → READY → ACTIVE → REVIEW → ACCEPTED → VERIFIED → DONE
-                         ↘ ACTIVE (correction)
+PLANNED → READY
+READY -- reserve → read-only spawn -- bind → ACTIVE
+ACTIVE -- explicit authorization → task-aware wait → proposal submit → REVIEW
+REVIEW → ACCEPTED → VERIFIED → DONE
+reviewed/accepted/verified -- ordinary correction (advisor policy) → fresh reservation + lease generation -- bind → same worker (when available) → ACTIVE
 ```
 
 Non-terminal tasks can be blocked or superseded. A blocked task can resume only its recorded prior state. Terminal tasks cannot transition.
 
-Every transition requires an exact task revision. Submitting work from `ACTIVE` to `REVIEW` advances it by one and requires delivery evidence. Acceptance and verification each require separate evidence tied to that same revision. Returning reviewed, accepted, or verified work to `ACTIVE` increments the correction round and clears current acceptance and verification:
+The executable delegated lifecycle is `READY → reserve → read-only spawn → bind-driven ACTIVE → explicit write authorization → task-aware wait → proposal submit → REVIEW → ACCEPTED → VERIFIED → DONE`. `lease bind` is the lifecycle step that moves a reserved task into `ACTIVE`; do not copy a direct `task transition ... ACTIVE` command into an operator workflow. The supervisor sends explicit write authorization only after bind succeeds, then waits on the bound task before submitting its proposal. The advisor/supervisor policy for an ordinary correction is to return work to the same available worker; that policy is not a runtime owner-continuity guarantee. The correction still requires a fresh reservation, lease-generation bind, authorization, and wait boundary; a stopped or unavailable worker requires explicit recovery before a replacement thread is assigned.
+
+Every transition requires an exact task revision. Submitting work from `ACTIVE` to `REVIEW` advances it by one and requires delivery evidence. Acceptance and verification each require separate evidence tied to that same revision. Returning reviewed, accepted, or verified work to `ACTIVE` increments the correction round and clears current acceptance and verification. Under the advisor/supervisor policy, an ordinary correction returns work to the same worker when it remains available; this is not a runtime owner-continuity guarantee. Reserve a fresh lease generation, bind it to that worker, then explicitly authorize writes and wait again. If the worker stopped or is unavailable, use explicit recovery; only that recovery path reassigns a replacement thread:
 
 ```bash
 synod task transition T-001 READY --revision 0
-synod task transition T-001 ACTIVE --revision 0
+synod lease reserve T-001 \
+  --write src/api.ts --read test/api.test.ts \
+  --reservation-ttl-seconds 300 --json
+# Spawn the configured worker with a read-only contract; analysis may begin,
+# but writes and implementation commands wait for bind.
+synod lease bind T-001 \
+  --reservation-token <token> --lease-id <id> --generation 1 --revision 0 \
+  --expected-reserved-at <iso> --baseline-hash <sha256> \
+  --owner-thread thread:019f... --ttl-seconds 300 --heartbeat-seconds 60 \
+  --json
+# After bind, the supervisor explicitly authorizes writes, then waits:
+synod wait --task T-001 --timeout-seconds 300 --json
 synod proposal submit T-001 --evidence "commit:abc123"
 synod task transition T-001 ACCEPTED --revision 1 --evidence "review:approved"
 synod task transition T-001 VERIFIED --revision 1 --evidence "test:pnpm-test:pass"
@@ -176,7 +244,7 @@ synod lease bind T-001 \
 
 The successful bind JSON adds an activation handoff derived from the existing `lease.bound` event: task and lease identity, `boundAt`, the exact event `{ sequence, id, hash }`, `writeAuthorized:true`, `supervisorNotification.status: "required-not-observed"`, and a typed `wait --task T-001` follow-up. The supervisor must send explicit write authorization to the worker only after bind succeeds, then run that task-aware wait; the receipt never claims that Codex notification, receipt, or execution was observed and never repeats the reservation token.
 
-If spawn fails, run `lease cancel` with the complete reservation fence and a reason. If no owner ID returns, wait for the reservation TTL and use the reservation form of `lease expire`. Neither pre-bind cleanup path creates an abandoned-worker recovery record because the reservation never authorized writes. Synod cannot invoke Codex `spawn_agent`; an atomic `delegate start` is deferred until a typed integration can perform both halves of the handshake.
+If spawn fails, run `lease cancel` with the complete reservation fence and a reason. If no owner ID returns, wait for the reservation TTL and use the reservation form of `lease expire`. Neither pre-bind cleanup path creates an abandoned-worker recovery record because the reservation never authorized writes. The public/pinned `0.9.3` CLI cannot invoke Codex `spawn_agent` or claim execution ownership. The current source candidate provides `delegate start` only through an injected `HostDelegationAdapter`; an unadapted standalone CLI fails closed or returns the explicit incomplete host handoff.
 
 Callers that already know the worker identity may still use `lease acquire`. After bind or acquire, the JSON result contains the active lease ID, generation, task revision, owner, and `heartbeatAt`. Copy those exact values into heartbeat, release, worktree, revocation, or recovery commands; a stale value fails closed:
 
@@ -282,7 +350,19 @@ synod status --explain
 synod status --json
 ```
 
-`status` exits non-zero with `SYNOD_CHECKPOINT_DRIFT` when branch, `HEAD`, or relevant working-tree content differs. `status --explain` adds a read-only path delta in text or JSON that distinguishes committed, staged, unstaged, untracked, deleted, renamed, resolved, and binary paths since the acknowledged checkpoint. Synod-owned infrastructure and orchestration records are excluded so Synod does not create its own drift. After investigating a deliberate change, accept it explicitly:
+`status` exits non-zero with `SYNOD_CHECKPOINT_DRIFT` when branch, `HEAD`, or relevant working-tree content differs. `status --explain` adds a read-only path delta in text or JSON that distinguishes committed, staged, unstaged, untracked, deleted, renamed, resolved, and binary paths since the acknowledged checkpoint. Synod-owned infrastructure and orchestration records are excluded so Synod does not create its own drift.
+
+The current source candidate also adds bounded selectors; these are not part of
+the public/pinned `0.9.3` command contract until a future release is published
+and upgraded into the project:
+
+```bash
+synod status --task T-001
+synod status --active-only
+synod status --changed-since-checkpoint
+```
+
+After investigating a deliberate change, accept it explicitly:
 
 ```bash
 synod checkpoint --message "Accepted the integrated revision"
@@ -314,7 +394,7 @@ An active leased task can execute in an explicit detached Git worktree outside t
 synod worktree create T-001 --destination ../task-T-001 \
   --lease-id <id> --generation 1 --revision 0 \
   --expected-heartbeat-at <iso> --owner-thread thread:019f...
-synod task transition T-001 ACTIVE --revision 0
+# `lease bind` has already moved T-001 into ACTIVE; this reuses that exact lease.
 ```
 
 After the worker stops editing, the supervisor seals its exact staged, unstaged, deleted, renamed, and allowed untracked delta into a durable proposal, then integrates it transactionally into the control checkout:
@@ -344,10 +424,13 @@ Export the exact acknowledged dirty checkpoint to a deterministic directory bund
 ```bash
 synod bundle export ../project-recovery.bundle
 synod bundle export ../project-recovery.bundle --include-untracked
+synod bundle export ../project-recovery.bundle --include-local-docs
+synod bundle export ../project-recovery.bundle --include-untracked --include-local-docs
 synod bundle verify ../project-recovery.bundle
 synod bundle verify ../project-recovery.bundle --json
 git clone <source> ../restored-project
 synod bundle restore ../project-recovery.bundle --cwd ../restored-project
+synod bundle restore ../project-recovery.bundle --cwd ../restored-project --include-local-docs
 synod bundle restore ../project-recovery.bundle --cwd ../restored-project --json
 ```
 
@@ -355,9 +438,24 @@ Export requires an acknowledged Git `HEAD`; the live branch, `HEAD`, Git index, 
 
 A schema-1 bundle contains canonical `manifest.json` plus raw content-addressed objects under `objects/`. The manifest binds the bundle ID to source branch/`HEAD`, checkpoint and snapshot hashes, last event identity, path modes and types, object sizes and SHA-256 values, and whether untracked material was included. Its deterministic `createdAt` is the acknowledged snapshot capture time, so repeated exports of the same checkpoint with the same Synod version serialize identically. Bundles can contain source code, secrets, binary data, and symlink targets, so keep them local and protect them like the checkout itself.
 
+`docs/synod/GOAL.md`, `PLAN.md`, `STATE.md`, `DECISIONS.md`, and `WORKLOG.md` are ignored, human-owned supporting context—not Git, checkpoint, or release proof. They never enter a default bundle or alter a checkpoint fingerprint. `--include-untracked` keeps its existing meaning and does not include them. Use the separate, explicit `--include-local-docs` opt-in to add only those five bounded regular files as verified `supplemental.localDocs`; generated `STATUS.md` and every other ignored path are excluded. Restore leaves supplemental notes untouched unless `--include-local-docs` is supplied, rejects unsafe ancestors and conflicting destination content, and journals the write transactionally. These notes may contain prompts, credentials, tokens, or other secrets: inspect and redact them before export, transfer, or publication. The opt-in local-doc path is a current `v0.9.4` candidate surface, not a command supplied by the public/pinned `0.9.3` runtime.
+
+The `pnpm test:package` local tarball smoke is source-preparation evidence only;
+it cannot satisfy public verification. The public phase requires a clean
+consumer install of the exact registry spec plus its recorded `dist` integrity,
+attestation, provenance, and a separate public CLI check.
+
 Verification parses external JSON fail-closed, requires canonical serialization, rejects unknown fields and unsafe or colliding paths, and checks the exact object inventory, sizes, hashes, and symlink boundaries without writing. Dirty submodules and Git intent-to-add entries are deliberately unsupported by bundle schema 1; dirty submodules return `SYNOD_RECOVERY_SUBMODULE_UNSUPPORTED`, while intent-to-add material is rejected as an invalid or incomplete schema-1 bundle.
 
 Restore requires a destination checkout at the bundle's exact base `HEAD` with no relevant staged, unstaged, or untracked changes. It derives the expected normalized checkpoint fingerprint before mutation, writes required content-addressed blobs without changing commits or refs, constructs a private temporary index, and journals the exact prior index bytes and every affected filesystem path inside the destination Git directory. It holds Git's standard `index.lock` across final index installation so another Git writer cannot be overwritten. The operation commits only after a fresh capture exactly matches the bundled fingerprint. Any ordinary failure restores the prior index and worktree; a killed process leaves the durable journal, and the next restore invocation safely rolls it back before retrying. If a journaled path, index, or index lock changed outside Synod, rollback fails closed with `SYNOD_RECOVERY_ROLLBACK_FAILED` and preserves the journal instead of overwriting concurrent content.
+
+To regenerate the checked-in cycle asset with the same document, use the dependency-free Chrome + ffmpeg recipe. This reproducible release-closeout surface is also a current `v0.9.4` candidate and is not available from a pinned `0.9.3` runtime until release and upgrade:
+
+```bash
+scripts/capture-synod-cycle-gif.sh
+```
+
+Set `CHROME_BIN` and/or `FFMPEG_BIN` when discovery is nonstandard. The script captures the 13 normal and 20 correction states at 1120×622, 3 fps, validates the rendered DOM sentinel and PNG content for every requested scenario/step, then validates all 33 GIF graphic-control frames (approximately 11 seconds). Unknown steps, wrong scenarios, blank/repeated frames, or failed validation leave the checked-in asset untouched. It uses temporary frame/output directories and atomically replaces the asset only after byte-level validation.
 
 ## Token usage and canonical intervals
 
@@ -489,8 +587,8 @@ synod profiles
 synod profiles --json
 ```
 
-- `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. Its global subagent fallback is Terra because current Codex 0.147 validates that fallback against the narrower spawn override set before applying a selected custom-agent file; Luna remains valid inside the implementer and mechanical agent files. The profile requires Codex 0.147.0 or later within the supported range, including eligible previews such as `0.147.1-alpha.1`, and verifies the fallback plus each role model and reasoning effort through `model/list`.
-- `portable` uses GPT-5.5 at role-specific reasoning efforts. It is the conservative fallback verified across both known-good Codex versions and account-specific model catalogs.
+- `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. Its global subagent fallback is Terra because current Codex 0.148 validates that fallback against the narrower spawn override set before applying a selected custom-agent file; Luna remains valid inside the implementer and mechanical agent files. The profile requires Codex 0.148.0 or later within the supported 0.148.x line, including eligible previews such as `0.148.0-alpha.1`, and verifies the fallback plus each role model and reasoning effort through `model/list`.
+- `portable` uses GPT-5.5 at role-specific reasoning efforts. It is the conservative fallback for the supported 0.148.x line and account-specific model catalogs.
 
 `synod doctor` identifies whether Synod is running from Codex CLI or Codex Desktop and probes that surface's own App Server executable. It resolves the active Codex process from the process ancestry, falling back to `codex` from `PATH` for a standalone CLI invocation. An explicit `SYNOD_CODEX_BIN` still takes precedence. If Desktop is detected but its executable cannot be resolved, `doctor` fails closed instead of silently reporting the CLI version as the Desktop version. This diagnostic executable/App Server probe is separate from wait authority and does not observe thread completion.
 
@@ -498,12 +596,22 @@ CLI and Desktop may share `~/.codex` while running different Codex versions. Ins
 
 It then classifies that surface's Codex version independently from model availability:
 
-- Supported: `>=0.142.0 <0.148.0`.
-- Known-good and exercised in CI: `0.142.0`, `0.147.0`.
-- Supported but not known-good: stable or preview builds whose numeric base is inside the range. This version classification alone does not assert profile availability.
-- Unsupported: versions below the range and versions at or above `0.148.0`, including previews of those versions, until the CI contract is deliberately expanded.
+- Public/pinned `v0.9.3` support: `>=0.142.0 <0.148.0`.
+- Unreleased `v0.9.4` source candidate support expression:
+  `>=0.148.0-0 <0.149.0 (all 0.148.x variants)`.
+- Candidate known-good and exercised in CI: `0.148.0-alpha.9`.
+- Candidate supported: every valid semantic version whose numeric major/minor
+  is exactly `0.148`, including stable, patch, prerelease, and build metadata.
+  This version classification alone does not assert profile availability.
+- Candidate unsupported: valid versions below `0.148`, valid versions at or
+  above `0.149`, and invalid semantic versions.
 
-The numeric version range determines `codex.status` and version eligibility; only matrix-tested versions are `known-good`. Live App Server and model probes independently determine `modelCompatible` and profile compatibility. Overall health requires both an eligible version and the selected profile's required capabilities.
+The public numeric version range plus the candidate's numeric 0.148 minor-line
+classifier determine `codex.status` and version eligibility; only the
+matrix-tested preview is `known-good`. Live App Server and model probes
+independently determine `modelCompatible` and profile compatibility. Overall
+health requires both an eligible version and the selected profile's required
+capabilities.
 
 ## Advisor routing
 
@@ -522,11 +630,11 @@ pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm build
 pnpm test
-pnpm test:package
+pnpm test:package # source-preparation local tarball smoke; not public proof
 pnpm test:codex-compatibility # requires explicit SYNOD_EXPECTED_* environment values
 pnpm pack --pack-destination dist
 ```
 
-Source uses strict TypeScript 7 with explicit `.js` ESM specifiers and compiles into `dist`; published consumers execute JavaScript and do not need TypeScript. CI exercises the installed tarball on Node 20, 22, and 24 on Ubuntu, plus Node 24 on macOS and Windows.
+Source uses strict TypeScript 7 with explicit `.js` ESM specifiers and compiles into `dist`; published consumers execute JavaScript and do not need TypeScript. The current source candidate's CI exercises the installed tarball on Node 22 and 24 on Ubuntu, plus Node 24 on macOS and Windows.
 
 Every change lands through a pull request with required CI. Protected `vX.Y.Z` tags publish both npm and GitHub releases, with exact-commit and `latest` parity enforced before the workflow succeeds; see [RELEASING.md](RELEASING.md).

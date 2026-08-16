@@ -60,6 +60,7 @@ import {
   leaseBaselinesReference,
   leaseScopeCoversPath,
   leaseScopesOverlap,
+  normalizeLeaseScopePath,
   normalizeLeaseScopes,
   parseLeaseDuration,
   retainLeaseBaselinesLedger,
@@ -72,6 +73,8 @@ import {
   type LeaseBaselineReference,
   type TaskLease,
   type TaskLeaseReservation,
+  TASK_PROPOSAL_PATH_STATES_VERSION,
+  type TaskProposalPathState,
   type TaskProposalReference
 } from "./leases.js";
 import {
@@ -170,6 +173,28 @@ export interface TaskEvidence {
   };
 }
 
+export interface TaskScopedPathEvidence {
+  path: string;
+  sourcePath?: string;
+  status?: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  resolved: boolean;
+}
+
+export interface TaskCorrectionRecord {
+  round: number;
+  revision: number;
+  reason: string;
+  evidence: string[];
+  evidenceIds: string[];
+  scopeFingerprint: string;
+  paths: string[];
+  pathEvidence: TaskScopedPathEvidence[];
+  recordedAt: string;
+}
+
 export interface TaskRecoveryRecord {
   status: "PENDING" | "RESUMED" | "REASSIGNED" | "SUPERSEDED";
   endedLease: EndedTaskLease;
@@ -214,6 +239,7 @@ export interface OrchestrationTask {
     evidenceIds: string[];
   };
   evidence: TaskEvidence[];
+  correctionHistory?: TaskCorrectionRecord[];
   createdAt: string;
   updatedAt: string;
   blocker?: string;
@@ -276,7 +302,7 @@ export interface OrchestrationEvent {
 
 type LegacyOrchestrationTask = Omit<
   SchemaTwoOrchestrationTask,
-  "correctionPolicy" | "leaseGeneration" | "lease" | "proposal" | "recovery" | "recoveryHistory" | "split" | "splitFrom" | "preLease"
+  "correctionPolicy" | "leaseGeneration" | "lease" | "proposal" | "recovery" | "recoveryHistory" | "split" | "splitFrom" | "preLease" | "correctionHistory"
 >;
 
 type SchemaThreeOrchestrationTask = Omit<OrchestrationTask, "leaseReservation">;
@@ -471,6 +497,29 @@ export interface OrchestrationStatusResult {
   }>;
   markdownView: string;
   delta?: CheckpointDelta;
+  selection?: OrchestrationStatusSelection;
+}
+
+export interface OrchestrationStatusSelection {
+  type: "task" | "active-only" | "changed-since-checkpoint";
+  taskId?: string;
+  rationale: string;
+  bounded: true;
+  taskCount: number;
+  totalTaskCount: number;
+  pathCount?: number;
+  pathsTruncated?: boolean;
+  tasksTruncated?: boolean;
+  historyLimit?: number;
+}
+
+export interface OrchestrationStatusOptions {
+  directory?: string;
+  explain?: boolean;
+  readOnly?: boolean;
+  taskId?: string;
+  activeOnly?: boolean;
+  changedSinceCheckpoint?: boolean;
 }
 
 export interface ValidatedCheckpointSource {
@@ -482,6 +531,10 @@ export interface ValidatedCheckpointSource {
 }
 
 const TERMINAL_STATES: ReadonlySet<TaskState> = new Set(["DONE", "SUPERSEDED"]);
+const STATUS_TASK_LIMIT = 100;
+const STATUS_PATH_LIMIT = 100;
+const GIT_PATHSPEC_BATCH_BYTES = 32 * 1024;
+const STATUS_HISTORY_LIMIT = 8;
 const TRANSITIONS: Readonly<Record<TaskState, ReadonlySet<TaskState>>> = Object.freeze({
   PLANNED: new Set<TaskState>(["READY", "BLOCKED", "SUPERSEDED"]),
   READY: new Set<TaskState>(["ACTIVE", "BLOCKED", "SUPERSEDED"]),
@@ -606,7 +659,7 @@ export async function nextTaskGuidance(
             })
       }));
       const bindRequirements = ["owner-thread", ...(correctionReady ? ["evidence"] : [])];
-      const actions = expiredReservation && task.leaseReservation
+      const baseActions = expiredReservation && task.leaseReservation
         ? [{
             operation: "lease.expire",
             arguments: {
@@ -665,6 +718,19 @@ export async function nextTaskGuidance(
                 requirements: ["decision", "reason"]
               }]
             : transitionActions;
+      const correctionAction = task.state === "ACTIVE"
+        && Boolean(task.lease)
+        && !expiredLease
+        && task.correctionPolicy.used < task.correctionPolicy.limit
+        && task.budget?.thresholdStatus !== "decision-required"
+        ? {
+            operation: "task.correct",
+            arguments: { taskId: task.id, revision: task.revision, reason: null, evidence: [] },
+            requirements: ["revision", "reason", "evidence"]
+          }
+        : undefined;
+      const actions = correctionAction ? [correctionAction, ...baseActions] : baseActions;
+      const proposalPathStates = task.proposal?.pathStates;
       return {
         id: task.id,
         state: task.state,
@@ -699,7 +765,20 @@ export async function nextTaskGuidance(
           revision: task.proposal.revision,
           generation: task.proposal.generation,
           status: task.proposal.status,
-          bundleId: task.proposal.bundleId
+          bundleId: task.proposal.bundleId,
+          ...(task.proposal.pathStatesVersion === undefined ? {} : { pathStatesVersion: task.proposal.pathStatesVersion }),
+          ...(proposalPathStates === undefined ? {} : {
+            pathStates: structuredClone(proposalPathStates.slice(0, STATUS_PATH_LIMIT)),
+            pathSummary: {
+              limit: STATUS_PATH_LIMIT,
+              pathStates: {
+                total: proposalPathStates.length,
+                returned: Math.min(proposalPathStates.length, STATUS_PATH_LIMIT),
+                truncated: proposalPathStates.length > STATUS_PATH_LIMIT,
+                present: true
+              }
+            }
+          })
         } : null,
         constraints: {
           reservationRequiresBind: Boolean(task.leaseReservation),
@@ -1214,6 +1293,95 @@ function taskList(state: OrchestrationState | OrchestrationStateCore): Orchestra
   });
 }
 
+function boundedStatusTask(task: OrchestrationTask): OrchestrationTask {
+  const bounded = structuredClone(task);
+  bounded.acceptance.criteria = bounded.acceptance.criteria.slice(0, STATUS_HISTORY_LIMIT);
+  bounded.acceptance.evidenceIds = bounded.acceptance.evidenceIds.slice(-STATUS_HISTORY_LIMIT);
+  bounded.verification.commands = bounded.verification.commands.slice(0, STATUS_HISTORY_LIMIT);
+  bounded.verification.evidenceIds = bounded.verification.evidenceIds.slice(-STATUS_HISTORY_LIMIT);
+  bounded.evidence = bounded.evidence.slice(-STATUS_HISTORY_LIMIT);
+  if (bounded.correctionHistory) {
+    bounded.correctionHistory = bounded.correctionHistory.slice(-STATUS_HISTORY_LIMIT).map(item => ({
+      ...item,
+      evidence: item.evidence.slice(-STATUS_HISTORY_LIMIT),
+      evidenceIds: item.evidenceIds.slice(-STATUS_HISTORY_LIMIT),
+      paths: item.paths.slice(0, STATUS_PATH_LIMIT),
+      pathEvidence: item.pathEvidence.slice(0, STATUS_PATH_LIMIT)
+    }));
+  }
+  if (bounded.recoveryHistory) bounded.recoveryHistory = bounded.recoveryHistory.slice(-STATUS_HISTORY_LIMIT);
+  if (bounded.split) bounded.split = { ...bounded.split, evidence: bounded.split.evidence.slice(-STATUS_HISTORY_LIMIT) };
+  if (bounded.proposal) bounded.proposal = boundedStatusProposal(bounded.proposal);
+  if (bounded.recovery?.proposal) {
+    bounded.recovery = { ...bounded.recovery, proposal: boundedStatusProposal(bounded.recovery.proposal) };
+  }
+  if (bounded.recoveryHistory) {
+    bounded.recoveryHistory = bounded.recoveryHistory.map(item => item.proposal
+      ? { ...item, proposal: boundedStatusProposal(item.proposal) }
+      : item);
+  }
+  return bounded;
+}
+
+function boundedStatusProposal(proposal: TaskProposalReference): TaskProposalReference {
+  const summarize = (total: number) => ({
+    total,
+    returned: Math.min(total, STATUS_PATH_LIMIT),
+    truncated: total > STATUS_PATH_LIMIT
+  });
+  const pathStates = proposal.pathStates;
+  return {
+    ...proposal,
+    scopes: proposal.scopes.slice(0, STATUS_PATH_LIMIT),
+    ownedPaths: proposal.ownedPaths.slice(0, STATUS_PATH_LIMIT),
+    excludedForeignPaths: proposal.excludedForeignPaths.slice(0, STATUS_PATH_LIMIT),
+    ...(pathStates === undefined ? {} : { pathStates: pathStates.slice(0, STATUS_PATH_LIMIT) }),
+    pathSummary: {
+      limit: STATUS_PATH_LIMIT,
+      scopes: summarize(proposal.scopes.length),
+      ownedPaths: summarize(proposal.ownedPaths.length),
+      excludedForeignPaths: summarize(proposal.excludedForeignPaths.length),
+      pathStates: {
+        ...summarize(pathStates?.length || 0),
+        present: pathStates !== undefined
+      }
+    }
+  } as TaskProposalReference;
+}
+
+function taskStateCounts(tasks: readonly OrchestrationTask[]): Record<TaskState, number> {
+  const counts: Record<TaskState, number> = {
+    PLANNED: 0,
+    READY: 0,
+    ACTIVE: 0,
+    REVIEW: 0,
+    ACCEPTED: 0,
+    VERIFIED: 0,
+    DONE: 0,
+    BLOCKED: 0,
+    SUPERSEDED: 0
+  };
+  for (const task of tasks) counts[task.state] += 1;
+  return counts;
+}
+
+function boundedStatusDelta(delta: CheckpointDelta): CheckpointDelta {
+  return {
+    changed: delta.changed,
+    paths: delta.paths.slice(0, STATUS_PATH_LIMIT).map(item => ({
+      path: item.path,
+      ...(item.sourcePath ? { sourcePath: item.sourcePath } : {}),
+      ...(item.staged ? { staged: item.staged } : {}),
+      ...(item.unstaged ? { unstaged: item.unstaged } : {}),
+      ...(item.committed ? { committed: item.committed } : {}),
+      untracked: item.untracked,
+      binary: item.binary,
+      resolved: item.resolved
+    })),
+    counts: { ...delta.counts }
+  };
+}
+
 function markdownCell(value: unknown): string {
   if (value === null || value === undefined || value === "") return "—";
   return String(value)
@@ -1577,6 +1745,46 @@ function isTaskEvidence(value: unknown): value is TaskEvidence {
     && typeof value.checkpoint.worktreeFingerprint === "string";
 }
 
+function isSafeRepositoryPath(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    return normalizeLeaseScopePath(value) === value;
+  } catch {
+    return false;
+  }
+}
+
+function isTaskScopedPathEvidence(value: unknown): value is TaskScopedPathEvidence {
+  return isRecord(value)
+    && isSafeRepositoryPath(value.path)
+    && (value.sourcePath === undefined || (isSafeRepositoryPath(value.sourcePath) && value.sourcePath !== value.path))
+    && (value.status === undefined || (typeof value.status === "string" && value.status.length === 2))
+    && typeof value.staged === "boolean"
+    && typeof value.unstaged === "boolean"
+    && typeof value.untracked === "boolean"
+    && typeof value.resolved === "boolean";
+}
+
+function isTaskCorrectionRecord(value: unknown): value is TaskCorrectionRecord {
+  return isRecord(value)
+    && isNonNegativeInteger(value.round)
+    && value.round > 0
+    && isNonNegativeInteger(value.revision)
+    && typeof value.reason === "string"
+    && value.reason.length > 0
+    && isStringArray(value.evidence)
+    && value.evidence.length > 0
+    && isStringArray(value.evidenceIds)
+    && value.evidenceIds.length > 0
+    && /^sha256:[0-9a-f]{64}$/.test(String(value.scopeFingerprint))
+    && isStringArray(value.paths)
+    && value.paths.every(isSafeRepositoryPath)
+    && Array.isArray(value.pathEvidence)
+    && value.pathEvidence.every(isTaskScopedPathEvidence)
+    && typeof value.recordedAt === "string"
+    && !Number.isNaN(Date.parse(value.recordedAt));
+}
+
 function isTaskRecovery(value: unknown): value is TaskRecoveryRecord {
   if (!isRecord(value) || !isEndedTaskLease(value.endedLease)) return false;
   const detectedAt = typeof value.detectedAt === "string" ? Date.parse(value.detectedAt) : Number.NaN;
@@ -1619,6 +1827,7 @@ function isTaskSplit(value: unknown): value is NonNullable<OrchestrationTask["sp
 
 function isOrchestrationTask(value: unknown): value is OrchestrationTask {
   if (!isRecord(value) || !isRecord(value.acceptance) || !isRecord(value.verification)) return false;
+  const correctionHistory = value.correctionHistory;
   return typeof value.id === "string"
     && typeof value.objective === "string"
     && value.objective.length > 0
@@ -1654,6 +1863,11 @@ function isOrchestrationTask(value: unknown): value is OrchestrationTask {
     && isStringArray(value.verification.evidenceIds)
     && Array.isArray(value.evidence)
     && value.evidence.every(isTaskEvidence)
+    && (correctionHistory === undefined || (
+      Array.isArray(correctionHistory)
+      && correctionHistory.every(isTaskCorrectionRecord)
+      && correctionHistory.every((item, index) => index === 0 || item.round > correctionHistory[index - 1]!.round)
+    ))
     && typeof value.createdAt === "string"
     && typeof value.updatedAt === "string"
     && (value.blocker === undefined || typeof value.blocker === "string")
@@ -4442,6 +4656,127 @@ function proposalSnapshot(
   }));
 }
 
+async function gitPathOutput(
+  directory: string,
+  args: string[],
+  gitRunner: GitRunner
+): Promise<string> {
+  try {
+    return await gitRunner(directory, args);
+  } catch (error) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, "Could not capture immutable proposal Git path semantics.", {
+      cause: error,
+      details: { command: args.slice(0, 5) }
+    });
+  }
+}
+
+async function gitPathNames(
+  directory: string,
+  args: string[],
+  gitRunner: GitRunner
+): Promise<Set<string>> {
+  return new Set((await gitPathOutput(directory, args, gitRunner)).split("\0").filter(Boolean));
+}
+
+function literalPathspecBatches(baseArgs: readonly string[], pathspecs: readonly string[]): string[][] {
+  const baseBytes = baseArgs.reduce((total, arg) => total + Buffer.byteLength(arg, "utf8") + 1, 0)
+    + Buffer.byteLength("--", "utf8") + 1;
+  const batches: string[][] = [];
+  let current: string[] = [];
+  let currentBytes = baseBytes;
+  for (const pathspec of pathspecs) {
+    const pathspecBytes = Buffer.byteLength(pathspec, "utf8") + 1;
+    if (current.length > 0 && currentBytes + pathspecBytes > GIT_PATHSPEC_BATCH_BYTES) {
+      batches.push(current);
+      current = [];
+      currentBytes = baseBytes;
+    }
+    current.push(pathspec);
+    currentBytes += pathspecBytes;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+async function batchedGitPathNames(
+  directory: string,
+  baseArgs: string[],
+  literalPathspecs: readonly string[],
+  gitRunner: GitRunner
+): Promise<Set<string>> {
+  const paths = new Set<string>();
+  for (const batch of literalPathspecBatches(baseArgs, literalPathspecs)) {
+    const result = await gitPathNames(directory, [...baseArgs, "--", ...batch], gitRunner);
+    for (const relativePath of result) paths.add(relativePath);
+  }
+  return paths;
+}
+
+async function captureProposalPathStates(
+  directory: string,
+  current: CheckpointSnapshot,
+  owned: ClassifiedLeaseDelta["owned"],
+  gitRunner: GitRunner
+): Promise<TaskProposalPathState[]> {
+  const paths = [...new Set(owned.flatMap(deltaPaths))].sort(compareCheckpointPaths);
+  if (paths.length === 0) return [];
+  const literalPathspecs = paths.map(relativePath => `:(literal)${relativePath}`);
+  const indexPaths = new Set<string>();
+  for (const batch of literalPathspecBatches(["ls-files", "--stage", "-z"], literalPathspecs)) {
+    const output = await gitPathOutput(directory, ["ls-files", "--stage", "-z", "--", ...batch], gitRunner);
+    for (const relativePath of indexRecords(output).keys()) indexPaths.add(relativePath);
+  }
+  const committedPaths = current.head
+    ? await batchedGitPathNames(directory, ["ls-tree", "-r", "-z", "--name-only", current.head], literalPathspecs, gitRunner)
+    : new Set<string>();
+  const currentByPath = new Map<string, CheckpointEntry>();
+  for (const item of owned) {
+    if (item.current) currentByPath.set(item.path, item.current);
+    if (item.sourcePath && item.current) currentByPath.set(item.sourcePath, item.current);
+  }
+  const sourceFor = new Map<string, string>();
+  for (const item of owned) if (item.sourcePath) sourceFor.set(item.path, item.sourcePath);
+  return paths.map(relativePath => {
+    const status = currentByPath.get(relativePath)?.status;
+    return {
+      path: relativePath,
+      ...(sourceFor.has(relativePath) ? { sourcePath: sourceFor.get(relativePath)! } : {}),
+      proposalAdded: true,
+      gitTracked: indexPaths.has(relativePath),
+      staged: Boolean(status && status[0] !== " " && status[0] !== "?"),
+      committed: committedPaths.has(relativePath)
+    };
+  });
+}
+
+function scopedPathEvidence(owned: ClassifiedLeaseDelta["owned"]): TaskScopedPathEvidence[] {
+  const byPath = new Map<string, TaskScopedPathEvidence>();
+  for (const item of owned) {
+    const paths = [
+      { path: item.path, sourcePath: item.sourcePath },
+      ...(item.sourcePath ? [{ path: item.sourcePath, sourcePath: undefined }] : [])
+    ];
+    for (const candidate of paths) {
+      if (byPath.has(candidate.path)) continue;
+      const status = item.current?.status;
+      byPath.set(candidate.path, {
+        path: candidate.path,
+        ...(candidate.sourcePath ? { sourcePath: candidate.sourcePath } : {}),
+        ...(status ? { status } : {}),
+        staged: Boolean(status && status[0] !== " " && status[0] !== "?"),
+        unstaged: Boolean(status && status[1] !== " " && status[1] !== "?"),
+        untracked: status === "??",
+        resolved: !item.current
+      });
+    }
+  }
+  return [...byPath.values()].sort((left, right) => compareCheckpointPaths(
+    `${left.path}\0${left.sourcePath || ""}`,
+    `${right.path}\0${right.sourcePath || ""}`
+  ));
+}
+
 function snapshotFingerprintForPaths(snapshot: CheckpointSnapshot, paths: readonly string[]): string {
   const selected = new Set(paths);
   return sha256(stableCheckpointStringify(snapshot.entries.filter(entry => selected.has(entry.path))));
@@ -4500,6 +4835,7 @@ async function sealTaskProposal(
   rejectUnacceptableLeaseDrift(task, classified);
   const snapshot = proposalSnapshot(context.snapshot, classified.owned, baseline.capturedAt);
   const ownedPaths = [...new Set(classified.owned.flatMap(deltaPaths))].sort(compareCheckpointPaths);
+  const pathStates = await captureProposalPathStates(targetDirectory, context.snapshot, classified.owned, dependencies.gitRunner || defaultGitRunner);
   const proposalPath = `.synod/proposals/${lease.id}/${lease.generation}`;
   const destination = await ensureProposalParent(targetDirectory, proposalPath);
   const recovery = await import("./recovery.js");
@@ -4564,6 +4900,8 @@ async function sealTaskProposal(
       scopes: lease.scopes,
       ownedPaths,
       excludedForeignPaths: [...new Set(classified.foreign.flatMap(deltaPaths))].sort(compareCheckpointPaths),
+      pathStatesVersion: TASK_PROPOSAL_PATH_STATES_VERSION,
+      pathStates,
       fingerprint: snapshot.worktreeFingerprint,
       snapshotHash: snapshot.contentHash,
       sealedWorktreeFingerprint: context.snapshot.worktreeFingerprint,
@@ -4580,7 +4918,8 @@ async function verifyTaskProposalForAcceptance(
   targetDirectory: string,
   state: OrchestrationState,
   task: OrchestrationTask,
-  context: MutationContext
+  context: MutationContext,
+  dependencies: OrchestrationDependencies
 ): Promise<ClassifiedLeaseDelta["foreign"]> {
   const proposal = task.proposal;
   if (!proposal || proposal.revision !== task.revision) {
@@ -4606,10 +4945,23 @@ async function verifyTaskProposalForAcceptance(
   rejectUnacceptableLeaseDrift(task, classified);
   const ownedPaths = [...new Set(classified.owned.flatMap(deltaPaths))].sort(compareCheckpointPaths);
   const snapshot = proposalSnapshot(context.snapshot, classified.owned, baseline.capturedAt);
+  const pathStates = await captureProposalPathStates(targetDirectory, context.snapshot, classified.owned, dependencies.gitRunner || defaultGitRunner);
+  const currentPathStates = proposal.pathStatesVersion === TASK_PROPOSAL_PATH_STATES_VERSION;
+  const completeCurrentPathStates = currentPathStates
+    && proposal.pathStates !== undefined
+    && proposal.pathStates.length === proposal.ownedPaths.length
+    && proposal.pathStates.every((item, index) => item.path === proposal.ownedPaths[index])
+    && proposal.pathStates.every(item => item.sourcePath === undefined || proposal.ownedPaths.includes(item.sourcePath));
+  if (currentPathStates && !completeCurrentPathStates) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, `Task ${task.id} current proposal path-state lanes are incomplete.`, {
+      details: { taskId: task.id, ownedPaths: proposal.ownedPaths, pathStates: proposal.pathStates }
+    });
+  }
   if (
     stableStringify(ownedPaths) !== stableStringify(proposal.ownedPaths)
     || snapshot.worktreeFingerprint !== proposal.fingerprint
     || snapshot.contentHash !== proposal.snapshotHash
+    || (currentPathStates && stableStringify(pathStates) !== stableStringify(proposal.pathStates))
   ) {
     throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, `Task ${task.id} owned material changed after proposal sealing.`, {
       details: {
@@ -4619,7 +4971,8 @@ async function verifyTaskProposalForAcceptance(
         expectedFingerprint: proposal.fingerprint,
         actualFingerprint: snapshot.worktreeFingerprint,
         expectedSnapshotHash: proposal.snapshotHash,
-        actualSnapshotHash: snapshot.contentHash
+        actualSnapshotHash: snapshot.contentHash,
+        ...(currentPathStates ? { expectedPathStates: proposal.pathStates, actualPathStates: pathStates } : {})
       }
     });
   }
@@ -5694,6 +6047,14 @@ export async function recoverTaskLease({
   throw new SynodError(ERROR_CODES.ORCHESTRATION_LOCKED, `Timed out waiting to recover task ${taskId}.`, { details: { taskId } });
 }
 
+function requireExactTaskRevision(task: OrchestrationTask, revision: unknown, operation: string): asserts revision is number {
+  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0 || revision !== task.revision) {
+    throw new SynodError(ERROR_CODES.REVISION_MISMATCH, `Task ${task.id} ${operation} requires revision ${task.revision}, received ${String(revision)}.`, {
+      details: { taskId: task.id, expected: task.revision, actual: revision, current: task.revision, operation }
+    });
+  }
+}
+
 function requireRevision(task: OrchestrationTask, targetState: TaskState, revision: unknown): asserts revision is number {
   if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
     throw new SynodError(ERROR_CODES.REVISION_MISMATCH, "Every transition requires an integer --revision.", {
@@ -5879,7 +6240,7 @@ export async function transitionTask({
       ? await sealTaskProposal(targetDirectory, state, task, deliveredLease, revision, context, dependencies)
       : undefined;
     const acceptanceForeign = fromState === "REVIEW" && targetState === "ACCEPTED"
-      ? await verifyTaskProposalForAcceptance(targetDirectory, state, task, context)
+      ? await verifyTaskProposalForAcceptance(targetDirectory, state, task, context, dependencies)
       : [];
     if (sealed) task.proposal = sealed.proposal;
     if (fromState === "ACTIVE" && targetState === "REVIEW") task.revision = revision;
@@ -5994,6 +6355,107 @@ export async function submitTaskProposal({
   }, dependencies);
 }
 
+export interface RecordTaskCorrectionOptions {
+  directory?: string;
+  id?: string;
+  revision: number;
+  reason?: string;
+  evidence?: unknown[];
+  actor?: string;
+}
+
+/**
+ * Record supervisor feedback while a worker is still ACTIVE. This mutation is
+ * intentionally separate from proposal submission: the correction allowance
+ * is consumed before any material is sealed for review.
+ */
+export async function recordTaskCorrection(
+  options: RecordTaskCorrectionOptions | undefined = undefined,
+  dependencies: OrchestrationDependencies = {}
+) {
+  const {
+    directory = ".",
+    id,
+    revision,
+    reason,
+    evidence = [],
+    actor = "supervisor"
+  } = options ?? {};
+  const taskId = taskIdValue(id);
+  const explanation = String(reason || "").trim();
+  const references = [...new Set(evidence.map(value => String(value).trim()).filter(Boolean))];
+  if (!explanation) throw new SynodError(ERROR_CODES.TASK_INVALID, "Task correction requires --reason.");
+  if (references.length === 0) throw new SynodError(ERROR_CODES.EVIDENCE_REQUIRED, "Task correction requires at least one --evidence reference.");
+  return commitMutation(path.resolve(directory), "task.corrected", { actor, taskId }, (state, context) => {
+    const task = state.tasks[taskId];
+    if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    if (task.state !== "ACTIVE") {
+      throw new SynodError(ERROR_CODES.TRANSITION_INVALID, `Task ${taskId} can receive supervisor correction only while ACTIVE.`, {
+        details: { taskId, state: task.state }
+      });
+    }
+    requireExactTaskRevision(task, revision, "correction");
+    assertBudgetAllowsExecution(task, "recording a task correction");
+    if (task.correctionPolicy.used >= task.correctionPolicy.limit) {
+      throw new SynodError(ERROR_CODES.CORRECTION_EXHAUSTED, `Task ${taskId} has exhausted its correction allowance.`, {
+        details: { taskId, used: task.correctionPolicy.used, limit: task.correctionPolicy.limit }
+      });
+    }
+    const lease = task.lease;
+    if (!lease || lease.status !== "ACTIVE") {
+      throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} requires an active writer lease before correction.`, {
+        details: { taskId, state: task.state }
+      });
+    }
+    if (Date.parse(context.timestamp) >= Date.parse(lease.expiresAt)) {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} writer lease has expired.`, {
+        details: { taskId, leaseId: lease.id, generation: lease.generation, expiresAt: lease.expiresAt }
+      });
+    }
+    const baseline = leaseBaselineFor(task, lease, context.leaseBaselines);
+    const classified = classifyLeaseDelta(
+      state,
+      task,
+      lease,
+      lease.baseline.lastEvent.sequence,
+      baseline.snapshot,
+      context.snapshot
+    );
+    rejectUnacceptableLeaseDrift(task, classified);
+    const scoped = proposalSnapshot(context.snapshot, classified.owned, baseline.capturedAt);
+    const createdEvidence = recordEvidence(state, task, "correction", task.revision, references, actor, context);
+    task.correctionRound += 1;
+    task.correctionPolicy.used += 1;
+    resetAcceptanceAndVerification(task);
+    const correction: TaskCorrectionRecord = {
+      round: task.correctionRound,
+      revision: task.revision,
+      reason: explanation,
+      evidence: references,
+      evidenceIds: createdEvidence.map(item => item.id),
+      scopeFingerprint: scoped.worktreeFingerprint,
+      paths: [...new Set(classified.owned.flatMap(deltaPaths))].sort(compareCheckpointPaths),
+      pathEvidence: scopedPathEvidence(classified.owned),
+      recordedAt: context.timestamp
+    };
+    task.correctionHistory = [...(task.correctionHistory || []), correction];
+    task.updatedAt = context.timestamp;
+    return {
+      metadata: {
+        fromState: "ACTIVE",
+        toState: "ACTIVE",
+        revision: task.revision,
+        payload: {
+          correction,
+          evidenceIds: createdEvidence.map(item => item.id),
+          foreignPaths: classified.foreign.flatMap(deltaPaths)
+        }
+      },
+      result: { task, correction, evidence: createdEvidence }
+    };
+  }, dependencies);
+}
+
 export async function recordCheckpoint(
   { directory = ".", actor = "supervisor", message }: { directory?: string; actor?: string; message?: string } = {},
   dependencies: OrchestrationDependencies = {}
@@ -6009,7 +6471,12 @@ export async function recordCheckpoint(
 async function orchestrationStatusFromCanonical(
   targetDirectory: string,
   canonical: Awaited<ReturnType<typeof readOrchestrationRaw>>,
-  { explain = false }: { explain?: boolean },
+  {
+    explain = false,
+    taskId,
+    activeOnly = false,
+    changedSinceCheckpoint = false
+  }: Pick<OrchestrationStatusOptions, "explain" | "taskId" | "activeOnly" | "changedSinceCheckpoint">,
   dependencies: OrchestrationDependencies = {}
 ): Promise<OrchestrationStatusResult> {
   let state: OrchestrationState;
@@ -6018,10 +6485,63 @@ async function orchestrationStatusFromCanonical(
   let currentCheckpoint: GitCheckpoint;
   let delta: CheckpointDelta | undefined;
   ({ state, events } = canonical);
+  const allTasks = taskList(state);
+  const selectorCount = Number(taskId !== undefined) + Number(activeOnly) + Number(changedSinceCheckpoint);
+  if (selectorCount > 1 || (selectorCount > 0 && explain)) {
+    throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Status selectors are mutually exclusive and cannot be combined with --explain.", {
+      details: {
+        taskId,
+        activeOnly,
+        changedSinceCheckpoint,
+        explain
+      }
+    });
+  }
+  const selectedTask = taskId === undefined ? undefined : allTasks.find(task => task.id === taskId);
+  if (taskId !== undefined && !selectedTask) {
+    throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+  }
+  const selector: OrchestrationStatusSelection["type"] | undefined = taskId !== undefined
+    ? "task"
+    : activeOnly
+      ? "active-only"
+      : changedSinceCheckpoint
+        ? "changed-since-checkpoint"
+        : undefined;
+  const selectedTasks = selector === "task" && selectedTask
+    ? [selectedTask]
+    : selector === "active-only"
+      ? allTasks.filter(task => !TERMINAL_STATES.has(task.state))
+      : selector === "changed-since-checkpoint"
+        ? []
+        : allTasks;
+  const visibleTasks = selector === undefined
+    ? allTasks
+    : selector === "changed-since-checkpoint"
+      ? []
+      : selectedTasks.slice(0, STATUS_TASK_LIMIT).map(boundedStatusTask);
+  const selection: OrchestrationStatusSelection | undefined = selector === undefined
+    ? undefined
+    : {
+        type: selector,
+        ...(taskId === undefined ? {} : { taskId }),
+        rationale: selector === "task"
+          ? "Exact task identity; task history arrays are bounded to the most recent entries."
+          : selector === "active-only"
+            ? "Operationally open, nonterminal tasks only; DONE and SUPERSEDED are excluded while PLANNED, READY, ACTIVE, REVIEW, ACCEPTED, VERIFIED, and BLOCKED remain visible for follow-up."
+            : "Closeout path delta from the acknowledged checkpoint; task histories are omitted and path entries are bounded.",
+        bounded: true,
+        taskCount: visibleTasks.length,
+        totalTaskCount: selector === "changed-since-checkpoint" ? allTasks.length : selectedTasks.length,
+        ...(selector === "task" || selector === "active-only" ? {
+          tasksTruncated: selectedTasks.length > STATUS_TASK_LIMIT,
+          historyLimit: STATUS_HISTORY_LIMIT
+        } : {})
+      };
     markdown = await readRecord(targetDirectory, ORCHESTRATION_STATUS_PATH);
     const current = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
     currentCheckpoint = current.checkpoint;
-    if (explain) {
+    if (explain || changedSinceCheckpoint) {
       if (!canonical.snapshot) {
         throw new SynodError(
           ERROR_CODES.CHECKPOINT_SNAPSHOT_UNAVAILABLE,
@@ -6082,6 +6602,12 @@ async function orchestrationStatusFromCanonical(
         }
       }
   }
+  if (changedSinceCheckpoint && delta && selection) {
+    const pathCount = delta.paths.length;
+    selection.pathCount = pathCount;
+    selection.pathsTruncated = pathCount > STATUS_PATH_LIMIT;
+    delta = boundedStatusDelta(delta);
+  }
   const expectedMarkdown = renderStatusMarkdown(state);
   if (contentHash(markdown) !== contentHash(expectedMarkdown)) {
     throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, "Generated Markdown status does not match canonical orchestration state.", {
@@ -6099,19 +6625,9 @@ async function orchestrationStatusFromCanonical(
   ]);
   const localRuntimeDescriptor = runtimeRead.status === "fulfilled" ? runtimeRead.value : undefined;
   const rawManifest = manifestRead.status === "fulfilled" ? manifestRead.value : undefined;
-  const counts: Record<TaskState, number> = {
-    PLANNED: 0,
-    READY: 0,
-    ACTIVE: 0,
-    REVIEW: 0,
-    ACCEPTED: 0,
-    VERIFIED: 0,
-    DONE: 0,
-    BLOCKED: 0,
-    SUPERSEDED: 0
-  };
-  for (const task of taskList(state)) counts[task.state] += 1;
-  const leaseExpiryCandidates = taskList(state).flatMap(task => task.lease && Date.parse(currentCheckpoint.capturedAt) >= Date.parse(task.lease.expiresAt)
+  const counts = taskStateCounts(selector && selector !== "changed-since-checkpoint" ? selectedTasks : allTasks);
+  const candidateTasks = selector === undefined || selector === "changed-since-checkpoint" ? allTasks : selectedTasks;
+  const leaseExpiryCandidates = candidateTasks.flatMap(task => task.lease && Date.parse(currentCheckpoint.capturedAt) >= Date.parse(task.lease.expiresAt)
     ? [{
         taskId: task.id,
         leaseId: task.lease.id,
@@ -6120,7 +6636,7 @@ async function orchestrationStatusFromCanonical(
         expiresAt: task.lease.expiresAt
       }]
     : []);
-  const leaseReservationExpiryCandidates = taskList(state).flatMap(task => task.leaseReservation
+  const leaseReservationExpiryCandidates = candidateTasks.flatMap(task => task.leaseReservation
     && Date.parse(currentCheckpoint.capturedAt) >= Date.parse(task.leaseReservation.expiresAt)
     ? [{
         taskId: task.id,
@@ -6146,35 +6662,60 @@ async function orchestrationStatusFromCanonical(
     currentCheckpoint,
     drift,
     taskCounts: counts,
-    tasks: taskList(state),
+    tasks: visibleTasks,
     rotation: state.rotation || null,
     leaseExpiryCandidates,
     leaseReservationExpiryCandidates,
     markdownView: ORCHESTRATION_STATUS_PATH,
+    ...(selection ? { selection } : {}),
     ...(delta ? { delta } : {})
   };
 }
 
 export async function orchestrationStatus(
-  { directory = ".", explain = false, readOnly = false }: { directory?: string; explain?: boolean; readOnly?: boolean } = {},
+  {
+    directory = ".",
+    explain = false,
+    readOnly = false,
+    taskId,
+    activeOnly = false,
+    changedSinceCheckpoint = false
+  }: OrchestrationStatusOptions = {},
   dependencies: OrchestrationDependencies = {}
 ): Promise<OrchestrationStatusResult> {
   const targetDirectory = path.resolve(directory);
   return await withOrchestrationSnapshot(
     targetDirectory,
-    canonical => orchestrationStatusFromCanonical(targetDirectory, canonical, { explain }, dependencies),
+    canonical => orchestrationStatusFromCanonical(targetDirectory, canonical, {
+      explain,
+      activeOnly,
+      changedSinceCheckpoint,
+      ...(taskId === undefined ? {} : { taskId })
+    }, dependencies),
     { readOnly }
   );
 }
 
 export async function orchestrationStatusWithArtifacts(
-  { directory = ".", explain = false, readOnly = false }: { directory?: string; explain?: boolean; readOnly?: boolean } = {},
+  {
+    directory = ".",
+    explain = false,
+    readOnly = false,
+    taskId,
+    activeOnly = false,
+    changedSinceCheckpoint = false
+  }: OrchestrationStatusOptions = {},
   dependencies: OrchestrationDependencies = {}
 ) {
   const targetDirectory = path.resolve(directory);
   return await withOrchestrationSnapshot(targetDirectory, async canonical => {
     const [status, proposals, worktreeModule] = await Promise.all([
-      orchestrationStatusFromCanonical(targetDirectory, canonical, { explain }, dependencies),
+      orchestrationStatusFromCanonical(targetDirectory, canonical, {
+        explain,
+        activeOnly,
+        changedSinceCheckpoint,
+        ...(taskId === undefined ? {} : { taskId })
+      }, dependencies),
       validateOrchestrationProposalArtifactsFromCanonical(targetDirectory, canonical),
       import("./worktrees.js")
     ]);
@@ -6273,6 +6814,11 @@ export async function withValidatedCheckpointSource<Result>(
 
 export function formatOrchestrationStatus(result: OrchestrationStatusResult): string {
   const lines = [`Synod orchestration: ${result.healthy ? "in sync" : "checkpoint drift detected"}`];
+  if (result.selection) {
+    const taskLabel = result.selection.taskId ? ` ${result.selection.taskId}` : "";
+    lines.push(`Selection: ${result.selection.type}${taskLabel}; ${result.selection.rationale}`);
+    lines.push(`Bounded selection: ${result.selection.taskCount}/${result.selection.totalTaskCount} task(s)${result.selection.tasksTruncated ? "; tasks truncated" : ""}${result.selection.pathsTruncated ? `; ${result.selection.pathCount} path(s), list truncated` : result.selection.pathCount === undefined ? "" : `; ${result.selection.pathCount} path(s)`}.`);
+  }
   lines.push(`State schema: ${result.stateSchemaVersion}; events: ${result.eventCount}`);
   lines.push(`Runtime: ${result.runtimeVersion || "external"}`);
   lines.push(`Installed template: ${result.installedTemplateVersion || "unavailable"} (manifest schema ${result.manifestSchemaVersion ?? "unknown"})`);
@@ -6297,7 +6843,9 @@ export function formatOrchestrationStatus(result: OrchestrationStatusResult): st
   for (const candidate of result.leaseReservationExpiryCandidates) {
     lines.push(`Reservation expiry candidate: ${candidate.taskId} lease ${candidate.leaseId} g${candidate.generation}; reserved ${candidate.reservedAt}; expired ${candidate.expiresAt}`);
   }
-  if (result.tasks.length === 0) lines.push("No tasks recorded.");
+  if (result.tasks.length === 0) {
+    lines.push(result.selection ? "No tasks match this status selector." : "No tasks recorded.");
+  }
   for (const reason of result.drift.reasons) lines.push(`Drift ${reason.field}: expected ${reason.expected}, actual ${reason.actual}`);
   if (result.delta) lines.push(...formatCheckpointDelta(result.delta));
   return lines.join("\n");

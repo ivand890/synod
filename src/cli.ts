@@ -1,6 +1,6 @@
 import { errorEnvelope, successEnvelope } from "./contracts.js";
 import type { Warning } from "./contracts.js";
-import { parseBudgetArgs, parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseProposalArgs, parseRotationArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs, parseWorktreeArgs } from "./command-options.js";
+import { parseBudgetArgs, parseBundleArgs, parseCheckpointArgs, parseDelegateArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseProposalArgs, parseRotationArgs, parseStatusArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs, parseWorktreeArgs } from "./command-options.js";
 import type { HelpOptions, LifecycleOptions } from "./command-options.js";
 import { doctorProject } from "./doctor.js";
 import type { DoctorClient, DoctorDependencies } from "./doctor.js";
@@ -20,6 +20,7 @@ import {
   formatOrchestrationStatus,
   heartbeatTaskLease,
   recordCheckpoint,
+  recordTaskCorrection,
   recoverTaskLease,
   releaseTaskLease,
   reserveTaskLease,
@@ -55,6 +56,8 @@ import { formatRotationReport, formatRotationSuggestion } from "./rotation.js";
 import { formatCostReport, projectUsageCost, readPriceFile } from "./costs.js";
 import { parseOutputViewArgs, projectJsonEnvelope } from "./output-view.js";
 import type { JsonEnvelopeLike, OutputView } from "./output-view.js";
+import { startHostDelegation } from "./host-delegation.js";
+import type { HostDelegationAdapter } from "./host-delegation.js";
 
 const HELP = `Synod ${packageVersion}
 
@@ -64,14 +67,15 @@ Usage:
   synod init [directory] [--profile <id>] [--dry-run] [--force] [--json]
   synod upgrade [directory] [--profile <id>] [--dry-run] [--force] [--json]
   synod check [directory] [--json]
-  synod status [directory] [--explain] [--json]
+  synod status [directory] [--task <task-id> | --active-only | --changed-since-checkpoint] [--explain] [--json]
   synod handoff [directory] [--bundle <bundle>] [--json]
   synod checkpoint [directory] [--actor <id>] [--message <text>] [--json]
-  synod bundle export <destination> [--cwd <directory>] [--include-untracked] [--json]
+  synod bundle export <destination> [--cwd <directory>] [--include-untracked] [--include-local-docs] [--json]
   synod bundle verify <bundle> [--json]
-  synod bundle restore <bundle> --cwd <directory> [--json]
+  synod bundle restore <bundle> --cwd <directory> [--include-local-docs] [--json]
   synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--correction-limit <n>] [--cwd <directory>] [--json]
   synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
+  synod task correct <task-id> --revision <n> --reason <text> --evidence <reference> [--actor <id>] [--cwd <directory>] [--json]
   synod task override <task-id> --additional-rounds <n> --approver <id> --reference <ref> --reason <text> --evidence <ref> [--cwd <directory>] [--json]
   synod task split <task-id> --replacement <task-id> --replacement <task-id> --reason <text> --evidence <ref> [--cwd <directory>] [--json]
   synod task next [--cwd <directory>] [--json]
@@ -107,6 +111,7 @@ Usage:
   synod profiles [--json]
   synod usage [--session <thread-id>] [--cwd <directory>] [--since-event <sequence|id> | --since-checkpoint | --task <task-id>] [--until-event <sequence|id>] [--price-file <path>] [--by-model] [--json]
   synod wait (--task <task-id> | --thread <thread-id>) [--task <task-id>] [--thread <thread-id>] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
+  synod delegate start <task-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--actor <id>] [--evidence <reference>] [--reservation-ttl-seconds <n>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--wait] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
   synod --help
   synod --version
 
@@ -128,6 +133,7 @@ Commands:
   profiles    List built-in model profiles and their requirements.
   usage       Report attributable token and coordination activity for a session tree or canonical interval.
   wait        Observe child thread status changes without renewing worker leases.
+  delegate    Start a host-owned delegation through an injected adapter.
 
 Options:
   --profile   Select a built-in model profile for init or upgrade.
@@ -154,8 +160,8 @@ Options:
   --price-file
               Project a complete usage report using an explicit dated local price file.
   --thread    Add an explicit Codex thread ID to a bounded status wait.
-  --task      Resolve a canonical active task's bound owner into a bounded status wait.
-  --revision  Require the exact task revision for a transition.
+  --task      Select one exact status task, or resolve a canonical active task for a bounded wait.
+  --revision  Require the exact task revision for a transition or correction.
   --evidence  Attach evidence to the exact task revision and current checkpoint.
   --owner-thread
               Bind a writer lease to one opaque Codex thread ID.
@@ -165,8 +171,24 @@ Options:
               Add a repository-relative writer scope covering a directory tree.
   --read-tree Add a repository-relative read scope covering a directory tree.
   --explain   Include a read-only path-level delta from the acknowledged checkpoint.
+  --active-only
+              Show operationally open, nonterminal tasks only.
+  --changed-since-checkpoint
+              Show a bounded path delta and counts from the acknowledged checkpoint.
+              Status selectors are mutually exclusive and cannot be combined with --explain.
   --include-untracked
               Include acknowledged untracked files in a recovery bundle.
+  --include-local-docs
+              Explicitly include or restore bounded human-owned docs/synod notes;
+              generated STATUS.md and other ignored files remain excluded.
+  Delegate start options:
+    --actor <id>                   Record the supervisor or host actor identity.
+    --evidence <reference>         Attach scoped evidence to a correction bind.
+    --reservation-ttl-seconds <n>  Bound the pre-bind reservation lifetime.
+    --ttl-seconds <n>              Bound the post-bind writer lease lifetime.
+    --heartbeat-seconds <n>        Set the post-bind lease heartbeat interval.
+    --timeout-seconds <n>          Bound delegated waiting; requires --wait.
+    --poll-interval-ms <n>         Set delegated polling; requires --wait.
   --bundle    Verify and bind a recovery bundle to a canonical handoff.
   --json      Print a versioned machine-readable success, warning, or error envelope.
   -h, --help  Show help.
@@ -186,6 +208,9 @@ export interface CliDependencies extends LifecycleDependencies, OrchestrationDep
   doctorRuntimeResolver?: NonNullable<DoctorDependencies["runtimeResolver"]>;
   waitClientFactory?: (options?: { cwd?: string; codexBin?: string }) => WaitClient;
   waitAdapterFactory?: () => ThreadStatusAdapter;
+  hostWaitAdapter?: import("./wait.js").HostWaitAdapter;
+  hostDelegationAdapter?: HostDelegationAdapter;
+  hostDelegationAdapterFactory?: () => HostDelegationAdapter;
   waitRuntimeResolver?: () => WaitRuntime;
   waitSelectionResolver?: typeof resolveWaitSelection;
   worktreeDependencies?: TaskWorktreeDependencies;
@@ -430,6 +455,48 @@ export async function run(
       return 0;
     }
 
+    if (command === "delegate") {
+      const options = parseDelegateArgs(args.slice(1));
+      if (isHelpOptions(options)) { output.log(HELP); return 0; }
+      const adapter = dependencies.hostDelegationAdapterFactory?.() || dependencies.hostDelegationAdapter;
+      if (!adapter) throw new SynodError(ERROR_CODES.HOST_ADAPTER_REQUIRED, "Host delegation requires an injected host adapter.");
+      const result = await startHostDelegation({
+        id: options.id,
+        directory: options.cwd,
+        actor: options.actor,
+        read: options.read,
+        write: options.write,
+        readTree: options.readTree,
+        writeTree: options.writeTree,
+        evidence: options.evidence,
+        adapter,
+        ...(options.reservationTtlSeconds === undefined ? {} : { reservationTtlSeconds: options.reservationTtlSeconds }),
+        ...(options.ttlSeconds === undefined ? {} : { ttlSeconds: options.ttlSeconds }),
+        ...(options.heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds: options.heartbeatIntervalSeconds }),
+        ...(options.wait ? { wait: { timeoutMs: options.timeoutMs, pollIntervalMs: options.pollIntervalMs } } : {})
+      }, dependencies as unknown as import("./host-delegation.js").HostDelegationDependencies);
+      const data = {
+        action: "start",
+        task: result.task,
+        reservation: result.reservation,
+        ownerThread: result.ownerThread,
+        lease: result.lease,
+        authorization: result.authorization,
+        ...(result.wait ? { wait: result.wait } : {}),
+        ...(result.liveness ? { liveness: result.liveness } : {}),
+        checkpoint: result.bind.state.checkpoint,
+        lastEvent: result.bind.state.lastEvent
+      };
+      if (options.json) {
+        const diagnostics = result.wait?.diagnostics || {};
+        printJsonEnvelope(successEnvelope("delegate", data, { diagnostics } ), output, view);
+      } else {
+        output.log(`Delegated ${result.task.id} to ${result.ownerThread}; write authorized ${result.authorization.status}.`);
+        if (result.wait) output.log(formatWaitReport(result.wait));
+      }
+      return result.wait?.incomplete ? 1 : 0;
+    }
+
     if (command === "wait") {
       const options = parseWaitArgs(args.slice(1));
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
@@ -441,6 +508,8 @@ export async function run(
       const report = await waitForThreads({ ...options, threadIds: selection.threadIds }, {
         ...(dependencies.waitClientFactory ? { clientFactory: dependencies.waitClientFactory } : {}),
         ...(dependencies.waitAdapterFactory ? { adapterFactory: dependencies.waitAdapterFactory } : {}),
+        ...(dependencies.hostWaitAdapter ? { hostAdapter: dependencies.hostWaitAdapter } : {}),
+        ...(dependencies.hostDelegationAdapter ? { hostAdapter: dependencies.hostDelegationAdapter } : {}),
         ...(dependencies.waitRuntimeResolver ? { runtimeResolver: dependencies.waitRuntimeResolver } : {})
       });
       if (options.json) {
@@ -454,7 +523,7 @@ export async function run(
     }
 
     if (command === "status") {
-      const options = parseLifecycleArgs(args.slice(1), { allowExplain: true });
+      const options = parseStatusArgs(args.slice(1));
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
       const result = await orchestrationStatusWithArtifacts(options, dependencies);
       if (options.json) {
@@ -502,6 +571,8 @@ export async function run(
           source: result.manifest.source,
           checkpoint: result.manifest.checkpoint,
           includeUntracked: result.manifest.includeUntracked,
+          includeLocalDocs: Boolean(result.manifest.supplemental),
+          supplemental: result.manifest.supplemental,
           entries: result.entries,
           objects: result.objects,
           bytes: result.bytes,
@@ -510,7 +581,7 @@ export async function run(
         if (options.json) printJsonEnvelope(successEnvelope("bundle", { action: "export", ...data }), output, view);
         else {
           const base = `${result.manifest.source.branch || "detached"}@${result.manifest.source.head || "no HEAD"}`;
-          output.log(`Exported recovery bundle ${result.bundleId} to ${result.destination} (${result.entries} paths, ${result.objects} objects; base ${base}; fingerprint ${result.manifest.checkpoint.fingerprint}; untracked ${result.manifest.includeUntracked ? "included" : "excluded"}).`);
+          output.log(`Exported recovery bundle ${result.bundleId} to ${result.destination} (${result.entries} paths, ${result.objects} objects; base ${base}; fingerprint ${result.manifest.checkpoint.fingerprint}; untracked ${result.manifest.includeUntracked ? "included" : "excluded"}; local docs ${result.manifest.supplemental ? "included" : "excluded"}).`);
         }
       } else if (options.action === "verify") {
         const result = await verifyRecoveryBundle(options);
@@ -520,6 +591,8 @@ export async function run(
           source: result.manifest.source,
           checkpoint: result.manifest.checkpoint,
           includeUntracked: result.manifest.includeUntracked,
+          includeLocalDocs: Boolean(result.manifest.supplemental),
+          supplemental: result.manifest.supplemental,
           entries: result.entries,
           objects: result.objects,
           bytes: result.bytes,
@@ -536,13 +609,14 @@ export async function run(
           baseHead: result.baseHead,
           fingerprint: result.fingerprint,
           recoveredInterruptedRestore: result.recoveredInterruptedRestore,
+          localDocsRestored: result.localDocsRestored,
           entries: result.entries,
           objects: result.objects,
           bytes: result.bytes,
           manifest: result.manifest
         };
         if (options.json) printJsonEnvelope(successEnvelope("bundle", { action: "restore", ...data }), output, view);
-        else output.log(`Restored recovery bundle ${result.bundleId} into ${result.destination} (${result.entries} paths; base ${result.baseHead}; fingerprint ${result.fingerprint}).`);
+        else output.log(`Restored recovery bundle ${result.bundleId} into ${result.destination} (${result.entries} paths; base ${result.baseHead}; fingerprint ${result.fingerprint}; local docs ${result.localDocsRestored > 0 ? `${result.localDocsRestored} restored` : "not selected"}).`);
       }
       return 0;
     }
@@ -567,6 +641,14 @@ export async function run(
         if (options.json) printJsonEnvelope(successEnvelope("task", { action: "transition", ...data }), output, view);
         else {
           output.log(`Transitioned ${result.task.id} to ${result.task.state} at revision ${result.task.revision}.`);
+          for (const item of result.evidence) output.log(`Recorded evidence ${item.id}: ${item.kind} @ revision ${item.revision}.`);
+        }
+      } else if (options.action === "correct") {
+        const result = await recordTaskCorrection(options, dependencies);
+        const data = { task: result.task, correction: result.correction, evidence: result.evidence, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
+        if (options.json) printJsonEnvelope(successEnvelope("task", { action: "correct", ...data }), output, view);
+        else {
+          output.log(`Recorded correction ${result.correction.round} for ${result.task.id} at revision ${result.task.revision}.`);
           for (const item of result.evidence) output.log(`Recorded evidence ${item.id}: ${item.kind} @ revision ${item.revision}.`);
         }
       } else if (options.action === "override") {

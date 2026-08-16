@@ -19,6 +19,8 @@ const HISTORY_KEYS = new Set([
   "events",
   "history",
   "recoveryHistory",
+  "correctionHistory",
+  "pathEvidence",
   "overrides",
   "observations",
   "decisions",
@@ -93,16 +95,38 @@ function compactReservation(value: unknown): unknown {
 
 function compactProposal(value: unknown): unknown {
   if (!isRecord(value)) return value;
-  return pick(value, [
+  const result = pick(value, [
     "path",
     "bundleId",
     "leaseId",
     "generation",
     "baseRevision",
     "revision",
+    "pathStatesVersion",
     "sealedAt",
     "status"
   ]);
+  if (Array.isArray(value.pathStates)) {
+    const states = value.pathStates.filter(isRecord);
+    const exceptions = states.filter(state => state.proposalAdded !== true
+      || state.gitTracked !== true
+      || state.staged === true
+      || state.sourcePath !== undefined);
+    const limit = 8;
+    result.pathStateSummary = {
+      total: states.length,
+      proposalAdded: states.filter(state => state.proposalAdded === true).length,
+      gitTracked: states.filter(state => state.gitTracked === true).length,
+      staged: states.filter(state => state.staged === true).length,
+      committed: states.filter(state => state.committed === true).length,
+      exceptions: exceptions.slice(0, limit).map(state => pick(state, [
+        "path", "sourcePath", "proposalAdded", "gitTracked", "staged", "committed"
+      ])),
+      ...(exceptions.length > limit ? { exceptionCount: exceptions.length, exceptionsTruncated: true } : {})
+    };
+  }
+  if (isRecord(value.pathSummary)) result.pathSummary = structuredClone(value.pathSummary);
+  return result;
 }
 
 function compactRecovery(value: unknown): unknown {
@@ -368,7 +392,24 @@ function compactStatus(value: unknown): unknown {
   result.tasks = Array.isArray(value.tasks) ? value.tasks.map(task => compactTask(task)) : [];
   if (Object.hasOwn(value, "rotation")) result.rotation = compactRotation(value.rotation);
   if (Object.hasOwn(value, "artifacts")) result.artifacts = compactArtifacts(value.artifacts);
-  if (isRecord(value.delta)) result.delta = pick(value.delta, ["changed", "counts"]);
+  if (isRecord(value.selection)) {
+    result.selection = pick(value.selection, [
+      "type", "taskId", "rationale", "bounded", "taskCount", "totalTaskCount", "pathCount", "pathsTruncated", "tasksTruncated", "historyLimit"
+    ]);
+  }
+  if (isRecord(value.delta)) {
+    const delta = pick(value.delta, ["changed", "counts"]);
+    if (isRecord(value.selection) && value.selection.type === "changed-since-checkpoint" && Array.isArray(value.delta.paths)) {
+      delta.paths = value.delta.paths.map(item => {
+        if (!isRecord(item)) return item;
+        const boundedPath = { ...item };
+        delete boundedPath.checkpoint;
+        delete boundedPath.current;
+        return boundedPath;
+      });
+    }
+    result.delta = delta;
+  }
   return result;
 }
 
