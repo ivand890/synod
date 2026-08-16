@@ -142,6 +142,27 @@ test("keeps human Synod notes out of checkpoint bundles unless local-doc opt-in 
 
 });
 
+test("skips tracked modified supplemental docs because they already belong to checkpoint entries", async () => {
+  const { directory, parent } = await fixture();
+  const goalPath = path.join(directory, "docs/synod/GOAL.md");
+  await writeFile(goalPath, "Tracked baseline note.\n", "utf8");
+  await git(directory, "add", "-f", "docs/synod/GOAL.md");
+  await git(directory, "commit", "-m", "track goal note");
+  await writeFile(goalPath, "Tracked modified note.\n", "utf8");
+  await recordCheckpoint({ directory });
+
+  const bundle = path.join(parent, "tracked-modified.bundle");
+  const exported = await exportRecoveryBundle({
+    directory,
+    destination: bundle,
+    includeUntracked: true,
+    includeLocalDocs: true
+  });
+  assert.equal(exported.manifest.entries.some(entry => entry.path === "docs/synod/GOAL.md"), true);
+  assert.equal(exported.manifest.supplemental?.localDocs.some(item => item.path === "docs/synod/GOAL.md"), false);
+  assert.equal((await verifyRecoveryBundle({ bundle })).manifest.supplemental?.localDocs.some(item => item.path === "docs/synod/GOAL.md"), false);
+});
+
 test("exports and verifies deterministic mixed dirty-state bundles without changing the source", async () => {
   const { directory, parent } = await fixture();
   const firstDestination = path.join(parent, "first.bundle");

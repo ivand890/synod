@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AppServerEvent } from "../src/app-server.js";
+import { WARNING_CODES } from "../src/contracts.js";
 import {
   resolveWaitSelection,
   waitForThreads,
@@ -597,6 +598,33 @@ test("host adapter closures preserve class receivers across read, start, cursor,
     "read:receiver-thread",
     "cursor:cursor:one:receiver-thread",
     "close",
+  ]);
+});
+
+test("host wait filters malformed warnings and retains only known warning records", async () => {
+  const adapter = {
+    async wait() {
+      return {
+        statuses: [idle("thread:warnings")],
+        warnings: [
+          { code: WARNING_CODES.WAIT_CLEANUP_FAILED, message: "host warning", extra: "discard" },
+          { code: "UNKNOWN_WARNING", message: "discard" },
+          { code: WARNING_CODES.WAIT_CLEANUP_FAILED, message: 42 }
+        ]
+      } as never;
+    },
+    getWarnings() {
+      return [
+        { code: WARNING_CODES.APP_SERVER_FORCE_KILLED, message: "adapter warning" },
+        { code: WARNING_CODES.APP_SERVER_FORCE_KILLED, message: null },
+        { code: "UNKNOWN_WARNING", message: "discard" }
+      ] as never;
+    }
+  };
+  const report = await waitForThreads({ threadIds: ["thread:warnings"], timeoutMs: 100 }, { hostAdapter: adapter });
+  assert.deepEqual(report.warnings, [
+    { code: WARNING_CODES.WAIT_CLEANUP_FAILED, message: "host warning" },
+    { code: WARNING_CODES.APP_SERVER_FORCE_KILLED, message: "adapter warning" }
   ]);
 });
 

@@ -222,11 +222,15 @@ interface SupplementalCapture {
  * ancestor. These files are deliberately separate from checkpoint entries:
  * they are ignored, user-owned context rather than canonical release state.
  */
-async function captureSupplementalLocalDocs(directory: string): Promise<SupplementalCapture> {
+async function captureSupplementalLocalDocs(
+  directory: string,
+  checkpointPaths: ReadonlySet<string> = new Set()
+): Promise<SupplementalCapture> {
   const localDocs: RecoverySupplementalLocalDoc[] = [];
   const materials = new Map<string, Buffer>();
   let bytes = 0;
   for (const relativePath of RECOVERY_LOCAL_DOC_PATHS) {
+    if (checkpointPaths.has(relativePath)) continue;
     const absolutePath = path.resolve(directory, ...relativePath.split("/"));
     let current = directory;
     let absentAncestor = false;
@@ -1041,7 +1045,13 @@ async function materializeSnapshotBundle(
       details: { paths: untracked }
     });
   }
-  const supplementalCapture = includeLocalDocs ? await captureSupplementalLocalDocs(targetDirectory) : undefined;
+  const checkpointPaths = new Set(snapshot.entries.flatMap(entry => [
+    entry.path,
+    ...(entry.sourcePath ? [entry.sourcePath] : [])
+  ]));
+  const supplementalCapture = includeLocalDocs
+    ? await captureSupplementalLocalDocs(targetDirectory, checkpointPaths)
+    : undefined;
   const rawGitRunner = dependencies.rawGitRunner || defaultRawGitRunner;
   let indexOutput: Buffer;
   try {
@@ -1118,7 +1128,7 @@ async function materializeSnapshotBundle(
   validateRecoveryManifest(manifest);
   await assertSourceStillMatches(targetDirectory, guardCheckpoint, dependencies);
   if (supplementalCapture) {
-    const current = await captureSupplementalLocalDocs(targetDirectory);
+    const current = await captureSupplementalLocalDocs(targetDirectory, checkpointPaths);
     if (stableStringify(current.supplemental) !== stableStringify(supplementalCapture.supplemental)) {
       sourceChanged("Supplemental local docs changed during recovery export.", { paths: RECOVERY_LOCAL_DOC_PATHS });
     }
@@ -1138,7 +1148,7 @@ async function materializeSnapshotBundle(
     await verifyRecoveryBundle({ bundle: temporary });
     await assertSourceStillMatches(targetDirectory, guardCheckpoint, dependencies);
     if (supplementalCapture) {
-      const current = await captureSupplementalLocalDocs(targetDirectory);
+      const current = await captureSupplementalLocalDocs(targetDirectory, checkpointPaths);
       if (stableStringify(current.supplemental) !== stableStringify(supplementalCapture.supplemental)) {
         sourceChanged("Supplemental local docs changed during recovery bundle publication.", { paths: RECOVERY_LOCAL_DOC_PATHS });
       }

@@ -195,7 +195,7 @@ function ownerFromSpawn(value: HostDelegationSpawnResult): HostOwnerIdentifier |
   if (typeof value === "string") return value.trim() || undefined;
   for (const key of ["ownerThread", "ownerId", "owner", "threadId"] as const) {
     const candidate = value[key];
-    if (typeof candidate === "string" && candidate.trim()) return candidate;
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
   }
   return undefined;
 }

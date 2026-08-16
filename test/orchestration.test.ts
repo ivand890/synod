@@ -754,6 +754,12 @@ test("sealed proposals retain independent Git path lanes and acceptance rejects 
   }), false);
   assert.equal(isTaskProposalReference({
     ...sealedProposal,
+    pathStates: sealedProposal.pathStates.map((item, index) => index === 0
+      ? { ...item, sourcePath: "src/not-owned.ts" }
+      : item)
+  }), false);
+  assert.equal(isTaskProposalReference({
+    ...sealedProposal,
     pathStatesVersion: undefined,
     pathStates: sealedProposal.pathStates.slice(1)
   }), true);
@@ -788,6 +794,45 @@ test("Git pathspecs select legal magic-looking filenames literally", async () =>
   const head = String((await git(directory, "rev-parse", "HEAD") as { stdout: string }).stdout).trim();
   const tree = await git(directory, "ls-tree", "-r", "-z", "--name-only", head, "--", `:(literal)${literalPath}`) as { stdout: string };
   assert.equal(tree.stdout, `${literalPath}\0`);
+});
+
+test("proposal Git path lanes batch literal pathspecs by bytes and union exact results", async () => {
+  const directory = await temporaryProject();
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-001", ownerThread: "test:T-001", writeTree: ["src"] });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  const paths = Array.from({ length: 300 }, (_, index) =>
+    `src/batch-${String(index).padStart(3, "0")}-${"界".repeat(40)}-${"é".repeat(20)}.ts`
+  );
+  await Promise.all(paths.map((relativePath, index) =>
+    writeFile(path.join(directory, relativePath), `export const value${index} = ${index};\n`, "utf8")
+  ));
+  const proposalGitArguments: string[][] = [];
+  const delivered = await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery:batched"] }, {
+    gitRunner: async (gitDirectory, args) => {
+      proposalGitArguments.push([...args]);
+      const result = await execFileAsync("git", ["-C", gitDirectory, ...args], { encoding: "utf8" });
+      return String(result.stdout);
+    }
+  });
+  assert.equal(delivered.task.proposal?.pathStates?.length, paths.length);
+  const indexBatches = proposalGitArguments.filter(args => args[0] === "ls-files" && args.some(arg => arg.startsWith(":(literal)")));
+  const headBatches = proposalGitArguments.filter(args => args[0] === "ls-tree" && args.some(arg => arg.startsWith(":(literal)")));
+  assert.ok(indexBatches.length > 1);
+  assert.ok(headBatches.length > 1);
+  const argvBytes = (args: readonly string[]) => args.reduce(
+    (total, arg) => total + Buffer.byteLength(arg, "utf8") + 1,
+    0
+  );
+  for (const args of [...indexBatches, ...headBatches]) {
+    assert.ok(argvBytes(args) <= 32 * 1024, `Git argv batch exceeded 32 KiB: ${argvBytes(args)} bytes`);
+  }
+  const pathspecs = (batches: string[][]) => batches.flatMap(args => args.slice(args.indexOf("--") + 1));
+  assert.deepEqual(pathspecs(indexBatches).sort(), paths.map(item => `:(literal)${item}`).sort());
+  assert.deepEqual(pathspecs(headBatches).sort(), paths.map(item => `:(literal)${item}`).sort());
 });
 
 test("a failed delivery commit preserves and reuses its verified immutable proposal", async () => {
@@ -1864,9 +1909,33 @@ test("status selectors bound operational tasks and checkpoint closeout deltas", 
   assert.equal(active.taskCounts.DONE, 0);
   assert.equal(active.selection?.type, "active-only");
 
+  await addDefaultTask(directory, { id: "T-EXPIRED" });
+  await transitionTask({ directory, id: "T-EXPIRED", to: "READY", revision: 0 });
+  await acquireTaskLease({
+    directory,
+    id: "T-EXPIRED",
+    ownerThread: "test:T-EXPIRED",
+    write: ["src/expired.ts"],
+    ttlSeconds: 60,
+    heartbeatIntervalSeconds: 30
+  }, { clock: () => Date.parse("2020-01-01T00:00:00.000Z") });
+  await transitionTask({ directory, id: "T-EXPIRED", to: "ACTIVE", revision: 0 }, {
+    clock: () => Date.parse("2020-01-01T00:00:01.000Z")
+  });
+  await addDefaultTask(directory, { id: "T-RESERVATION-EXPIRED" });
+  await transitionTask({ directory, id: "T-RESERVATION-EXPIRED", to: "READY", revision: 0 });
+  await reserveTaskLease({
+    directory,
+    id: "T-RESERVATION-EXPIRED",
+    write: ["src/reservation-expired.ts"],
+    reservationTtlSeconds: 60
+  }, { clock: () => "2020-01-01T00:00:00.000Z" });
+
   await writeFile(path.join(directory, "changed.txt"), "closeout\n", "utf8");
   const changed = await orchestrationStatus({ directory, changedSinceCheckpoint: true });
   assert.deepEqual(changed.tasks, []);
+  assert.ok(changed.leaseExpiryCandidates.some(candidate => candidate.taskId === "T-EXPIRED"));
+  assert.ok(changed.leaseReservationExpiryCandidates.some(candidate => candidate.taskId === "T-RESERVATION-EXPIRED"));
   assert.equal(changed.selection?.type, "changed-since-checkpoint");
   assert.equal(changed.selection?.pathCount, 1);
   assert.equal(changed.delta?.counts.untracked, 1);
@@ -1941,6 +2010,15 @@ test("selected status bounds every proposal path lane with explicit totals", asy
   assertBoundedProposal(selected.tasks[0]);
   const active = await orchestrationStatus({ directory, activeOnly: true });
   assertBoundedProposal(active.tasks.find(task => task.id === "T-A"));
+
+  const guidance = await nextTaskGuidance({ directory });
+  const guidanceProposal = guidance.tasks.find(task => task.id === "T-A")?.proposal;
+  assert.ok(guidanceProposal?.pathStates);
+  assert.equal(guidanceProposal.pathStates.length, 100);
+  assert.deepEqual(guidanceProposal.pathSummary, {
+    limit: 100,
+    pathStates: { total: 101, returned: 100, truncated: true, present: true }
+  });
 });
 
 test("status detects content-sensitive checkpoint drift and checkpoint reconciles it", async () => {
@@ -2507,6 +2585,41 @@ test("tampered event logs fail closed", async () => {
     readOrchestration(directory),
     error => error instanceof SynodError && error.code === ERROR_CODES.EVENT_LOG_INVALID
   );
+});
+
+test("tampered correction-history paths fail closed", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await recordTaskCorrection({
+    directory,
+    id: "T-001",
+    revision: 0,
+    reason: "Create a canonical correction fixture",
+    evidence: ["review:fixture"]
+  });
+
+  const statePath = path.join(directory, ORCHESTRATION_STATE_PATH);
+  const originalState = await readFile(statePath, "utf8");
+  const unsafePaths = ["../outside.ts", "/absolute/outside.ts", "src\\outside.ts", "src/\u0000outside.ts"];
+  try {
+    for (const unsafePath of unsafePaths) {
+      const tampered = JSON.parse(originalState) as {
+        tasks: Record<string, { correctionHistory?: Array<{ paths: string[] }> }>;
+      };
+      tampered.tasks["T-001"]!.correctionHistory![0]!.paths = [unsafePath];
+      await writeFile(statePath, `${JSON.stringify(tampered, null, 2)}\n`, "utf8");
+      await assert.rejects(
+        readOrchestration(directory),
+        error => error instanceof SynodError && error.code === ERROR_CODES.ORCHESTRATION_STATE_INVALID
+      );
+    }
+  } finally {
+    await writeFile(statePath, originalState, "utf8");
+  }
 });
 
 test("status fails closed when the generated Markdown view diverges from canonical state", async () => {

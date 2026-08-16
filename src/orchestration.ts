@@ -60,6 +60,7 @@ import {
   leaseBaselinesReference,
   leaseScopeCoversPath,
   leaseScopesOverlap,
+  normalizeLeaseScopePath,
   normalizeLeaseScopes,
   parseLeaseDuration,
   retainLeaseBaselinesLedger,
@@ -532,6 +533,7 @@ export interface ValidatedCheckpointSource {
 const TERMINAL_STATES: ReadonlySet<TaskState> = new Set(["DONE", "SUPERSEDED"]);
 const STATUS_TASK_LIMIT = 100;
 const STATUS_PATH_LIMIT = 100;
+const GIT_PATHSPEC_BATCH_BYTES = 32 * 1024;
 const STATUS_HISTORY_LIMIT = 8;
 const TRANSITIONS: Readonly<Record<TaskState, ReadonlySet<TaskState>>> = Object.freeze({
   PLANNED: new Set<TaskState>(["READY", "BLOCKED", "SUPERSEDED"]),
@@ -728,6 +730,7 @@ export async function nextTaskGuidance(
           }
         : undefined;
       const actions = correctionAction ? [correctionAction, ...baseActions] : baseActions;
+      const proposalPathStates = task.proposal?.pathStates;
       return {
         id: task.id,
         state: task.state,
@@ -764,7 +767,18 @@ export async function nextTaskGuidance(
           status: task.proposal.status,
           bundleId: task.proposal.bundleId,
           ...(task.proposal.pathStatesVersion === undefined ? {} : { pathStatesVersion: task.proposal.pathStatesVersion }),
-          ...(task.proposal.pathStates === undefined ? {} : { pathStates: structuredClone(task.proposal.pathStates) })
+          ...(proposalPathStates === undefined ? {} : {
+            pathStates: structuredClone(proposalPathStates.slice(0, STATUS_PATH_LIMIT)),
+            pathSummary: {
+              limit: STATUS_PATH_LIMIT,
+              pathStates: {
+                total: proposalPathStates.length,
+                returned: Math.min(proposalPathStates.length, STATUS_PATH_LIMIT),
+                truncated: proposalPathStates.length > STATUS_PATH_LIMIT,
+                present: true
+              }
+            }
+          })
         } : null,
         constraints: {
           reservationRequiresBind: Boolean(task.leaseReservation),
@@ -1731,19 +1745,19 @@ function isTaskEvidence(value: unknown): value is TaskEvidence {
     && typeof value.checkpoint.worktreeFingerprint === "string";
 }
 
+function isSafeRepositoryPath(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    return normalizeLeaseScopePath(value) === value;
+  } catch {
+    return false;
+  }
+}
+
 function isTaskScopedPathEvidence(value: unknown): value is TaskScopedPathEvidence {
-  const validPath = (candidate: unknown): candidate is string => typeof candidate === "string"
-    && candidate.length > 0
-    && !candidate.includes("\0")
-    && !candidate.includes("\\")
-    && !path.posix.isAbsolute(candidate)
-    && path.posix.normalize(candidate) === candidate
-    && candidate !== "."
-    && candidate !== ".."
-    && !candidate.startsWith("../");
   return isRecord(value)
-    && validPath(value.path)
-    && (value.sourcePath === undefined || (validPath(value.sourcePath) && value.sourcePath !== value.path))
+    && isSafeRepositoryPath(value.path)
+    && (value.sourcePath === undefined || (isSafeRepositoryPath(value.sourcePath) && value.sourcePath !== value.path))
     && (value.status === undefined || (typeof value.status === "string" && value.status.length === 2))
     && typeof value.staged === "boolean"
     && typeof value.unstaged === "boolean"
@@ -1764,7 +1778,7 @@ function isTaskCorrectionRecord(value: unknown): value is TaskCorrectionRecord {
     && value.evidenceIds.length > 0
     && /^sha256:[0-9a-f]{64}$/.test(String(value.scopeFingerprint))
     && isStringArray(value.paths)
-    && value.paths.every(item => item.length > 0)
+    && value.paths.every(isSafeRepositoryPath)
     && Array.isArray(value.pathEvidence)
     && value.pathEvidence.every(isTaskScopedPathEvidence)
     && typeof value.recordedAt === "string"
@@ -4642,20 +4656,61 @@ function proposalSnapshot(
   }));
 }
 
-async function gitPathNames(
+async function gitPathOutput(
   directory: string,
   args: string[],
   gitRunner: GitRunner
-): Promise<Set<string>> {
+): Promise<string> {
   try {
-    const output = await gitRunner(directory, args);
-    return new Set(output.split("\0").filter(Boolean));
+    return await gitRunner(directory, args);
   } catch (error) {
     throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, "Could not capture immutable proposal Git path semantics.", {
       cause: error,
       details: { command: args.slice(0, 5) }
     });
   }
+}
+
+async function gitPathNames(
+  directory: string,
+  args: string[],
+  gitRunner: GitRunner
+): Promise<Set<string>> {
+  return new Set((await gitPathOutput(directory, args, gitRunner)).split("\0").filter(Boolean));
+}
+
+function literalPathspecBatches(baseArgs: readonly string[], pathspecs: readonly string[]): string[][] {
+  const baseBytes = baseArgs.reduce((total, arg) => total + Buffer.byteLength(arg, "utf8") + 1, 0)
+    + Buffer.byteLength("--", "utf8") + 1;
+  const batches: string[][] = [];
+  let current: string[] = [];
+  let currentBytes = baseBytes;
+  for (const pathspec of pathspecs) {
+    const pathspecBytes = Buffer.byteLength(pathspec, "utf8") + 1;
+    if (current.length > 0 && currentBytes + pathspecBytes > GIT_PATHSPEC_BATCH_BYTES) {
+      batches.push(current);
+      current = [];
+      currentBytes = baseBytes;
+    }
+    current.push(pathspec);
+    currentBytes += pathspecBytes;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
+}
+
+async function batchedGitPathNames(
+  directory: string,
+  baseArgs: string[],
+  literalPathspecs: readonly string[],
+  gitRunner: GitRunner
+): Promise<Set<string>> {
+  const paths = new Set<string>();
+  for (const batch of literalPathspecBatches(baseArgs, literalPathspecs)) {
+    const result = await gitPathNames(directory, [...baseArgs, "--", ...batch], gitRunner);
+    for (const relativePath of result) paths.add(relativePath);
+  }
+  return paths;
 }
 
 async function captureProposalPathStates(
@@ -4667,10 +4722,13 @@ async function captureProposalPathStates(
   const paths = [...new Set(owned.flatMap(deltaPaths))].sort(compareCheckpointPaths);
   if (paths.length === 0) return [];
   const literalPathspecs = paths.map(relativePath => `:(literal)${relativePath}`);
-  const indexOutput = await gitPathNames(directory, ["ls-files", "--stage", "-z", "--", ...literalPathspecs], gitRunner);
-  const indexPaths = new Set(indexRecords([...indexOutput].join("\0")).keys());
+  const indexPaths = new Set<string>();
+  for (const batch of literalPathspecBatches(["ls-files", "--stage", "-z"], literalPathspecs)) {
+    const output = await gitPathOutput(directory, ["ls-files", "--stage", "-z", "--", ...batch], gitRunner);
+    for (const relativePath of indexRecords(output).keys()) indexPaths.add(relativePath);
+  }
   const committedPaths = current.head
-    ? await gitPathNames(directory, ["ls-tree", "-r", "-z", "--name-only", current.head, "--", ...literalPathspecs], gitRunner)
+    ? await batchedGitPathNames(directory, ["ls-tree", "-r", "-z", "--name-only", current.head], literalPathspecs, gitRunner)
     : new Set<string>();
   const currentByPath = new Map<string, CheckpointEntry>();
   for (const item of owned) {
@@ -4892,7 +4950,8 @@ async function verifyTaskProposalForAcceptance(
   const completeCurrentPathStates = currentPathStates
     && proposal.pathStates !== undefined
     && proposal.pathStates.length === proposal.ownedPaths.length
-    && proposal.pathStates.every((item, index) => item.path === proposal.ownedPaths[index]);
+    && proposal.pathStates.every((item, index) => item.path === proposal.ownedPaths[index])
+    && proposal.pathStates.every(item => item.sourcePath === undefined || proposal.ownedPaths.includes(item.sourcePath));
   if (currentPathStates && !completeCurrentPathStates) {
     throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, `Task ${task.id} current proposal path-state lanes are incomplete.`, {
       details: { taskId: task.id, ownedPaths: proposal.ownedPaths, pathStates: proposal.pathStates }
@@ -6567,7 +6626,7 @@ async function orchestrationStatusFromCanonical(
   const localRuntimeDescriptor = runtimeRead.status === "fulfilled" ? runtimeRead.value : undefined;
   const rawManifest = manifestRead.status === "fulfilled" ? manifestRead.value : undefined;
   const counts = taskStateCounts(selector && selector !== "changed-since-checkpoint" ? selectedTasks : allTasks);
-  const candidateTasks = selector === undefined ? allTasks : selectedTasks;
+  const candidateTasks = selector === undefined || selector === "changed-since-checkpoint" ? allTasks : selectedTasks;
   const leaseExpiryCandidates = candidateTasks.flatMap(task => task.lease && Date.parse(currentCheckpoint.capturedAt) >= Date.parse(task.lease.expiresAt)
     ? [{
         taskId: task.id,

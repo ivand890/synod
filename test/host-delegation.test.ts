@@ -99,7 +99,7 @@ test("host delegation reserves, spawns read-only, binds the opaque owner, then a
     async spawn(request) {
       calls.push("spawn");
       spawnedRequest = request;
-      return { ownerId: "opaque-owner" };
+      return { ownerId: "  opaque-owner  " };
     },
     async authorize(request) {
       calls.push("authorize");

@@ -3,7 +3,7 @@ import { CodexAppServerClient } from "./app-server.js";
 import type { AppServerDiagnostics, AppServerEvent } from "./app-server.js";
 import { resolveCodexRuntime } from "./codex-runtime.js";
 import { WARNING_CODES, warning } from "./contracts.js";
-import type { Warning } from "./contracts.js";
+import type { Warning, WarningCode } from "./contracts.js";
 import { ERROR_CODES, SynodError, asSynodError } from "./errors.js";
 import { validateOrchestrationReadOnly } from "./orchestration.js";
 import { errorMessage, isRecord } from "./validation.js";
@@ -48,6 +48,21 @@ export interface HostWaitResult {
   fallbackPollCount?: number;
   warnings?: Warning[];
   diagnostics?: Record<string, unknown>;
+}
+
+const WARNING_CODE_SET = new Set<string>(Object.values(WARNING_CODES));
+
+function normalizeWarnings(value: unknown): Warning[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(item => {
+    if (!isRecord(item) || typeof item.code !== "string" || !WARNING_CODE_SET.has(item.code)
+      || typeof item.message !== "string") return [];
+    return [{
+      code: item.code as WarningCode,
+      message: item.message,
+      ...(Object.hasOwn(item, "details") ? { details: item.details } : {})
+    }];
+  });
 }
 
 /** Optional host-owned status observation surface used by an injected adapter. */
@@ -239,7 +254,7 @@ export function appServerThreadStatusAdapter(client: WaitClient): ThreadStatusAd
       });
     },
     close: () => client.close(),
-    getWarnings: () => client.getWarnings?.() || [],
+    getWarnings: () => normalizeWarnings(client.getWarnings?.()),
     getDiagnostics: () => client.getDiagnostics?.() || {}
   };
 }
@@ -545,7 +560,7 @@ function normalizeHostWaitResult(value: unknown, threadIds: string[]): HostWaitR
       && candidate.fallbackPollCount >= 0
       ? { fallbackPollCount: candidate.fallbackPollCount }
       : {}),
-    ...(Array.isArray(candidate.warnings) ? { warnings: candidate.warnings as Warning[] } : {}),
+    ...(Array.isArray(candidate.warnings) ? { warnings: normalizeWarnings(candidate.warnings) } : {}),
     ...(isRecord(candidate.diagnostics) ? { diagnostics: candidate.diagnostics } : {})
   };
 }
@@ -677,7 +692,7 @@ async function waitThroughHost(
       }
     }
   }
-  const warnings = [...(host.getWarnings ? host.getWarnings.call(host) : []), ...cleanupWarnings];
+  const warnings = [...normalizeWarnings(host.getWarnings ? host.getWarnings.call(host) : []), ...cleanupWarnings];
   const diagnostics = host.getDiagnostics ? host.getDiagnostics.call(host) : {};
   if (failure) {
     failure.warnings = warnings;
@@ -732,7 +747,7 @@ export async function waitForThreads({
       close: host.close
         ? () => host.close!.call(host)
         : async () => {},
-      ...(host.getWarnings ? { getWarnings: () => host.getWarnings!.call(host) } : {}),
+      ...(host.getWarnings ? { getWarnings: () => normalizeWarnings(host.getWarnings!.call(host)) } : {}),
       ...(host.getDiagnostics ? { getDiagnostics: () => host.getDiagnostics!.call(host) } : {})
     };
   }
@@ -923,7 +938,7 @@ export async function waitForThreads({
       failure ||= cleanupFailure;
     }
   }
-  const warnings = [...(adapter.getWarnings?.() || []), ...cleanupWarnings];
+  const warnings = [...normalizeWarnings(adapter.getWarnings?.()), ...cleanupWarnings];
   const diagnostics = adapter.getDiagnostics?.() || {};
   if (failure) {
     failure.warnings = warnings;

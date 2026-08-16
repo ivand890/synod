@@ -402,7 +402,8 @@ function completeTaskProposalPathStates(
     && isSafeLeasePathArray(ownedPaths)
     && pathStates.length === ownedPaths.length
     && pathStates.every(isTaskProposalPathState)
-    && pathStates.every((item, index) => item.path === ownedPaths[index]);
+    && pathStates.every((item, index) => item.path === ownedPaths[index])
+    && pathStates.every(item => item.sourcePath === undefined || ownedPaths.includes(item.sourcePath));
 }
 
 export function isTaskProposalReference(value: unknown): value is TaskProposalReference {
