@@ -15,8 +15,8 @@ GitHub, registry-installed package, and public CLI evidence for `v0.9.4` are
 captured in the versioned `release-closeouts/v0.9.4.json`; the prior `v0.9.3`
 evidence remains recorded in the versioned `release-closeouts/v0.9.3.json`.
 The signed tag and GitHub Release `isImmutable: true` provide the external
-release anchors; the root `RELEASE-CLOSEOUT.json` records the same verified
-v0.9.4 evidence.
+release anchors; the root `RELEASE-CLOSEOUT.json` is the prepared/pending
+`v0.9.5` candidate; it has no public verification.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
 workflow; the tag workflow validates only the strict prepared/pending source
 record before publication.
