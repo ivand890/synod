@@ -12,11 +12,13 @@ runtime until their release is published and the project is explicitly
 upgraded. Exact CLI spelling remains provisional until an increment is
 implemented and released. Source preparation and post-publication npm,
 GitHub, registry-installed package, and public CLI evidence for `v0.9.4` are
-captured in immutable `release-closeouts/v0.9.4.json`; the prior `v0.9.3`
-evidence remains immutable in `release-closeouts/v0.9.3.json`. The root
-`RELEASE-CLOSEOUT.json` records the same verified v0.9.4 evidence.
+captured in the versioned `release-closeouts/v0.9.4.json`; the prior `v0.9.3`
+evidence remains recorded in the versioned `release-closeouts/v0.9.3.json`.
+The signed tag and GitHub Release `isImmutable: true` provide the external
+release anchors; the root `RELEASE-CLOSEOUT.json` records the same verified
+v0.9.4 evidence.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
-workflow; the tag workflow validates only the immutable prepared/pending source
+workflow; the tag workflow validates only the strict prepared/pending source
 record before publication.
 
 The `v0.9.1` release delivered pre-spawn lease reservations and corrected
@@ -184,7 +186,7 @@ strict, validation-only durable job contract with no execution plane.
 
 Status: delivered and publicly verified. The exact tag SHA and post-publication
 npm/GitHub, registry-installed package, and public CLI facts are verified in the
-immutable v0.9.3 closeout archive. The local tarball smoke remains
+versioned v0.9.3 closeout archive. The local tarball smoke remains
 source-preparation evidence only.
 
 | ID | Outcome | Acceptance gate |
@@ -198,7 +200,7 @@ Release gate: source preparation is satisfied by the protected workflow and
 exact signed release tag, including the local tarball smoke; public
 verification is satisfied only by the exact npm `gitHead`, GitHub Release
 state, registry-installed package integrity/attestation/provenance and clean
-consumer check, and public CLI parity recorded in immutable
+consumer check, and public CLI parity recorded in versioned
 `release-closeouts/v0.9.3.json`.
 
 ## v0.9.4 — Review, host, status, and recovery surfaces

@@ -334,9 +334,10 @@ test("verified 0.9.4 evidence, archived 0.9.3 evidence, and product/docs contrac
   assert.match(roadmap, /Current public release: `v0\.9\.4`/);
   assert.match(roadmap, /Current source release: `v0\.9\.4`/);
   assert.match(roadmap, /Last verified public release at this update: `v0\.9\.4`/);
-  assert.match(roadmap, /immutable `release-closeouts\/v0\.9\.4\.json`/);
+  assert.match(roadmap, /versioned `release-closeouts\/v0\.9\.4\.json`/);
+  assert.match(roadmap, /signed tag and GitHub Release `isImmutable: true` provide the external\s+release anchors/);
   assert.match(roadmap, /release-closeouts\/v0\.9\.3\.json/);
-  assert.match(roadmap, /root\s+`RELEASE-CLOSEOUT\.json` records the same verified v0\.9\.4 evidence/);
+  assert.match(roadmap, /the root\s+`RELEASE-CLOSEOUT\.json` records the same verified\s+v0\.9\.4 evidence/);
   assert.doesNotMatch(roadmap, /public latest remains/);
   assert.match(roadmap, /Status: delivered and publicly verified/);
   assert.doesNotMatch(roadmap, /last verified public package remains `v0\.9\.2`/i);
@@ -365,7 +366,8 @@ test("verified 0.9.4 evidence, archived 0.9.3 evidence, and product/docs contrac
   assert.doesNotMatch(roadmap, /two-phase closeout on `main`/i);
 
   assert.match(readme, /Public release and source tree/);
-  assert.match(readme, /immutable source and\s+post-publication evidence is archived in/);
+  assert.match(readme, /signed tag commit[\s\S]*externally immutable/);
+  assert.match(readme, /Post-publication evidence is recorded in the versioned/);
   assert.match(readme, /public v0\.9\.4 evidence/);
   assert.match(readme, /public and pinned `@ivand890\/synod@0\.9\.4`/);
   assert.match(readme, /The v0\.9\.4 source surfaces include/);
@@ -417,10 +419,11 @@ test("verified 0.9.4 evidence, archived 0.9.3 evidence, and product/docs contrac
   assert.match(readme, /only that recovery path reassigns a replacement thread/);
   assert.doesNotMatch(readme, /A correction repeats the reservation, read-only spawn/);
 
-  assert.match(releasing, /public `v0\.9\.4` source and post-publication evidence is immutable/);
-  assert.match(releasing, /bound to tag commit\s+`f116a38acffb86c752f6e5c3f8013407ecfea267`/);
+  assert.match(releasing, /public `v0\.9\.4` source is anchored by signed tag commit/);
+  assert.match(releasing, /externally immutable GitHub\s+Release \(`isImmutable: true`\)/);
+  assert.match(releasing, /signed tag commit\s+`f116a38acffb86c752f6e5c3f8013407ecfea267`/);
   assert.match(releasing, /`release-closeouts\/v0\.9\.3\.json`/);
-  assert.match(releasing, /root `RELEASE-CLOSEOUT\.json`\s+records the same verified public v0\.9\.4 evidence/);
+  assert.match(releasing, /root\s+`RELEASE-CLOSEOUT\.json`\s+records the same verified\s+public v0\.9\.4 evidence/);
   assert.match(releasing, /prepared.*pending/);
   assert.doesNotMatch(releasing, /Public latest remains/);
   assert.doesNotMatch(releasing, /pre-tag candidate record/);
@@ -436,6 +439,19 @@ test("verified 0.9.4 evidence, archived 0.9.3 evidence, and product/docs contrac
   assert.match(releasing, /phase-strict closeout validation|Malformed or mixed-phase records fail closed/);
   assert.match(releasing, /phase-2 live verifier runs on the protected\s+closeout PR,\s*not the tag\s+workflow/);
   assert.match(roadmap, /phase-2 live verifier runs on the protected\s+closeout PR,\s*not the tag\s+workflow/);
+
+  const unsupportedArchiveWording = [
+    /immutable source and\s+post-publication evidence is archived in[\s\S]*release-closeouts\//i,
+    /evidence remains immutable in[\s\S]*release-closeouts\//i,
+    /captured in immutable\s+[`\w/.-]*release-closeouts\//i,
+    /immutable v0\.9\.3 closeout archive/i,
+    /immutable prepared\/pending source record/i,
+  ];
+  for (const [label, text] of [["README.md", readme], ["ROADMAP.md", roadmap], ["RELEASING.md", releasing]] as const) {
+    for (const pattern of unsupportedArchiveWording) {
+      assert.doesNotMatch(text, pattern, `${label} must not call a versioned closeout archive immutable`);
+    }
+  }
 
   for (const phrase of [
     "runtimeVersion",

@@ -8,16 +8,16 @@ Synod installs a persistent, reviewed advisor loop for Codex projects. The selec
 
 [Open the interactive trace](https://htmlpreview.github.io/?https://github.com/ivand890/synod/blob/main/docs/synod/synod-cycle.html).
 
-The public `v0.9.4` release is verified at tag commit
-`f116a38acffb86c752f6e5c3f8013407ecfea267`. Its immutable source and
-post-publication evidence is archived in
+The public `v0.9.4` release is verified at signed tag commit
+`f116a38acffb86c752f6e5c3f8013407ecfea267`; its matching GitHub Release is
+externally immutable. Post-publication evidence is recorded in the versioned
 [`release-closeouts/v0.9.4.json`](release-closeouts/v0.9.4.json). The prior
-`v0.9.3` evidence remains immutable in
+`v0.9.3` evidence remains recorded in the versioned
 [`release-closeouts/v0.9.3.json`](release-closeouts/v0.9.3.json), and the root
 [`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) records the same verified
 public v0.9.4 evidence. The phase-2 live verifier runs on the protected
-closeout PR, not the tag workflow; the tag workflow validates only the
-immutable prepared/pending source record before publication.
+closeout PR, not the tag workflow; the tag workflow validates only the strict
+prepared/pending source record before publication.
 
 ## Public release and source tree
 
