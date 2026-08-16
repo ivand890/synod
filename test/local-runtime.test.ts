@@ -680,6 +680,15 @@ test("concurrent cross-version installs cannot commit a downgrade", async () => 
   let releaseNewer: () => void = () => {};
   let reportNewerStarted: () => void = () => {};
   let olderInstallerStarted = false;
+  let resolveOlderLockAttempted: () => void = () => {};
+  const olderLockAttempted = new Promise<void>(resolve => {
+    let settled = false;
+    resolveOlderLockAttempted = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+  });
   const newerStarted = new Promise<void>(resolve => { reportNewerStarted = resolve; });
   const holdNewer = new Promise<void>(resolve => { releaseNewer = resolve; });
 
@@ -700,13 +709,19 @@ test("concurrent cross-version installs cannot commit a downgrade", async () => 
     async runPnpm(stageDirectory, context) {
       olderInstallerStarted = true;
       await fakePnpmInstall(stageDirectory, context);
+    },
+    lockOptions: {
+      now: () => {
+        resolveOlderLockAttempted();
+        return Date.now();
+      }
     }
   }).then(
     value => ({ value }),
     error => ({ error: asSynodError(error) })
   );
 
-  await new Promise(resolve => setTimeout(resolve, 75));
+  await olderLockAttempted;
   assert.equal(olderInstallerStarted, false);
   releaseNewer();
   await newer;

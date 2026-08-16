@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { nextReleaseTag } from "../scripts/next-release-tag.js";
 import {
@@ -28,6 +31,44 @@ const archivedCloseoutPath = new URL("../release-closeouts/v0.9.3.json", import.
 const gifScriptPath = new URL("../scripts/capture-synod-cycle-gif.sh", import.meta.url);
 const cyclePath = new URL("../docs/synod/synod-cycle.html", import.meta.url);
 const cycleGifPath = new URL("../docs/synod/assets/synod-cycle-loop.gif", import.meta.url);
+
+function gifValidatorSource(script: string): string {
+  const commandStart = script.indexOf('node --input-type=module - "$gif_path"');
+  assert.ok(commandStart >= 0, "GIF validator command must be present");
+  const heredocStart = script.indexOf("<<'NODE'\n", commandStart);
+  assert.ok(heredocStart >= 0, "GIF validator heredoc must be present");
+  const sourceStart = heredocStart + "<<'NODE'\n".length;
+  const sourceEnd = script.indexOf("\nNODE", sourceStart);
+  assert.ok(sourceEnd >= 0, "GIF validator heredoc must be terminated");
+  return script.slice(sourceStart, sourceEnd);
+}
+
+function gifComment(payload: Buffer): Buffer {
+  const chunks: Uint8Array[] = [Buffer.from([0x21, 0xfe])];
+  for (let offset = 0; offset < payload.length; offset += 255) {
+    const block = payload.subarray(offset, offset + 255);
+    chunks.push(Buffer.from([block.length]), block);
+  }
+  chunks.push(Buffer.from([0x00]));
+  return Buffer.concat(chunks);
+}
+
+function syntheticGif(frameCount: number, commentPayload = Buffer.alloc(100_000, 0x7f)): Buffer {
+  const chunks: Buffer[] = [Buffer.from("GIF89a", "ascii")];
+  const logicalScreen = Buffer.alloc(7);
+  logicalScreen.writeUInt16LE(1120, 0);
+  logicalScreen.writeUInt16LE(622, 2);
+  chunks.push(logicalScreen, gifComment(commentPayload));
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    chunks.push(Buffer.from([
+      0x21, 0xf9, 0x04, 0x00, 0x21, 0x00, 0x00, 0x00,
+      0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+      0x02, 0x02, 0x44, 0x01, 0x00
+    ]));
+  }
+  chunks.push(Buffer.from([0x3b]));
+  return Buffer.concat(chunks);
+}
 
 test("Git dependency build lifecycles do not require pnpm or Corepack", async () => {
   const packageJson = parseJson(await readFile(packagePath, "utf8"));
@@ -706,6 +747,7 @@ test("public closeout verifier validates the exact post-publication record befor
 
 test("cycle GIF capture is a dependency-free deterministic contract", async () => {
   const script = await readFile(gifScriptPath, "utf8");
+  const validator = gifValidatorSource(script);
   assert.match(script, /^#!\/usr\/bin\/env bash/m);
   assert.match(script, /CHROME_BIN/);
   assert.match(script, /FFMPEG_BIN/);
@@ -717,8 +759,15 @@ test("cycle GIF capture is a dependency-free deterministic contract", async () =
   assert.match(script, /correction_steps=\(/);
   assert.match(script, /normalFrames < 1 \|\| correctionFrames < 1/);
   assert.match(script, /--dump-dom/);
-  assert.match(script, /bytes\[index \+ 7\] !== 0x00/);
-  assert.match(script, /bytes\[index \+ 8\] !== 0x2c && bytes\[index \+ 8\] !== 0x21/);
+  assert.match(validator, /requireBytes/);
+  assert.match(validator, /skipSubBlocks/);
+  assert.match(validator, /pendingGce/);
+  assert.match(validator, /image descriptor has no preceding valid GCE/);
+  assert.match(validator, /multiple pending GCE blocks/);
+  assert.match(validator, /unknown GIF extension label/);
+  assert.match(validator, /unknown GIF block marker/);
+  assert.match(validator, /GIF trailer must be the final byte/);
+  assert.doesNotMatch(validator, /for \(let index = 0; index \+ 8 < bytes\.length; index \+= 1\)/);
   assert.match(script, /gif-capture-sentinel/);
   assert.match(script, /normalHashes/);
   assert.match(script, /correctionHashes/);
@@ -733,6 +782,34 @@ test("cycle GIF capture is a dependency-free deterministic contract", async () =
   assert.ok(correctionSteps);
   assert.match(normalSteps, /(?:^|\s)"done"(?:\s|$)/);
   assert.match(correctionSteps, /(?:^|\s)"done"(?:\s|$)/);
+
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-gif-validator-test-"));
+  try {
+    const validPath = path.join(directory, "valid.gif");
+    const markerLikePath = path.join(directory, "marker-like.gif");
+    await writeFile(validPath, syntheticGif(33));
+    const valid = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-", validPath, "33", "13", "20"],
+      { input: validator, encoding: "utf8" }
+    );
+    assert.equal(valid.status, 0, valid.stderr);
+
+    const markerLikePayload = Buffer.concat([
+      Buffer.from([0x21, 0xf9, 0x04, 0x00, 0x21, 0x00, 0x00, 0x2c]),
+      Buffer.alloc(100_000, 0x7f)
+    ]);
+    await writeFile(markerLikePath, syntheticGif(0, markerLikePayload));
+    const markerLike = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-", markerLikePath, "1", "1", "1"],
+      { input: validator, encoding: "utf8" }
+    );
+    assert.notEqual(markerLike.status, 0);
+    assert.match(markerLike.stderr, /expected 1 frames, found 0/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("Synod cycle visualizer documents the executable lease and wait boundaries", async () => {

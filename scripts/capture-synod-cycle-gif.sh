@@ -233,18 +233,108 @@ const normalFrames = Number(normalText);
 const correctionFrames = Number(correctionText);
 const bytes = readFileSync(gifPath);
 if (bytes.subarray(0, 6).toString("ascii") !== "GIF89a") throw new Error("capture is not GIF89a");
+if (bytes.length < 13) throw new Error("truncated GIF header/LSD");
 if (bytes.readUInt16LE(6) !== 1120 || bytes.readUInt16LE(8) !== 622) throw new Error("capture must be 1120x622");
+
+const fail = message => { throw new Error(message); };
+const requireBytes = (offset, length, label) => {
+  if (!Number.isInteger(offset) || !Number.isInteger(length) || offset < 0 || length < 0 || offset + length > bytes.length) {
+    fail(`truncated ${label}`);
+  }
+};
+const readUint16 = (offset, label) => {
+  requireBytes(offset, 2, label);
+  return bytes[offset] | (bytes[offset + 1] << 8);
+};
+const colorTableBytes = packed => 3 * (2 ** ((packed & 0x07) + 1));
+const knownExtensionLabels = new Set([0x01, 0xfe, 0xff]);
+const skipSubBlocks = (start, label) => {
+  let offset = start;
+  while (true) {
+    requireBytes(offset, 1, `${label} size`);
+    const length = bytes[offset];
+    offset += 1;
+    if (length === 0) return offset;
+    requireBytes(offset, length, label);
+    offset += length;
+  }
+};
+
+requireBytes(0, 13, "GIF header/LSD");
+let offset = 13;
+const logicalScreenPacked = bytes[10];
+if ((logicalScreenPacked & 0x80) !== 0) {
+  const tableLength = colorTableBytes(logicalScreenPacked);
+  requireBytes(offset, tableLength, "global color table");
+  offset += tableLength;
+}
 let frames = 0;
 let durationCentiseconds = 0;
-for (let index = 0; index + 8 < bytes.length; index += 1) {
-  if (bytes[index] !== 0x21 || bytes[index + 1] !== 0xf9 || bytes[index + 2] !== 0x04) continue;
-  if (bytes[index + 7] !== 0x00
-    || (bytes[index + 8] !== 0x2c && bytes[index + 8] !== 0x21)) continue;
-  frames += 1;
-  const delay = bytes.readUInt16LE(index + 4);
-  if (delay < 30 || delay > 36) throw new Error(`unexpected frame delay: ${delay}`);
-  durationCentiseconds += delay;
+let pendingGce;
+let sawTrailer = false;
+while (offset < bytes.length) {
+  const marker = bytes[offset];
+  offset += 1;
+  if (marker === 0x3b) {
+    if (pendingGce) fail("GCE is not followed by an image descriptor");
+    if (offset !== bytes.length) fail("GIF trailer must be the final byte");
+    sawTrailer = true;
+    break;
+  }
+  if (marker === 0x21) {
+    requireBytes(offset, 1, "extension label");
+    const label = bytes[offset];
+    offset += 1;
+    if (label === 0xf9) {
+      if (pendingGce) fail("multiple pending GCE blocks");
+      requireBytes(offset, 1, "GCE block size");
+      if (bytes[offset] !== 0x04) fail("GCE block size must be 4");
+      offset += 1;
+      requireBytes(offset, 5, "GCE data");
+      const packed = bytes[offset];
+      if ((packed & 0xe0) !== 0) fail("GCE reserved bits are set");
+      offset += 1;
+      const delay = readUint16(offset, "GCE delay");
+      offset += 2;
+      offset += 1;
+      if (bytes[offset] !== 0x00) fail("GCE terminator is missing");
+      offset += 1;
+      pendingGce = { delay };
+    } else {
+      if (!knownExtensionLabels.has(label)) fail(`unknown GIF extension label: 0x${label.toString(16)}`);
+      if (pendingGce) fail("GCE must be followed immediately by an image descriptor");
+      offset = skipSubBlocks(offset, `extension 0x${label.toString(16)}`);
+    }
+    continue;
+  }
+  if (marker === 0x2c) {
+    if (!pendingGce) fail("image descriptor has no preceding valid GCE");
+    requireBytes(offset, 9, "image descriptor");
+    const width = readUint16(offset + 4, "image width");
+    const height = readUint16(offset + 6, "image height");
+    if (width === 0 || height === 0) fail("image descriptor dimensions must be nonzero");
+    const imagePacked = bytes[offset + 8];
+    offset += 9;
+    if ((imagePacked & 0x80) !== 0) {
+      const tableLength = colorTableBytes(imagePacked);
+      requireBytes(offset, tableLength, "local color table");
+      offset += tableLength;
+    }
+    requireBytes(offset, 1, "LZW minimum code size");
+    const lzwMinimumCodeSize = bytes[offset];
+    offset += 1;
+    if (lzwMinimumCodeSize < 2 || lzwMinimumCodeSize > 8) fail("invalid LZW minimum code size");
+    offset = skipSubBlocks(offset, "image data");
+    const { delay } = pendingGce;
+    if (delay < 30 || delay > 36) throw new Error(`unexpected frame delay: ${delay}`);
+    frames += 1;
+    durationCentiseconds += delay;
+    pendingGce = undefined;
+    continue;
+  }
+  fail(`unknown GIF block marker: 0x${marker.toString(16)}`);
 }
+if (!sawTrailer) fail("GIF trailer is missing");
 if (frames !== expectedFrames) throw new Error(`expected ${expectedFrames} frames, found ${frames}`);
 if (normalFrames < 1 || correctionFrames < 1) throw new Error("normal and correction scenarios are both required");
 if (bytes.at(-1) !== 0x3b) throw new Error("GIF trailer is missing");

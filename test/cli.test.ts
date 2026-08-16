@@ -7,7 +7,7 @@ import test from "node:test";
 import { WARNING_CODES, baseDiagnostics } from "../src/contracts.js";
 import { ERROR_CODES, asSynodError } from "../src/errors.js";
 import { run } from "../src/cli.js";
-import { parseLeaseArgs, parseProposalArgs, parseStatusArgs, parseTaskArgs, parseWorktreeArgs } from "../src/command-options.js";
+import { parseDelegateArgs, parseLeaseArgs, parseProposalArgs, parseStatusArgs, parseTaskArgs, parseWorktreeArgs } from "../src/command-options.js";
 import { initProject } from "../src/lifecycle.js";
 import { packageName, packageVersion } from "../src/package.js";
 
@@ -351,6 +351,25 @@ test("wait parsing requires a task or thread and rejects out-of-range fallback i
     assert.equal(status, 1);
     assert.equal(envelope.error.code, ERROR_CODES.WAIT_INVALID);
   }
+});
+
+test("delegate timeout and poll options require explicit waiting", () => {
+  for (const args of [
+    ["start", "T-001", "--timeout-seconds", "10"],
+    ["start", "T-001", "--poll-interval-ms", "200"]
+  ]) {
+    assert.throws(
+      () => parseDelegateArgs(args),
+      error => error instanceof Error
+        && (error as Error & { code?: string }).code === ERROR_CODES.WAIT_INVALID
+    );
+  }
+  const parsed = parseDelegateArgs([
+    "start", "T-001", "--timeout-seconds", "10", "--poll-interval-ms", "200", "--wait"
+  ]);
+  assert.equal("help" in parsed ? false : parsed.wait, true);
+  assert.equal("help" in parsed ? undefined : parsed.timeoutMs, 10_000);
+  assert.equal("help" in parsed ? undefined : parsed.pollIntervalMs, 200);
 });
 
 test("typed task-next and proposal-submit parsing reject copied transition fences", () => {

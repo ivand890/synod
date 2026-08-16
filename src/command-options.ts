@@ -596,6 +596,8 @@ export function parseDelegateArgs(args: string[]): DelegateCommandOptions | Help
     timeoutMs: 5 * 60_000,
     pollIntervalMs: 1_000
   };
+  let timeoutSpecified = false;
+  let pollIntervalSpecified = false;
   for (let index = 2; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg) continue;
@@ -622,12 +624,14 @@ export function parseDelegateArgs(args: string[]): DelegateCommandOptions | Help
     else if (arg === "--ttl-seconds") options.ttlSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
     else if (arg === "--heartbeat-seconds") options.heartbeatIntervalSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
     else if (arg === "--timeout-seconds") {
+      timeoutSpecified = true;
       const seconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
       if (!Number.isSafeInteger(seconds) || seconds <= 0 || seconds > 3_600) {
         throw new SynodError(ERROR_CODES.WAIT_INVALID, "Delegate wait timeout must be an integer from 1 through 3600 seconds.");
       }
       options.timeoutMs = seconds * 1_000;
     } else {
+      pollIntervalSpecified = true;
       const interval = /^\d+$/.test(value) ? Number(value) : Number.NaN;
       if (!Number.isSafeInteger(interval) || interval < 100 || interval > 5_000) {
         throw new SynodError(ERROR_CODES.WAIT_INVALID, "Delegate wait poll interval must be an integer from 100 through 5000 milliseconds.");
@@ -635,6 +639,9 @@ export function parseDelegateArgs(args: string[]): DelegateCommandOptions | Help
       options.pollIntervalMs = interval;
     }
     index += 1;
+  }
+  if (!options.wait && (timeoutSpecified || pollIntervalSpecified)) {
+    throw new SynodError(ERROR_CODES.WAIT_INVALID, "Delegate wait timeout and poll options require --wait.");
   }
   for (const [name, value] of [
     ["--reservation-ttl-seconds", options.reservationTtlSeconds],
