@@ -28,7 +28,8 @@ const productPath = new URL("../PRODUCT.md", import.meta.url);
 const releasingPath = new URL("../RELEASING.md", import.meta.url);
 const closeoutPath = new URL("../RELEASE-CLOSEOUT.json", import.meta.url);
 const archivedCloseoutPath = new URL("../release-closeouts/v0.9.3.json", import.meta.url);
-const archivedCurrentCloseoutPath = new URL("../release-closeouts/v0.9.4.json", import.meta.url);
+const archivedPreviousCloseoutPath = new URL("../release-closeouts/v0.9.4.json", import.meta.url);
+const archivedCurrentCloseoutPath = new URL("../release-closeouts/v0.9.5.json", import.meta.url);
 const gifScriptPath = new URL("../scripts/capture-synod-cycle-gif.sh", import.meta.url);
 const cyclePath = new URL("../docs/synod/synod-cycle.html", import.meta.url);
 const cycleGifPath = new URL("../docs/synod/assets/synod-cycle-loop.gif", import.meta.url);
@@ -196,8 +197,8 @@ test("installed-package smoke covers the production-shaped release contract", as
   assert.match(packageSmoke, /const installedTemplateVersion = "0\.0\.1"/);
 });
 
-test("prepared 0.9.5 candidate, verified 0.9.4 evidence, and product/docs contract stay explicit", async () => {
-  const [packageText, changelog, roadmap, readme, product, releasing, archivedCloseoutText, closeoutText, archivedCurrentCloseoutText, packageSmoke] = await Promise.all([
+test("verified 0.9.5 evidence and product/docs contract stay explicit", async () => {
+  const [packageText, changelog, roadmap, readme, product, releasing, archivedCloseoutText, closeoutText, archivedCurrentCloseoutText, packageSmoke, archivedPreviousCloseoutText] = await Promise.all([
     readFile(packagePath, "utf8"),
     readFile(changelogPath, "utf8"),
     readFile(roadmapPath, "utf8"),
@@ -207,12 +208,14 @@ test("prepared 0.9.5 candidate, verified 0.9.4 evidence, and product/docs contra
     readFile(archivedCloseoutPath, "utf8"),
     readFile(closeoutPath, "utf8"),
     readFile(archivedCurrentCloseoutPath, "utf8"),
-    readFile(packageSmokePath, "utf8")
+    readFile(packageSmokePath, "utf8"),
+    readFile(archivedPreviousCloseoutPath, "utf8")
   ]);
   const packageJson = parseJson(packageText);
   const closeout = parseJson(archivedCloseoutText);
   const currentCloseout = parseJson(closeoutText);
   const archivedCurrentCloseout = parseJson(archivedCurrentCloseoutText);
+  const archivedPreviousCloseout = parseJson(archivedPreviousCloseoutText);
   assert.ok(isRecord(packageJson));
   assert.ok(isRecord(closeout));
   assert.equal(packageJson.version, "0.9.5");
@@ -268,77 +271,62 @@ test("prepared 0.9.5 candidate, verified 0.9.4 evidence, and product/docs contra
   assert.deepEqual((closeout.documentation as Record<string, unknown>).paths, ["README.md", "ROADMAP.md", "RELEASING.md"]);
 
   assert.ok(isRecord(currentCloseout));
-  assert.equal(currentCloseout.schemaVersion, 1);
-  assert.equal(currentCloseout.package, "@ivand890/synod");
-  assert.equal(currentCloseout.version, "0.9.5");
-  assert.equal(currentCloseout.tag, "v0.9.5");
-  assert.deepEqual(currentCloseout.sourcePreparation, {
-    status: "prepared",
-    mainAncestorRequired: true,
-    localPackageSmoke: {
-      artifact: "local tarball",
-      command: "pnpm test:package",
-      status: "pending",
-      version: "0.9.5",
-    },
-  });
-  assert.deepEqual(currentCloseout.publicVerification, { status: "pending" });
-  assert.deepEqual(currentCloseout.documentation, {
-    status: "pending",
-    paths: ["README.md", "ROADMAP.md", "RELEASING.md"],
-    rule: "Advance these paths together only when publicVerification is verified.",
-  });
+  assert.equal(closeoutText, archivedCurrentCloseoutText, "root and versioned 0.9.5 closeouts must be byte-identical");
+  assert.deepEqual(currentCloseout, archivedCurrentCloseout);
+  assert.ok(isRecord(archivedPreviousCloseout));
+  assert.equal(archivedPreviousCloseout.version, "0.9.4");
+  assert.equal(archivedPreviousCloseout.tag, "v0.9.4");
 
   assert.ok(isRecord(archivedCurrentCloseout));
   assert.equal(archivedCurrentCloseout.schemaVersion, 1);
   assert.equal(archivedCurrentCloseout.package, "@ivand890/synod");
-  assert.equal(archivedCurrentCloseout.version, "0.9.4");
-  assert.equal(archivedCurrentCloseout.tag, "v0.9.4");
+  assert.equal(archivedCurrentCloseout.version, "0.9.5");
+  assert.equal(archivedCurrentCloseout.tag, "v0.9.5");
   assert.deepEqual(archivedCurrentCloseout.sourcePreparation, {
     status: "closed",
-    tagSha: "f116a38acffb86c752f6e5c3f8013407ecfea267",
+    tagSha: "494f1ebd85b1c51dde522e7a7ec6e334dadc4e30",
     mainAncestorRequired: true,
     localPackageSmoke: {
       artifact: "local tarball",
       command: "pnpm test:package",
       status: "passed",
-      version: "0.9.4",
+      version: "0.9.5",
     },
   });
   const currentPublicVerification = archivedCurrentCloseout.publicVerification as Record<string, unknown>;
   assert.deepEqual(currentPublicVerification.npm, {
     package: "@ivand890/synod",
-    version: "0.9.4",
-    gitHead: "f116a38acffb86c752f6e5c3f8013407ecfea267",
-    latest: "0.9.4",
+    version: "0.9.5",
+    gitHead: "494f1ebd85b1c51dde522e7a7ec6e334dadc4e30",
+    latest: "0.9.5",
   });
   assert.deepEqual(currentPublicVerification.githubRelease, {
-    tag: "v0.9.4",
-    url: "https://github.com/ivand890/synod/releases/tag/v0.9.4",
-    publishedAt: "2026-08-16T02:36:20Z",
+    tag: "v0.9.5",
+    url: "https://github.com/ivand890/synod/releases/tag/v0.9.5",
+    publishedAt: "2026-08-16T04:02:34Z",
     isDraft: false,
     isPrerelease: false,
     isImmutable: true,
     isLatest: true,
   });
   assert.deepEqual(currentPublicVerification.registryInstalledPackage, {
-    spec: "@ivand890/synod@0.9.4",
+    spec: "@ivand890/synod@0.9.5",
     dist: {
-      integrity: "sha512-21Y4vRcUHFRaSgotBdBBYhbJ7/cHRueYJZA5/VdcwF6a5h6ANO3UpwxRvwWWObkTni1uVGxVVVXvBwkQTJuxLA==",
+      integrity: "sha512-+yFgEyv8ylEWt4+MtBP/o+YumrVCSljnk5QyIrMqLxGRcZE7ICBRQoj3msk9e+fMW+S9vcGTFZrf1TXXiS3OQQ==",
       attestations: {
-        url: "https://registry.npmjs.org/-/npm/v1/attestations/@ivand890%2fsynod@0.9.4",
+        url: "https://registry.npmjs.org/-/npm/v1/attestations/@ivand890%2fsynod@0.9.5",
         provenance: { predicateType: "https://slsa.dev/provenance/v1" },
       },
     },
-    consumerCommand: "pnpm add --ignore-scripts --save-exact @ivand890/synod@0.9.4",
-    verification: { command: "pnpm exec synod --version", status: "passed", version: "0.9.4" },
+    consumerCommand: "pnpm add --ignore-scripts --save-exact @ivand890/synod@0.9.5",
+    verification: { command: "pnpm exec synod --version", status: "passed", version: "0.9.5" },
     status: "passed",
-    version: "0.9.4",
+    version: "0.9.5",
   });
   assert.deepEqual(currentPublicVerification.publicCli, {
-    command: "pnpm dlx @ivand890/synod@0.9.4 --version",
+    command: "pnpm dlx @ivand890/synod@0.9.5 --version",
     status: "passed",
-    version: "0.9.4",
+    version: "0.9.5",
   });
   assert.deepEqual(archivedCurrentCloseout.documentation, {
     status: "verified",
@@ -354,13 +342,13 @@ test("prepared 0.9.5 candidate, verified 0.9.4 evidence, and product/docs contra
   assert.match(changelog, /\[0\.9\.5\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.4\.\.\.v0\.9\.5/);
   assert.match(changelog, /\[0\.9\.4\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.3\.\.\.v0\.9\.4/);
   assert.match(changelog, /\[0\.9\.3\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.2\.\.\.v0\.9\.3/);
-  assert.match(roadmap, /Current public release: `v0\.9\.4`/);
-  assert.match(roadmap, /Current source release: `v0\.9\.4`/);
-  assert.match(roadmap, /Last verified public release at this update: `v0\.9\.4`/);
-  assert.match(roadmap, /versioned `release-closeouts\/v0\.9\.4\.json`/);
+  assert.match(roadmap, /Current public release: `v0\.9\.5`/);
+  assert.match(roadmap, /Current source release: `v0\.9\.5`/);
+  assert.match(roadmap, /Last verified public release at this update: `v0\.9\.5`/);
+  assert.match(roadmap, /versioned `release-closeouts\/v0\.9\.5\.json`/);
+  assert.match(roadmap, /prior `v0\.9\.4`[\s\S]*release-closeouts\/v0\.9\.4\.json/);
   assert.match(roadmap, /signed tag and GitHub Release `isImmutable: true` provide the external\s+release anchors/);
-  assert.match(roadmap, /release-closeouts\/v0\.9\.3\.json/);
-  assert.match(roadmap, /the root\s+`RELEASE-CLOSEOUT\.json` is the prepared\/pending\s+`v0\.9\.5` candidate; it has no public verification/);
+  assert.match(roadmap, /the root\s+`RELEASE-CLOSEOUT\.json` records the same closed and\s+verified `v0\.9\.5` evidence/);
   assert.doesNotMatch(roadmap, /public latest remains/);
   assert.match(roadmap, /Status: delivered and publicly verified/);
   assert.doesNotMatch(roadmap, /last verified public package remains `v0\.9\.2`/i);
@@ -370,7 +358,11 @@ test("prepared 0.9.5 candidate, verified 0.9.4 evidence, and product/docs contra
   assert.match(roadmap, /public and pinned `v0\.9\.4` runtimes/);
   assert.match(roadmap, /public\/pinned `v0\.9\.4` `doctor`\s+support expression/);
   assert.doesNotMatch(roadmap, /unshipped|unreleased/);
-  assert.match(roadmap, /v0\.9\.4 release requires Node `>=22`/);
+  assert.match(roadmap, /v0\.9\.5 release requires Node `>=22`/);
+  assert.match(roadmap, /## v0\.9\.5 — Status bootstrap hotfix/);
+  assert.match(roadmap, /SYN-095-STATUS-BOOTSTRAP-024/);
+  assert.match(roadmap, /`--task`, `--active-only`, and\s+`--changed-since-checkpoint`/);
+  assert.match(roadmap, /every valid numeric\s+`0\.148\.x` variant/);
   for (const taskId of [
     "SYN-094-REVIEW-001",
     "SYN-094-HOST-002",
@@ -391,12 +383,14 @@ test("prepared 0.9.5 candidate, verified 0.9.4 evidence, and product/docs contra
   assert.match(readme, /Public release and source tree/);
   assert.match(readme, /signed tag commit[\s\S]*externally immutable/);
   assert.match(readme, /Post-publication evidence is recorded in the versioned/);
-  assert.match(readme, /Post-publication evidence is recorded in the versioned[\s\S]*release-closeouts\/v0\.9\.4\.json/);
-  assert.match(readme, /public and pinned `@ivand890\/synod@0\.9\.4`/);
-  assert.match(readme, /root[\s\S]*RELEASE-CLOSEOUT\.json[\s\S]*prepared\/pending\s+`v0\.9\.5` candidate; it has no public verification/);
-  assert.match(readme, /The v0\.9\.4 source surfaces include/);
-  assert.match(readme, /v0\.9\.4 release requires Node\.js `>=22`/);
-  assert.match(readme, /public\/pinned\s+`v0\.9\.4` `doctor` support expression/);
+  assert.match(readme, /Post-publication evidence is recorded in the versioned[\s\S]*release-closeouts\/v0\.9\.5\.json/);
+  assert.match(readme, /prior[\s\S]*release-closeouts\/v0\.9\.4\.json/);
+  assert.match(readme, /public and pinned `@ivand890\/synod@0\.9\.5`/);
+  assert.match(readme, /root[\s\S]*RELEASE-CLOSEOUT\.json[\s\S]*same verified[\s\S]*public v0\.9\.5 evidence/);
+  assert.match(readme, /The v0\.9\.5 source surfaces include/);
+  assert.match(readme, /0\.9\.5 hotfix makes each selector available[\s\S]*mixed selectors still\s+fail closed/);
+  assert.match(readme, /v0\.9\.5 release requires Node\.js `>=22`/);
+  assert.match(readme, /public\/pinned\s+`v0\.9\.5` `doctor` support expression/);
   assert.match(readme, /Known-good and exercised in CI: `0\.148\.0-alpha\.9`/);
   assert.doesNotMatch(readme, /candidate support expression `>=0\.142\.0 <0\.148\.0/);
   assert.match(readme, /synod task correct/);
@@ -428,6 +422,9 @@ test("prepared 0.9.5 candidate, verified 0.9.4 evidence, and product/docs contra
   assert.match(product, /injected\s+`HostDelegationAdapter`/);
   assert.match(product, /independent Git lanes/);
   assert.match(product, /execution\s+ownership/);
+  assert.match(product, /0\.9\.5 hotfix also makes the `--task`,\s+`--active-only`, and\s+`--changed-since-checkpoint` selectors/);
+  assert.match(product, /Node\.js `>=22`/);
+  assert.match(product, /numeric major and\s+minor are `0\.148`/);
 
   const lifecycle = "READY → reserve → read-only spawn → bind-driven ACTIVE → explicit write authorization → task-aware wait → proposal submit → REVIEW → ACCEPTED → VERIFIED → DONE";
   assert.ok(readme.includes(lifecycle), "README must show the lease-fenced executable lifecycle");
@@ -443,12 +440,12 @@ test("prepared 0.9.5 candidate, verified 0.9.4 evidence, and product/docs contra
   assert.match(readme, /only that recovery path reassigns a replacement thread/);
   assert.doesNotMatch(readme, /A correction repeats the reservation, read-only spawn/);
 
-  assert.match(releasing, /public `v0\.9\.4` source is anchored by signed tag commit/);
+  assert.match(releasing, /public `v0\.9\.5` source is anchored by signed tag commit/);
   assert.match(releasing, /externally immutable GitHub\s+Release \(`isImmutable: true`\)/);
-  assert.match(releasing, /signed tag commit\s+`f116a38acffb86c752f6e5c3f8013407ecfea267`/);
-  assert.match(releasing, /`release-closeouts\/v0\.9\.3\.json`/);
-  assert.match(releasing, /root\s+`RELEASE-CLOSEOUT\.json` is the prepared\/pending\s+`v0\.9\.5` candidate; it has no\s+public verification/);
-  assert.match(releasing, /prepared.*pending/);
+  assert.match(releasing, /signed tag commit\s+`494f1ebd85b1c51dde522e7a7ec6e334dadc4e30`/);
+  assert.match(releasing, /`release-closeouts\/v0\.9\.5\.json`/);
+  assert.match(releasing, /prior `v0\.9\.4` evidence[\s\S]*`release-closeouts\/v0\.9\.4\.json`/);
+  assert.match(releasing, /root\s+`RELEASE-CLOSEOUT\.json` records the same closed and verified public `v0\.9\.5`\s+evidence/);
   assert.doesNotMatch(releasing, /Public latest remains/);
   assert.doesNotMatch(releasing, /pre-tag candidate record/);
   assert.match(releasing, /registry-installed package result/);
@@ -507,13 +504,15 @@ test("prepared 0.9.5 candidate, verified 0.9.4 evidence, and product/docs contra
 });
 
 test("release closeout validation is strict across pre-tag and post-publication phases", async () => {
-  const [rootText, archivedText, archivedCurrentText] = await Promise.all([
+  const [rootText, archivedText, archivedPreviousText, archivedCurrentText] = await Promise.all([
     readFile(closeoutPath, "utf8"),
     readFile(archivedCloseoutPath, "utf8"),
+    readFile(archivedPreviousCloseoutPath, "utf8"),
     readFile(archivedCurrentCloseoutPath, "utf8"),
   ]);
   const root = parseJson(rootText);
   const archived = parseJson(archivedText);
+  const archivedPrevious = parseJson(archivedPreviousText);
   const archivedCurrent = parseJson(archivedCurrentText);
   const expected = {
     expectedPackage: "@ivand890/synod",
@@ -526,28 +525,35 @@ test("release closeout validation is strict across pre-tag and post-publication 
     expectedTag: "v0.9.4",
   } as const;
   assert.ok(isRecord(root) && isRecord(root.publicVerification));
-  assert.equal(root.publicVerification.status, "pending");
+  assert.equal(root.publicVerification.status, "verified");
   assert.ok(isRecord(root.sourcePreparation));
-  assert.equal(root.sourcePreparation.status, "prepared");
-  assert.equal(root.sourcePreparation.tagSha, undefined);
-  assert.deepEqual(validateReleaseCloseout(root, { phase: "pre-tag", ...expected }).phase, "pre-tag");
+  assert.equal(root.sourcePreparation.status, "closed");
+  assert.equal(root.sourcePreparation.tagSha, "494f1ebd85b1c51dde522e7a7ec6e334dadc4e30");
   assert.deepEqual(validateReleaseCloseout(root, {
-    phase: "tag",
+    phase: "post-publication",
     ...expected,
-    expectedTagSha: "0123456789abcdef0123456789abcdef01234567",
-  }).phase, "tag");
+    expectedTagSha: "494f1ebd85b1c51dde522e7a7ec6e334dadc4e30",
+  }).phase, "post-publication");
+  assert.deepEqual(validateReleaseCloseoutFile("release-closeouts/v0.9.5.json", {
+    phase: "post-publication",
+    ...expected,
+    expectedTagSha: "494f1ebd85b1c51dde522e7a7ec6e334dadc4e30",
+  }), {
+    phase: "post-publication",
+    package: "@ivand890/synod",
+    version: "0.9.5",
+    tag: "v0.9.5",
+    tagSha: "494f1ebd85b1c51dde522e7a7ec6e334dadc4e30",
+  });
+  assert.deepEqual(root, archivedCurrent);
+  assert.ok(isRecord(archivedPrevious));
+  assert.equal(archivedPrevious.version, "0.9.4");
+  assert.equal(archivedPrevious.tag, "v0.9.4");
   assert.deepEqual(validateReleaseCloseoutFile("release-closeouts/v0.9.4.json", {
     phase: "post-publication",
     ...published,
     expectedTagSha: "f116a38acffb86c752f6e5c3f8013407ecfea267",
-  }), {
-    phase: "post-publication",
-    package: "@ivand890/synod",
-    version: "0.9.4",
-    tag: "v0.9.4",
-    tagSha: "f116a38acffb86c752f6e5c3f8013407ecfea267",
-  });
-  assert.notDeepEqual(root, archivedCurrent);
+  }).version, "0.9.4");
   assert.deepEqual(validateReleaseCloseoutFile("release-closeouts/v0.9.3.json", {
     phase: "post-publication",
     expectedPackage: "@ivand890/synod",
@@ -599,8 +605,8 @@ test("release closeout validation is strict across pre-tag and post-publication 
   const verifiedFixture = clone(pendingFixture);
   assert.ok(isRecord(verifiedFixture));
   const verifiedTagSha = "abcdef0123456789abcdef0123456789abcdef01";
-  const archivedPublication = isRecord(archived) && isRecord(archived.publicVerification)
-    ? archived.publicVerification
+  const archivedPublication = isRecord(archivedCurrent) && isRecord(archivedCurrent.publicVerification)
+    ? archivedCurrent.publicVerification
     : undefined;
   assert.ok(isRecord(archivedPublication));
   const archivedNpm = archivedPublication.npm;
@@ -722,7 +728,7 @@ test("release closeout validation is strict across pre-tag and post-publication 
     error => error instanceof ReleaseCloseoutValidationError && /sourcePreparation\.tagSha/.test(error.message),
   );
 
-  const malformedPublication = clone(archived);
+  const malformedPublication = clone(archivedCurrent);
   assert.ok(isRecord(malformedPublication) && isRecord(malformedPublication.publicVerification));
   assert.ok(isRecord(malformedPublication.publicVerification.npm));
   malformedPublication.publicVerification.npm.gitHead = "0123456789abcdef0123456789abcdef01234567";
@@ -730,9 +736,9 @@ test("release closeout validation is strict across pre-tag and post-publication 
     () => validateReleaseCloseout(malformedPublication, {
       phase: "post-publication",
       expectedPackage: "@ivand890/synod",
-      expectedVersion: "0.9.3",
-      expectedTag: "v0.9.3",
-      expectedTagSha: "ddbcaf4953f1dd3f0ec5cb82ba6403b6e9699788",
+      expectedVersion: "0.9.5",
+      expectedTag: "v0.9.5",
+      expectedTagSha: "494f1ebd85b1c51dde522e7a7ec6e334dadc4e30",
     }),
     error => error instanceof ReleaseCloseoutValidationError && /publicVerification\.npm/.test(error.message),
   );
@@ -741,17 +747,17 @@ test("release closeout validation is strict across pre-tag and post-publication 
 test("public closeout comparisons fail closed on registry and GitHub mismatches", () => {
   const recordedNpm = {
     package: "@ivand890/synod",
-    version: "0.9.3",
-    gitHead: "ddbcaf4953f1dd3f0ec5cb82ba6403b6e9699788",
-    latest: "0.9.3",
-    integrity: "sha512-U9NagkGCOWXHQ3giKEBRaD87UGI6hwAn7Emd5sJwdhr6Qp10zdWHe+DGrNz1iSjkXzxczSzYd6RsivKwtQAa7w==",
-    attestationUrl: "https://registry.npmjs.org/-/npm/v1/attestations/@ivand890%2fsynod@0.9.3",
+    version: "0.9.5",
+    gitHead: "494f1ebd85b1c51dde522e7a7ec6e334dadc4e30",
+    latest: "0.9.5",
+    integrity: "sha512-+yFgEyv8ylEWt4+MtBP/o+YumrVCSljnk5QyIrMqLxGRcZE7ICBRQoj3msk9e+fMW+S9vcGTFZrf1TXXiS3OQQ==",
+    attestationUrl: "https://registry.npmjs.org/-/npm/v1/attestations/@ivand890%2fsynod@0.9.5",
     provenancePredicateType: "https://slsa.dev/provenance/v1",
   } as const;
   const recordedGitHub = {
-    tag: "v0.9.3",
-    url: "https://github.com/ivand890/synod/releases/tag/v0.9.3",
-    publishedAt: "2026-08-14T19:29:39Z",
+    tag: "v0.9.5",
+    url: "https://github.com/ivand890/synod/releases/tag/v0.9.5",
+    publishedAt: "2026-08-16T04:02:34Z",
     isDraft: false,
     isPrerelease: false,
     isImmutable: true,
@@ -774,24 +780,24 @@ test("public closeout verifier validates the exact post-publication record befor
   const commandRunner = (command: string, args: readonly string[]): string => {
     if (command === "npm") {
       return JSON.stringify({
-        version: "0.9.4",
-        gitHead: "f116a38acffb86c752f6e5c3f8013407ecfea267",
-        "dist-tags.latest": "0.9.4",
-        "dist.integrity": "sha512-21Y4vRcUHFRaSgotBdBBYhbJ7/cHRueYJZA5/VdcwF6a5h6ANO3UpwxRvwWWObkTni1uVGxVVVXvBwkQTJuxLA==",
+        version: "0.9.5",
+        gitHead: "494f1ebd85b1c51dde522e7a7ec6e334dadc4e30",
+        "dist-tags.latest": "0.9.5",
+        "dist.integrity": "sha512-+yFgEyv8ylEWt4+MtBP/o+YumrVCSljnk5QyIrMqLxGRcZE7ICBRQoj3msk9e+fMW+S9vcGTFZrf1TXXiS3OQQ==",
         "dist.attestations": {
-          url: "https://registry.npmjs.org/-/npm/v1/attestations/@ivand890%2fsynod@0.9.4",
+          url: "https://registry.npmjs.org/-/npm/v1/attestations/@ivand890%2fsynod@0.9.5",
           provenance: { predicateType: "https://slsa.dev/provenance/v1" },
         },
       });
     }
     if (command === "gh" && args[1] === "repos/ivand890/synod/releases/latest") {
-      return JSON.stringify({ tag_name: "v0.9.4" });
+      return JSON.stringify({ tag_name: "v0.9.5" });
     }
     if (command === "gh") {
       return JSON.stringify({
-        tag_name: "v0.9.4",
-        html_url: "https://github.com/ivand890/synod/releases/tag/v0.9.4",
-        published_at: "2026-08-16T02:36:20Z",
+        tag_name: "v0.9.5",
+        html_url: "https://github.com/ivand890/synod/releases/tag/v0.9.5",
+        published_at: "2026-08-16T04:02:34Z",
         draft: false,
         prerelease: false,
         immutable: true,
@@ -800,26 +806,26 @@ test("public closeout verifier validates the exact post-publication record befor
     if (command === "pnpm") {
       pnpmArgs.push([...args]);
       if (args[0] === "add") return "";
-      return "0.9.4\n";
+      return "0.9.5\n";
     }
     throw new Error(`unexpected command ${command} ${args.join(" ")}`);
   };
   try {
     const result = verifyPublicReleaseCloseout({
-      filePath: "release-closeouts/v0.9.4.json",
+      filePath: "release-closeouts/v0.9.5.json",
       expectedPackage: "@ivand890/synod",
-      expectedVersion: "0.9.4",
-      expectedTag: "v0.9.4",
-      expectedTagSha: "f116a38acffb86c752f6e5c3f8013407ecfea267",
+      expectedVersion: "0.9.5",
+      expectedTag: "v0.9.5",
+      expectedTagSha: "494f1ebd85b1c51dde522e7a7ec6e334dadc4e30",
       repository: "ivand890/synod",
       commandRunner,
     });
-    assert.equal(result.registryInstallVersion, "0.9.4");
-    assert.equal(result.publicCliVersion, "0.9.4");
+    assert.equal(result.registryInstallVersion, "0.9.5");
+    assert.equal(result.publicCliVersion, "0.9.5");
     assert.deepEqual(pnpmArgs, [
-      ["add", "--ignore-scripts", "--save-exact", "--registry", "https://registry.npmjs.org", "@ivand890/synod@0.9.4"],
+      ["add", "--ignore-scripts", "--save-exact", "--registry", "https://registry.npmjs.org", "@ivand890/synod@0.9.5"],
       ["--reporter=silent", "exec", "synod", "--version"],
-      ["--reporter=silent", "dlx", "--config.registry=https://registry.npmjs.org", "@ivand890/synod@0.9.4", "--version"],
+      ["--reporter=silent", "dlx", "--config.registry=https://registry.npmjs.org", "@ivand890/synod@0.9.5", "--version"],
     ]);
 
     const pendingDirectory = await mkdtemp(path.join(os.tmpdir(), "synod-pending-closeout-test-"));
@@ -850,7 +856,7 @@ test("public closeout verifier validates the exact post-publication record befor
           expectedPackage: "@ivand890/synod",
           expectedVersion: "0.9.5",
           expectedTag: "v0.9.5",
-          expectedTagSha: "f116a38acffb86c752f6e5c3f8013407ecfea267",
+          expectedTagSha: "494f1ebd85b1c51dde522e7a7ec6e334dadc4e30",
           repository: "ivand890/synod",
           commandRunner: () => { throw new Error("live command must not run for a pending record"); },
         }),
@@ -862,14 +868,14 @@ test("public closeout verifier validates the exact post-publication record befor
 
     assert.throws(
       () => verifyPublicReleaseCloseout({
-        filePath: "release-closeouts/v0.9.3.json",
+        filePath: "release-closeouts/v0.9.5.json",
         expectedPackage: "@ivand890/synod",
-        expectedVersion: "0.9.3",
-        expectedTag: "v0.9.3",
-        expectedTagSha: "ddbcaf4953f1dd3f0ec5cb82ba6403b6e9699788",
+        expectedVersion: "0.9.5",
+        expectedTag: "v0.9.5",
+        expectedTagSha: "494f1ebd85b1c51dde522e7a7ec6e334dadc4e30",
         repository: "ivand890/synod",
         commandRunner: (command, args) => {
-          if (command === "npm") return JSON.stringify({ version: "0.9.3", gitHead: "wrong", "dist-tags.latest": "0.9.3", "dist.integrity": "wrong", "dist.attestations": { url: "wrong", provenance: { predicateType: "wrong" } } });
+          if (command === "npm") return JSON.stringify({ version: "0.9.5", gitHead: "wrong", "dist-tags.latest": "0.9.5", "dist.integrity": "wrong", "dist.attestations": { url: "wrong", provenance: { predicateType: "wrong" } } });
           throw new Error(`live command must stop after npm mismatch: ${command} ${args.join(" ")}`);
         },
       }),

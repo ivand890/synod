@@ -32,15 +32,21 @@ separation between host, App Server, and canonical wait authority. The strict
 shapes: they do not add persistence, runners, process ownership, spawn/resume
 observation, or an execution plane.
 
-The public `v0.9.4` release adds an injected
+The public `v0.9.5` release retains the v0.9.4 injected
 `HostDelegationAdapter` for host-owned spawn identity, bind authorization, wait
 observation, and lease liveness. Without that adapter, the standalone CLI fails
 closed or returns an incomplete handoff; Synod never claims execution
 ownership. Proposal evidence also keeps independent Git lanes:
 `proposalAdded`, `gitTracked`, `staged`, and `committed` are separate facts,
-not one completion signal. These are public v0.9.4 surfaces; future source
-increments remain unavailable to a pinned runtime until a corresponding release
-and explicit project runtime upgrade.
+not one completion signal. The 0.9.5 hotfix also makes the `--task`,
+`--active-only`, and `--changed-since-checkpoint` selectors work through an
+initialized project-local bootstrap while incompatible selector combinations
+still fail closed. The public release requires Node.js `>=22`, and its Codex
+support expression accepts every valid semantic version whose numeric major and
+minor are `0.148`, including stable, patch, prerelease, and build-metadata
+variants; `0.148.0-alpha.9` is known-good. Future source increments remain
+unavailable to a pinned runtime until a corresponding release and explicit
+project runtime upgrade.
 
 Human-owned Markdown under `docs/synod/` is local/private supporting context,
 not canonical orchestration state, Git evidence, or release proof. The five
