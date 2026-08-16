@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 No unreleased changes.
 
+## [0.9.5] - 2026-08-15
+
+### Fixed
+
+- Project-local `status` now accepts the `--task`, `--active-only`, and
+  `--changed-since-checkpoint` selectors while preserving fail-closed selector
+  combinations.
+
 ## [0.9.4] - 2026-08-15
 
 ### Changed
@@ -265,7 +273,8 @@ No unreleased changes.
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.9.4...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.9.5...HEAD
+[0.9.5]: https://github.com/ivand890/synod/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/ivand890/synod/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/ivand890/synod/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/ivand890/synod/compare/v0.9.1...v0.9.2

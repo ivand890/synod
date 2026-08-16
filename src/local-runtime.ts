@@ -14,7 +14,7 @@ import {
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-import { parseBudgetArgs, parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseRotationArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs, parseWorktreeArgs } from "./command-options.js";
+import { parseBudgetArgs, parseBundleArgs, parseCheckpointArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseRotationArgs, parseStatusArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs, parseWorktreeArgs } from "./command-options.js";
 import { compareVersions, parseVersion } from "./compatibility.js";
 import { ERROR_CODES, SynodError } from "./errors.js";
 import { inspectPath, pathType, resolveProjectPath, unsafeAncestor } from "./filesystem.js";
@@ -607,7 +607,7 @@ function lifecycleOptions(command: string, args: string[]) {
     return parseLifecycleArgs(lifecycleArgs, { allowDryRun: true, allowForce: true });
   }
   if (command === "status") {
-    return parseLifecycleArgs(lifecycleArgs, { allowExplain: true });
+    return parseStatusArgs(lifecycleArgs);
   }
   return parseLifecycleArgs(lifecycleArgs);
 }

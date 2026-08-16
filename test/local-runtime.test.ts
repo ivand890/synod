@@ -243,6 +243,45 @@ test("status explain selects and delegates to the pinned project runtime", async
   });
 });
 
+test("project-local status bootstrap delegates every selector and rejects mixed selectors", async () => {
+  const callerDirectory = await temporaryProject();
+  const projectDirectory = await temporaryProject();
+  await installLocalRuntime(projectDirectory, { runPnpm: fakePnpmInstall });
+
+  const selectors = [
+    ["--task", " t-select "],
+    ["--active-only"],
+    ["--changed-since-checkpoint"]
+  ];
+  for (const selector of selectors) {
+    let delegated: { version: string; args: string[] } | undefined;
+    const args = ["status", projectDirectory, ...selector, "--json"];
+    const result = await prepareLocalRuntime(args, {
+      cwd: callerDirectory,
+      currentRuntime: async () => false,
+      executor(localRuntime, delegatedArgs) {
+        delegated = { version: localRuntime.descriptor.runtimeVersion, args: delegatedArgs };
+        return 0;
+      }
+    });
+
+    assert.equal(result.action, "delegate");
+    assert.equal(result.targetDirectory, projectDirectory);
+    assert.deepEqual(delegated, { version: packageVersion, args });
+  }
+
+  for (const selectorArgs of [
+    ["--task", "T-SELECT", "--active-only"],
+    ["--active-only", "--changed-since-checkpoint"],
+    ["--task", "T-SELECT", "--explain"]
+  ]) {
+    await assert.rejects(
+      prepareLocalRuntime(["status", projectDirectory, ...selectorArgs, "--json"], { cwd: callerDirectory }),
+      error => error instanceof SynodError && error.code === ERROR_CODES.UNKNOWN_OPTION
+    );
+  }
+});
+
 test("handoff selects and delegates to the pinned project runtime", async () => {
   const callerDirectory = await temporaryProject();
   const projectDirectory = await temporaryProject();
