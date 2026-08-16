@@ -763,8 +763,8 @@ process.stdout.write(JSON.stringify({ events: validated.length, rejectedExtra })
   const divergentState = jsonRecord(readFileSync(divergentStatePath, "utf8"), "divergent state");
   const divergentRuntimeContent = readFileSync(divergentRuntimePath, "utf8");
   const divergentRuntime = jsonRecord(divergentRuntimeContent, "divergent runtime");
-  const installedTemplateVersion = expectedVersion === "0.9.3" ? "0.9.2" : "0.0.1";
-  const divergentRuntimeVersion = expectedVersion === "0.9.3" ? "0.9.4" : "0.0.2";
+  const installedTemplateVersion = "0.0.1";
+  const divergentRuntimeVersion = "0.0.2";
   try {
     divergentManifest.templateVersion = installedTemplateVersion;
     divergentRuntime.runtimeVersion = divergentRuntimeVersion;

@@ -33,6 +33,40 @@ export interface ThreadStatusAdapter {
   getDiagnostics?(): AppServerDiagnostics | Record<string, unknown>;
 }
 
+export interface HostWaitRequest {
+  threadIds: string[];
+  cwd?: string;
+  timeoutMs: number;
+  pollIntervalMs: number;
+  signal?: AbortSignal;
+}
+
+export interface HostWaitResult {
+  statuses: ObservedThreadStatus[];
+  mode?: Exclude<WaitMode, "handoff">;
+  wakeCount?: number;
+  fallbackPollCount?: number;
+  warnings?: Warning[];
+  diagnostics?: Record<string, unknown>;
+}
+
+/** Optional host-owned status observation surface used by an injected adapter. */
+export interface HostWaitAdapter {
+  start?(): Promise<void>;
+  capabilities?(): { notification: boolean; cursor: boolean };
+  read?(threadIds: string[]): Promise<{ statuses: ObservedThreadStatus[]; cursor?: string }>;
+  subscribe?(listener: (event: unknown) => void, onFailure: (error: unknown) => void): () => void;
+  waitForCursorChange?(cursor: string, threadIds: string[], signal?: AbortSignal): Promise<{
+    statuses: ObservedThreadStatus[];
+    cursor: string;
+  }>;
+  wait?(request: HostWaitRequest): Promise<HostWaitResult>;
+  observe?(request: HostWaitRequest): Promise<HostWaitResult>;
+  close?(): Promise<unknown>;
+  getWarnings?(): Warning[];
+  getDiagnostics?(): AppServerDiagnostics | Record<string, unknown>;
+}
+
 export interface WaitForThreadsOptions {
   threadIds: string[];
   cwd?: string;
@@ -138,6 +172,8 @@ interface WaitSelectableTask {
 
 export interface WaitDependencies {
   adapterFactory?: () => ThreadStatusAdapter;
+  hostAdapter?: HostWaitAdapter;
+  hostAdapterFactory?: () => HostWaitAdapter;
   clientFactory?: (options?: { cwd?: string; codexBin?: string }) => WaitClient;
   runtimeResolver?: () => WaitRuntime;
   clock?: () => number;
@@ -490,6 +526,154 @@ function hostHandoffReport(
   };
 }
 
+function normalizeHostWaitResult(value: unknown, threadIds: string[]): HostWaitResult {
+  const candidate = isRecord(value) ? value : {};
+  const statuses = Array.isArray(candidate.statuses)
+    ? candidate.statuses.map(parseObservedStatus).filter((item): item is ObservedThreadStatus => Boolean(item))
+    : [];
+  const byId = new Map(statuses.map(item => [item.threadId, item.status]));
+  return {
+    statuses: projectStatuses(threadIds, byId),
+    ...(candidate.mode === "notification" || candidate.mode === "cursor" || candidate.mode === "poll"
+      ? { mode: candidate.mode }
+      : {}),
+    ...(typeof candidate.wakeCount === "number" && Number.isSafeInteger(candidate.wakeCount) && candidate.wakeCount >= 0
+      ? { wakeCount: candidate.wakeCount }
+      : {}),
+    ...(typeof candidate.fallbackPollCount === "number"
+      && Number.isSafeInteger(candidate.fallbackPollCount)
+      && candidate.fallbackPollCount >= 0
+      ? { fallbackPollCount: candidate.fallbackPollCount }
+      : {}),
+    ...(Array.isArray(candidate.warnings) ? { warnings: candidate.warnings as Warning[] } : {}),
+    ...(isRecord(candidate.diagnostics) ? { diagnostics: candidate.diagnostics } : {})
+  };
+}
+
+async function waitThroughHost(
+  options: WaitForThreadsOptions,
+  host: HostWaitAdapter,
+  cleanupTimeoutMs: number,
+  now: () => number
+): Promise<WaitReport> {
+  const ids = [...new Set(options.threadIds.map(value => String(value).trim()).filter(Boolean))];
+  const startedAt = now();
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  let timedOut = false;
+  let aborted = false;
+  let report: WaitReport | undefined;
+  let failure: ReturnType<typeof asSynodError> | undefined;
+  const cleanupWarnings: Warning[] = [];
+  try {
+    if (host.start) {
+      const startOutcome = await boundedOperation(() => host.start!(), timeoutMs, options.signal);
+      if (startOutcome.outcome === "timeout") timedOut = true;
+      else if (startOutcome.outcome === "abort") aborted = true;
+    }
+    if (!timedOut && !aborted) {
+      const observe = host.wait || host.observe;
+      if (observe) {
+        const outcome = await boundedOperation(
+          () => observe.call(host, {
+            threadIds: ids,
+            ...(options.cwd ? { cwd: options.cwd } : {}),
+            timeoutMs,
+            pollIntervalMs,
+            ...(options.signal ? { signal: options.signal } : {})
+          }),
+          timeoutMs,
+          options.signal
+        );
+        if (outcome.outcome === "timeout") timedOut = true;
+        else if (outcome.outcome === "abort") aborted = true;
+        else {
+          const snapshot = normalizeHostWaitResult(outcome.value, ids);
+          const final = completion(snapshot.statuses);
+          report = {
+            mode: snapshot.mode || "poll",
+            waitAuthority: "host",
+            threadIds: ids,
+            wakeCount: snapshot.wakeCount || 0,
+            fallbackPollCount: snapshot.fallbackPollCount || 0,
+            elapsedMs: Math.max(0, now() - startedAt),
+            timedOut: false,
+            aborted: false,
+            incomplete: final.incomplete,
+            approvalNeeded: final.approvalNeeded,
+            userInputNeeded: final.userInputNeeded,
+            hostWaitRequired: false,
+            hostWaitThreadIds: [],
+            hostFallbackRequired: false,
+            hostFallbackThreadIds: [],
+            statuses: snapshot.statuses,
+            warnings: snapshot.warnings || [],
+            diagnostics: {
+              ...(snapshot.diagnostics || {}),
+              waitAuthority: "host",
+              observation: "host-adapter"
+            }
+          };
+        }
+      } else if (!host.read) {
+        throw new SynodError(ERROR_CODES.HOST_ADAPTER_INVALID, "The injected host adapter has no wait, observe, or read method.");
+      }
+    }
+    if (!report) {
+      const statuses = ids.map(threadId => ({ threadId, status: { type: "notLoaded" as const } }));
+      report = {
+        mode: "poll",
+        waitAuthority: "host",
+        threadIds: ids,
+        wakeCount: 0,
+        fallbackPollCount: 0,
+        elapsedMs: Math.max(0, now() - startedAt),
+        timedOut,
+        aborted,
+        incomplete: true,
+        approvalNeeded: false,
+        userInputNeeded: false,
+        hostWaitRequired: false,
+        hostWaitThreadIds: [],
+        hostFallbackRequired: false,
+        hostFallbackThreadIds: [],
+        statuses,
+        warnings: [],
+        diagnostics: { waitAuthority: "host", observation: "host-adapter" }
+      };
+    }
+  } catch (error) {
+    failure = asSynodError(error);
+  } finally {
+    if (host.close) {
+      try {
+        const closeOutcome = await boundedOperation(() => host.close!(), cleanupTimeoutMs);
+        if (closeOutcome.outcome === "timeout") {
+          cleanupWarnings.push(warning(
+            WARNING_CODES.WAIT_CLEANUP_FAILED,
+            `Host wait cleanup did not finish within ${cleanupTimeoutMs}ms.`,
+            { cleanupTimeoutMs }
+          ));
+        }
+      } catch (error) {
+        cleanupWarnings.push(warning(WARNING_CODES.WAIT_CLEANUP_FAILED, `Host wait cleanup failed: ${errorMessage(error)}`));
+      }
+    }
+  }
+  const warnings = [...(host.getWarnings?.() || []), ...cleanupWarnings];
+  const diagnostics = host.getDiagnostics?.() || {};
+  if (failure) {
+    failure.warnings = warnings;
+    failure.diagnostics = diagnostics;
+    throw failure;
+  }
+  return {
+    ...report!,
+    warnings: [...report!.warnings, ...warnings],
+    diagnostics: { ...report!.diagnostics, ...diagnostics }
+  };
+}
+
 export async function waitForThreads({
   threadIds,
   cwd,
@@ -506,7 +690,25 @@ export async function waitForThreads({
   }
   const now = dependencies.clock || (() => Date.now());
   const startedAt = now();
+  const host = dependencies.hostAdapterFactory?.() || dependencies.hostAdapter;
+  if (host && (host.wait || host.observe)) {
+    return waitThroughHost({ threadIds: ids, ...(cwd ? { cwd } : {}), timeoutMs, pollIntervalMs, ...(signal ? { signal } : {}) }, host, cleanupTimeoutMs, now);
+  }
+  let hostAuthority = false;
   let adapter = dependencies.adapterFactory?.();
+  if (!adapter && host?.read) {
+    hostAuthority = true;
+    adapter = {
+      start: host.start || (async () => {}),
+      capabilities: host.capabilities || (() => ({ notification: false, cursor: false })),
+      read: host.read,
+      ...(host.subscribe ? { subscribe: host.subscribe } : {}),
+      ...(host.waitForCursorChange ? { waitForCursorChange: host.waitForCursorChange } : {}),
+      close: host.close || (async () => {}),
+      ...(host.getWarnings ? { getWarnings: host.getWarnings } : {}),
+      ...(host.getDiagnostics ? { getDiagnostics: host.getDiagnostics } : {})
+    };
+  }
   if (!adapter) {
     const runtime = (dependencies.runtimeResolver || resolveCodexRuntime)();
     // Desktop owns the live thread host. Resolve this boundary before any
@@ -522,7 +724,7 @@ export async function waitForThreads({
     );
   }
   const deadline = startedAt + timeoutMs;
-  const waitAuthority: WaitAuthority = "appServer";
+  const waitAuthority: WaitAuthority = hostAuthority ? "host" : "appServer";
   let mode: WaitReport["mode"] = "poll";
   let wakeCount = 0;
   let fallbackPollCount = 0;
@@ -632,7 +834,7 @@ export async function waitForThreads({
 
     const statuses = projectStatuses(ids, byId);
     const final = completion(statuses);
-    const hostWaitThreadIds = hasObservedSnapshot && !aborted
+    const hostWaitThreadIds = !hostAuthority && hasObservedSnapshot && !aborted
       ? statuses.filter(item => item.status.type === "notLoaded").map(item => item.threadId)
       : [];
     report = {

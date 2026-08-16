@@ -744,6 +744,7 @@
     </style>
   </head>
   <body>
+    <output id="gif-capture-sentinel" hidden data-gif-capture-valid="false" data-gif-capture-scenario="" data-gif-capture-step="" data-gif-capture-state="">pending</output>
     <a class="skip-link" href="#trace">Skip to trace</a>
 
     <div class="shell">
@@ -1012,9 +1013,17 @@
         const scenarios = { normal: normalScenario(), correction: correctionScenario() };
         const params = new URLSearchParams(isHtmlPreview ? window.location.hash.slice(1) : window.location.search);
         const isGifCapture = params.get("capture") === "gif";
+        const requestedScenario = params.get("scenario");
+        const requestedStep = params.get("step");
+        const requestedScenarioKnown = requestedScenario === "normal" || requestedScenario === "correction";
+        const activeScenario = requestedScenarioKnown ? requestedScenario : "normal";
+        const requestedIndex = requestedScenarioKnown
+          ? scenarios[activeScenario].frames.findIndex(item => item[0] === requestedStep)
+          : -1;
+        const captureRequestError = isGifCapture && (!requestedScenarioKnown || requestedIndex < 0);
         document.documentElement.classList.toggle("gif-capture", isGifCapture);
         const state = {
-          scenario: params.get("scenario") === "correction" ? "correction" : "normal",
+          scenario: activeScenario,
           index: 0,
           focus: params.get("focus") || "ready",
           playing: false,
@@ -1247,6 +1256,14 @@
           renderInspector();
           renderRelationships();
           syncUrl();
+          const captureSentinel = $("#gif-capture-sentinel");
+          captureSentinel.dataset.gifCaptureValid = String(!captureRequestError);
+          captureSentinel.dataset.gifCaptureScenario = state.scenario;
+          captureSentinel.dataset.gifCaptureStep = item[0];
+          captureSentinel.dataset.gifCaptureState = item[4];
+          captureSentinel.textContent = captureRequestError
+            ? `SYNOD-GIF-CAPTURE error requestedScenario=${requestedScenario || ""} requestedStep=${requestedStep || ""} actualScenario=${state.scenario} actualStep=${item[0]}`
+            : `SYNOD-GIF-CAPTURE scenario=${state.scenario} step=${item[0]} state=${item[4]}`;
           if (activeId) {
             const restored = document.getElementById(activeId);
             if (restored && restored !== document.activeElement) restored.focus({ preventScroll: true });
@@ -1342,8 +1359,6 @@
         }));
         resizeObserver.observe($("#diagram-body"));
 
-        const requestedStep = params.get("step");
-        const requestedIndex = scenario().frames.findIndex(item => item[0] === requestedStep);
         if (requestedIndex >= 0) state.index = requestedIndex;
         if (!scenario().nodes.some(item => item.id === state.focus)) state.focus = "ready";
         if (!params.has("focus")) state.focus = suggestedFocus();

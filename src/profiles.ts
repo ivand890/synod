@@ -42,7 +42,7 @@ const profiles: Record<string, ModelProfile> = {
   "synod-5.6": {
     id: "synod-5.6",
     description: "Role-specialized GPT-5.6 profile for current Codex releases.",
-    minimumCodexVersion: "0.147.0",
+    minimumCodexVersion: "0.148.0",
     defaultSubagent: { model: "gpt-5.6-terra", effort: "max" },
     roles: {
       supervisor: { model: "gpt-5.6-sol", effort: "high", planEffort: "xhigh" },
@@ -55,8 +55,8 @@ const profiles: Record<string, ModelProfile> = {
   },
   portable: {
     id: "portable",
-    description: "Portable profile for the full supported Codex range.",
-    minimumCodexVersion: "0.142.0",
+    description: "Portable profile for the current supported Codex range.",
+    minimumCodexVersion: "0.148.0",
     defaultSubagent: { model: "gpt-5.5", effort: "high" },
     roles: {
       supervisor: { model: "gpt-5.5", effort: "xhigh", planEffort: "xhigh" },

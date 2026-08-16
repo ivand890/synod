@@ -80,6 +80,17 @@ export type EndedTaskLease = Omit<TaskLease, "status"> & {
   status: "RELEASED" | "EXPIRED" | "REVOKED";
 };
 
+export const TASK_PROPOSAL_PATH_STATES_VERSION = 1 as const;
+
+export interface TaskProposalPathState {
+  path: string;
+  sourcePath?: string;
+  proposalAdded: boolean;
+  gitTracked: boolean;
+  staged: boolean;
+  committed: boolean;
+}
+
 export interface TaskProposalReference {
   path: string;
   bundleId: string;
@@ -90,6 +101,13 @@ export interface TaskProposalReference {
   scopes: LeaseScope[];
   ownedPaths: string[];
   excludedForeignPaths: string[];
+  /**
+   * Historical schema-4 proposals may omit this immutable Git-lane record and
+   * its version marker. A marked proposal must retain one entry for every
+   * path in the sealed material.
+   */
+  pathStatesVersion?: typeof TASK_PROPOSAL_PATH_STATES_VERSION;
+  pathStates?: TaskProposalPathState[];
   fingerprint: string;
   snapshotHash: string;
   sealedWorktreeFingerprint: string;
@@ -361,8 +379,52 @@ export function isEndedTaskLease(value: unknown): value is EndedTaskLease {
   return isTaskLease({ ...value, status: "ACTIVE" });
 }
 
-export function isTaskProposalReference(value: unknown): value is TaskProposalReference {
+function isTaskProposalPathState(value: unknown): value is TaskProposalPathState {
   return isRecord(value)
+    && typeof value.path === "string"
+    && isSafeLeasePathArray([value.path])
+    && (value.sourcePath === undefined || (
+      typeof value.sourcePath === "string"
+      && isSafeLeasePathArray([value.sourcePath])
+      && value.sourcePath !== value.path
+    ))
+    && typeof value.proposalAdded === "boolean"
+    && typeof value.gitTracked === "boolean"
+    && typeof value.staged === "boolean"
+    && typeof value.committed === "boolean";
+}
+
+function completeTaskProposalPathStates(
+  pathStates: unknown,
+  ownedPaths: unknown
+): pathStates is TaskProposalPathState[] {
+  return Array.isArray(pathStates)
+    && isSafeLeasePathArray(ownedPaths)
+    && pathStates.length === ownedPaths.length
+    && pathStates.every(isTaskProposalPathState)
+    && pathStates.every((item, index) => item.path === ownedPaths[index]);
+}
+
+export function isTaskProposalReference(value: unknown): value is TaskProposalReference {
+  if (!isRecord(value)) return false;
+  const pathStatesVersion = value.pathStatesVersion;
+  const pathStates = value.pathStates;
+  const ownedPaths = Array.isArray(value.ownedPaths) ? value.ownedPaths : undefined;
+  const legacyPathStates = pathStates === undefined || (
+    Array.isArray(pathStates)
+    && pathStates.every(isTaskProposalPathState)
+    && new Set(pathStates.map(item => item.path)).size === pathStates.length
+    && pathStates.every((item, index) => index === 0 || pathStates[index - 1]!.path < item.path)
+    && ownedPaths !== undefined
+    && pathStates.every(item => ownedPaths.includes(item.path)
+      && (item.sourcePath === undefined || ownedPaths.includes(item.sourcePath)))
+  );
+  const validPathStates = pathStatesVersion === undefined
+    ? legacyPathStates
+    : pathStatesVersion === TASK_PROPOSAL_PATH_STATES_VERSION
+      && completeTaskProposalPathStates(pathStates, ownedPaths);
+  return validPathStates
+    && isRecord(value)
     && typeof value.path === "string"
     && /^\.synod\/proposals\/[0-9a-f-]{36}\/[1-9][0-9]*$/i.test(value.path)
     && isHash(value.bundleId)

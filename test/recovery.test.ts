@@ -52,6 +52,7 @@ async function fixture(): Promise<{ directory: string; parent: string }> {
   await writeFile(path.join(directory, "renamed.txt"), "rename me\n");
   await writeFile(path.join(directory, "binary.dat"), Buffer.from([0, 1, 2, 3]));
   await initProject({ directory });
+  await writeFile(path.join(directory, ".gitignore"), "docs/synod/*.md\n");
   await git(directory, "init");
   await git(directory, "config", "user.email", "synod@example.test");
   await git(directory, "config", "user.name", "Synod Test");
@@ -88,6 +89,57 @@ test.afterEach(async () => {
     await rm(directory, { recursive: true, force: true });
     temporaryDirectories.delete(directory);
   }
+});
+
+test("keeps human Synod notes out of checkpoint bundles unless local-doc opt-in is explicit", async () => {
+  const { directory, parent } = await fixture();
+  const defaultBundle = path.join(parent, "default.bundle");
+  const portableBundle = path.join(parent, "portable.bundle");
+  await writeFile(path.join(directory, "docs/synod/GOAL.md"), "Private goal with no release authority.\n");
+  await writeFile(path.join(directory, "docs/synod/STATE.md"), "Private state note.\n");
+  const before = await captureGitCheckpointSnapshot(directory);
+
+  const ordinary = await exportRecoveryBundle({ directory, destination: defaultBundle, includeUntracked: true });
+  assert.equal(ordinary.manifest.supplemental, undefined);
+  assert.equal((await captureGitCheckpointSnapshot(directory)).checkpoint.worktree.fingerprint, before.checkpoint.worktree.fingerprint);
+
+  const portable = await exportRecoveryBundle({
+    directory,
+    destination: portableBundle,
+    includeUntracked: true,
+    includeLocalDocs: true
+  });
+  assert.deepEqual(portable.manifest.supplemental?.localDocs.map(item => item.path), [
+    "docs/synod/DECISIONS.md",
+    "docs/synod/GOAL.md",
+    "docs/synod/PLAN.md",
+    "docs/synod/STATE.md",
+    "docs/synod/WORKLOG.md"
+  ]);
+  assert.equal(portable.manifest.entries.some(entry => entry.path.startsWith("docs/synod/")), false);
+  assert.equal((await verifyRecoveryBundle({ bundle: portableBundle })).manifest.supplemental?.localDocs.length, 5);
+
+  const restoredSkipped = await cloneBase(directory, parent, "restored-local-docs-skipped");
+  const skipped = await restoreRecoveryBundle({ bundle: portableBundle, directory: restoredSkipped });
+  assert.equal(skipped.localDocsRestored, 0);
+  await assert.rejects(readFile(path.join(restoredSkipped, "docs/synod/GOAL.md")), { code: "ENOENT" });
+
+  const restored = await cloneBase(directory, parent, "restored-local-docs");
+  const restoredPortable = await restoreRecoveryBundle({ bundle: portableBundle, directory: restored, includeLocalDocs: true });
+  assert.equal(restoredPortable.localDocsRestored, 5);
+  assert.equal(await readFile(path.join(restored, "docs/synod/GOAL.md"), "utf8"), "Private goal with no release authority.\n");
+  assert.equal(await readFile(path.join(restored, "docs/synod/STATE.md"), "utf8"), "Private state note.\n");
+  await assert.rejects(readFile(path.join(restored, "docs/synod/STATUS.md")), { code: "ENOENT" });
+
+  const conflicting = await cloneBase(directory, parent, "restored-local-docs-conflicting");
+  await mkdir(path.join(conflicting, "docs/synod"), { recursive: true });
+  await writeFile(path.join(conflicting, "docs/synod/GOAL.md"), "Conflicting local note.\n");
+  await assert.rejects(
+    restoreRecoveryBundle({ bundle: portableBundle, directory: conflicting, includeLocalDocs: true }),
+    { code: ERROR_CODES.RECOVERY_DESTINATION_DIRTY }
+  );
+  assert.equal(await readFile(path.join(conflicting, "docs/synod/GOAL.md"), "utf8"), "Conflicting local note.\n");
+
 });
 
 test("exports and verifies deterministic mixed dirty-state bundles without changing the source", async () => {
@@ -510,6 +562,74 @@ test("a retry finalizes a fully applied interrupted restore without rolling it b
     stableCheckpointStringify((await captureGitCheckpointSnapshot(directory)).snapshot.entries)
   );
   await assert.rejects(readFile(await gitPathForTest(destination, "synod-recovery-journal.json")), { code: "ENOENT" });
+});
+
+test("mode-switch retries roll back a fully applied supplemental journal before replanning", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "mode-switch-fully-applied.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true, includeLocalDocs: true });
+  const restoreModule = new URL("../src/restore.ts", import.meta.url).href;
+
+  for (const [initialSelection, retrySelection] of [[true, false], [false, true]] as const) {
+    const destination = await cloneBase(directory, parent, `mode-switch-fully-applied-${initialSelection ? "on-off" : "off-on"}`);
+    const script = `
+      import { restoreRecoveryBundle } from ${JSON.stringify(restoreModule)};
+      await restoreRecoveryBundle(
+        { bundle: ${JSON.stringify(bundle)}, directory: ${JSON.stringify(destination)}, includeLocalDocs: ${initialSelection} },
+        { restoreHook(phase) { if (phase === "before-verify") process.exit(81); } }
+      );
+    `;
+    await assert.rejects(
+      execFileAsync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { encoding: "utf8" }),
+      (error: any) => error?.code === 81
+    );
+    const journal = JSON.parse(await readFile(await gitPathForTest(destination, "synod-recovery-journal.json"), "utf8"));
+    assert.equal(journal.includeLocalDocs, initialSelection);
+    assert.equal(journal.localDocs.length, initialSelection ? 5 : 0);
+
+    const restored = await restoreRecoveryBundle({ bundle, directory: destination, includeLocalDocs: retrySelection });
+    assert.equal(restored.localDocsRestored, retrySelection ? 5 : 0);
+    if (retrySelection) {
+      assert.match(await readFile(path.join(destination, "docs/synod/GOAL.md"), "utf8"), /^# Synod Goal\n/);
+    } else {
+      await assert.rejects(readFile(path.join(destination, "docs/synod/GOAL.md")), { code: "ENOENT" });
+    }
+    await assert.rejects(readFile(await gitPathForTest(destination, "synod-recovery-journal.json")), { code: "ENOENT" });
+  }
+});
+
+test("mode-switch retries roll back a partial supplemental journal before replanning", async () => {
+  const { directory, parent } = await fixture();
+  const bundle = path.join(parent, "mode-switch-partial.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true, includeLocalDocs: true });
+  const restoreModule = new URL("../src/restore.ts", import.meta.url).href;
+
+  for (const [initialSelection, retrySelection] of [[true, false], [false, true]] as const) {
+    const destination = await cloneBase(directory, parent, `mode-switch-partial-${initialSelection ? "on-off" : "off-on"}`);
+    const script = `
+      import { restoreRecoveryBundle } from ${JSON.stringify(restoreModule)};
+      await restoreRecoveryBundle(
+        { bundle: ${JSON.stringify(bundle)}, directory: ${JSON.stringify(destination)}, includeLocalDocs: ${initialSelection} },
+        { restoreHook(phase) { if (phase === "after-path") process.exit(82); } }
+      );
+    `;
+    await assert.rejects(
+      execFileAsync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { encoding: "utf8" }),
+      (error: any) => error?.code === 82
+    );
+    const journal = JSON.parse(await readFile(await gitPathForTest(destination, "synod-recovery-journal.json"), "utf8"));
+    assert.equal(journal.includeLocalDocs, initialSelection);
+    assert.equal(journal.localDocs.length, initialSelection ? 5 : 0);
+
+    const restored = await restoreRecoveryBundle({ bundle, directory: destination, includeLocalDocs: retrySelection });
+    assert.equal(restored.localDocsRestored, retrySelection ? 5 : 0);
+    if (retrySelection) {
+      assert.match(await readFile(path.join(destination, "docs/synod/GOAL.md"), "utf8"), /^# Synod Goal\n/);
+    } else {
+      await assert.rejects(readFile(path.join(destination, "docs/synod/GOAL.md")), { code: "ENOENT" });
+    }
+    await assert.rejects(readFile(await gitPathForTest(destination, "synod-recovery-journal.json")), { code: "ENOENT" });
+  }
 });
 
 test("interrupted rollback preserves concurrent path content and its durable journal", async () => {

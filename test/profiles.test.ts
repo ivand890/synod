@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluateProfile, getProfile } from "../src/profiles.js";
+import { evaluateProfile, getProfile, listProfiles } from "../src/profiles.js";
 import type { ModelCapability } from "../src/profiles.js";
 
 function model(id: string, efforts: string[]): ModelCapability {
@@ -52,4 +52,14 @@ test("indexes App Server capabilities by model slug before preset ID", () => {
 
   assert.equal(result.compatible, true);
   assert.deepEqual(result.missing, []);
+});
+
+test("built-in profiles require the current supported Codex minor line", () => {
+  assert.deepEqual(
+    listProfiles().map(profile => ({ id: profile.id, minimumCodexVersion: profile.minimumCodexVersion })),
+    [
+      { id: "synod-5.6", minimumCodexVersion: "0.148.0" },
+      { id: "portable", minimumCodexVersion: "0.148.0" }
+    ]
+  );
 });

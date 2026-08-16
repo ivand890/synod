@@ -15,6 +15,12 @@ export interface LifecycleOptions {
   explain?: boolean;
 }
 
+export interface StatusOptions extends LifecycleOptions {
+  taskId?: string;
+  activeOnly?: boolean;
+  changedSinceCheckpoint?: boolean;
+}
+
 export interface UsageOptions {
   cwd: string;
   json: boolean;
@@ -35,6 +41,27 @@ export interface WaitCommandOptions {
   pollIntervalMs: number;
 }
 
+export interface DelegateStartCommandOptions {
+  action: "start";
+  id: string;
+  cwd: string;
+  json: boolean;
+  actor: string;
+  read: string[];
+  write: string[];
+  readTree: string[];
+  writeTree: string[];
+  reservationTtlSeconds?: number;
+  ttlSeconds?: number;
+  heartbeatIntervalSeconds?: number;
+  evidence: string[];
+  wait: boolean;
+  timeoutMs: number;
+  pollIntervalMs: number;
+}
+
+export type DelegateCommandOptions = DelegateStartCommandOptions;
+
 export interface CheckpointOptions {
   directory: string;
   json: boolean;
@@ -53,6 +80,7 @@ export interface BundleExportCommandOptions {
   directory: string;
   destination: string;
   includeUntracked: boolean;
+  includeLocalDocs?: boolean;
   json: boolean;
 }
 
@@ -66,6 +94,7 @@ export interface BundleRestoreCommandOptions {
   action: "restore";
   bundle: string;
   directory: string;
+  includeLocalDocs?: boolean;
   json: boolean;
 }
 
@@ -207,6 +236,13 @@ export interface TaskTransitionOptions extends TaskCommonOptions {
   evidence: string[];
 }
 
+export interface TaskCorrectionOptions extends TaskCommonOptions {
+  action: "correct";
+  reason: string;
+  revision: number;
+  evidence: string[];
+}
+
 export interface TaskOverrideOptions extends TaskCommonOptions {
   action: "override";
   additionalRounds: number;
@@ -230,7 +266,7 @@ export interface TaskNextOptions {
   actor: string;
 }
 
-export type TaskOptions = TaskAddOptions | TaskTransitionOptions | TaskOverrideOptions | TaskSplitOptions | TaskNextOptions;
+export type TaskOptions = TaskAddOptions | TaskTransitionOptions | TaskCorrectionOptions | TaskOverrideOptions | TaskSplitOptions | TaskNextOptions;
 
 export interface ProposalSubmitOptions {
   action: "submit";
@@ -361,6 +397,70 @@ export function parseLifecycleArgs(
   return options;
 }
 
+export function parseStatusArgs(args: string[]): StatusOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
+  const options: StatusOptions = { directory: ".", json: false };
+  let hasDirectory = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) continue;
+    if (arg === "-h" || arg === "--help") return { help: true };
+    if (arg === "--json") options.json = true;
+    else if (arg === "--explain") options.explain = true;
+    else if (arg === "--active-only") {
+      if (options.activeOnly) {
+        throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "The --active-only selector may be specified only once.", {
+          details: { option: "--active-only" }
+        });
+      }
+      options.activeOnly = true;
+    } else if (arg === "--changed-since-checkpoint") {
+      if (options.changedSinceCheckpoint) {
+        throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "The --changed-since-checkpoint selector may be specified only once.", {
+          details: { option: "--changed-since-checkpoint" }
+        });
+      }
+      options.changedSinceCheckpoint = true;
+    } else if (arg === "--task") {
+      if (options.taskId !== undefined) {
+        throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "The --task selector may be specified only once for status.", {
+          details: { option: "--task" }
+        });
+      }
+      options.taskId = optionValue(args, index, arg);
+      index += 1;
+    } else if (arg.startsWith("-")) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
+    } else if (hasDirectory) {
+      throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, {
+        details: { argument: arg }
+      });
+    } else {
+      options.directory = arg;
+      hasDirectory = true;
+    }
+  }
+  const selectorCount = Number(options.taskId !== undefined) + Number(Boolean(options.activeOnly))
+    + Number(Boolean(options.changedSinceCheckpoint));
+  if (selectorCount > 1) {
+    throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Status selectors are mutually exclusive.", {
+      details: {
+        selectors: [
+          ...(options.taskId === undefined ? [] : ["--task"]),
+          ...(options.activeOnly ? ["--active-only"] : []),
+          ...(options.changedSinceCheckpoint ? ["--changed-since-checkpoint"] : [])
+        ]
+      }
+    });
+  }
+  if (selectorCount > 0 && options.explain) {
+    throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Status selectors cannot be combined with --explain.", {
+      details: { option: "--explain" }
+    });
+  }
+  return options;
+}
+
 export function parseUsageArgs(
   args: string[],
   { cwd = process.cwd() }: { cwd?: string } = {}
@@ -471,6 +571,83 @@ export function parseWaitArgs(
   return options;
 }
 
+export function parseDelegateArgs(args: string[]): DelegateCommandOptions | HelpOptions {
+  args = parseOutputViewArgs(args).args;
+  const action = args[0];
+  if (!action || action === "-h" || action === "--help") return { help: true };
+  if (action !== "start") {
+    throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown delegate action: ${action}`, { details: { action } });
+  }
+  if (hasHelpFlagAfterAction(args)) return { help: true };
+  const id = args[1];
+  if (!id || id.startsWith("-")) throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, "Delegate start requires a task ID.");
+  const options: DelegateStartCommandOptions = {
+    action: "start",
+    id,
+    cwd: ".",
+    json: false,
+    actor: "supervisor",
+    read: [],
+    write: [],
+    readTree: [],
+    writeTree: [],
+    evidence: [],
+    wait: false,
+    timeoutMs: 5 * 60_000,
+    pollIntervalMs: 1_000
+  };
+  for (let index = 2; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) continue;
+    if (arg === "-h" || arg === "--help") return { help: true };
+    if (arg === "--json") { options.json = true; continue; }
+    if (arg === "--wait") { options.wait = true; continue; }
+    const valueOptions = [
+      "--cwd", "--actor", "--read", "--write", "--read-tree", "--write-tree", "--evidence",
+      "--reservation-ttl-seconds", "--ttl-seconds", "--heartbeat-seconds", "--timeout-seconds", "--poll-interval-ms"
+    ];
+    if (!valueOptions.includes(arg)) {
+      if (arg.startsWith("-")) throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
+      throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
+    }
+    const value = optionValue(args, index, arg);
+    if (arg === "--cwd") options.cwd = value;
+    else if (arg === "--actor") options.actor = value;
+    else if (arg === "--read") options.read.push(value);
+    else if (arg === "--write") options.write.push(value);
+    else if (arg === "--read-tree") options.readTree.push(value);
+    else if (arg === "--write-tree") options.writeTree.push(value);
+    else if (arg === "--evidence") options.evidence.push(value);
+    else if (arg === "--reservation-ttl-seconds") options.reservationTtlSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    else if (arg === "--ttl-seconds") options.ttlSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    else if (arg === "--heartbeat-seconds") options.heartbeatIntervalSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    else if (arg === "--timeout-seconds") {
+      const seconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+      if (!Number.isSafeInteger(seconds) || seconds <= 0 || seconds > 3_600) {
+        throw new SynodError(ERROR_CODES.WAIT_INVALID, "Delegate wait timeout must be an integer from 1 through 3600 seconds.");
+      }
+      options.timeoutMs = seconds * 1_000;
+    } else {
+      const interval = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+      if (!Number.isSafeInteger(interval) || interval < 100 || interval > 5_000) {
+        throw new SynodError(ERROR_CODES.WAIT_INVALID, "Delegate wait poll interval must be an integer from 100 through 5000 milliseconds.");
+      }
+      options.pollIntervalMs = interval;
+    }
+    index += 1;
+  }
+  for (const [name, value] of [
+    ["--reservation-ttl-seconds", options.reservationTtlSeconds],
+    ["--ttl-seconds", options.ttlSeconds],
+    ["--heartbeat-seconds", options.heartbeatIntervalSeconds]
+  ] as const) {
+    if (value !== undefined && Number.isNaN(value)) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, `Delegate start requires an integer value for ${name}.`, { details: { option: name } });
+    }
+  }
+  return { ...options, evidence: [...new Set(options.evidence)] };
+}
+
 export function parseCheckpointArgs(args: string[]): CheckpointOptions | HelpOptions {
   args = parseOutputViewArgs(args).args;
   const options: CheckpointOptions = { directory: ".", json: false, actor: "supervisor" };
@@ -543,12 +720,14 @@ export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOpti
   let hasDirectory = false;
   let json = false;
   let includeUntracked = false;
+  let includeLocalDocs = false;
   for (let index = 2; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg) continue;
     if (arg === "-h" || arg === "--help") return { help: true };
     if (arg === "--json") json = true;
     else if (arg === "--include-untracked" && action === "export") includeUntracked = true;
+    else if (arg === "--include-local-docs" && (action === "export" || action === "restore")) includeLocalDocs = true;
     else if (arg === "--cwd" && (action === "export" || action === "restore")) {
       directory = optionValue(args, index, arg);
       hasDirectory = true;
@@ -559,14 +738,27 @@ export function parseBundleArgs(args: string[]): BundleCommandOptions | HelpOpti
       throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
     }
   }
-  if (action === "export") return { action, directory, destination: positional, includeUntracked, json };
+  if (action === "export") return {
+    action,
+    directory,
+    destination: positional,
+    includeUntracked,
+    ...(includeLocalDocs ? { includeLocalDocs: true } : {}),
+    json
+  };
   if (action === "restore") {
     if (!hasDirectory) {
       throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, "Bundle restore requires --cwd <directory>.", {
         details: { option: "--cwd" }
       });
     }
-    return { action, bundle: positional, directory, json };
+    return {
+      action,
+      bundle: positional,
+      directory,
+      ...(includeLocalDocs ? { includeLocalDocs: true } : {}),
+      json
+    };
   }
   return { action, bundle: positional, json };
 }
@@ -886,7 +1078,7 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   args = parseOutputViewArgs(args).args;
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
-  if (!["add", "transition", "override", "split", "next"].includes(action)) {
+  if (!["add", "transition", "correct", "override", "split", "next"].includes(action)) {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown task action: ${action}`, { details: { action } });
   }
   if (hasHelpFlagAfterAction(args)) return { help: true };
@@ -982,6 +1174,17 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
       throw new SynodError(ERROR_CODES.TASK_INVALID, "Task override requires --additional-rounds, --approver, --reference, --reason, and --evidence.");
     }
     return { action, id, directory, json, actor, additionalRounds, approver, reference, reason, evidence };
+  }
+  if (action === "correct") {
+    if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
+      || dependsOn.length > 0 || correctionLimit !== undefined || additionalRounds !== undefined
+      || approver !== undefined || reference !== undefined || replacements.length > 0) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task correct received an unrelated task option.");
+    }
+    if (!reason || evidence.length === 0 || revision === undefined || !Number.isSafeInteger(revision) || revision < 0) {
+      throw new SynodError(ERROR_CODES.TASK_INVALID, "Task correct requires --revision, --reason, and --evidence.");
+    }
+    return { action, id, directory, json, actor, reason, revision, evidence: [...new Set(evidence)] };
   }
   if (action === "split") {
     if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0

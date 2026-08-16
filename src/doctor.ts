@@ -11,6 +11,16 @@ import type { ModelCapability } from "./profiles.js";
 import type { Warning } from "./contracts.js";
 import { isRecord } from "./validation.js";
 
+const NODE_MINIMUM_MAJOR = 22;
+const NODE_SUPPORT_RANGE = ">=22";
+const NODE_VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+function isSupportedNodeVersion(version: string): boolean {
+  const match = NODE_VERSION_PATTERN.exec(version);
+  const major = match ? Number(match[1]) : NaN;
+  return Number.isSafeInteger(major) && major >= NODE_MINIMUM_MAJOR;
+}
+
 export interface DoctorClient {
   start(): Promise<void>;
   probeCapabilities?(): Promise<unknown>;
@@ -30,13 +40,15 @@ export interface DoctorRuntime {
 export interface DoctorDependencies {
   clientFactory?: (options: { codexBin: string }) => DoctorClient;
   runtimeResolver?: () => DoctorRuntime;
+  nodeVersion?: string;
 }
 
 export async function doctorProject(
   { directory = ".", project = true }: { directory?: string; project?: boolean } = {},
   {
     clientFactory = options => new CodexAppServerClient(options),
-    runtimeResolver = resolveCodexRuntime
+    runtimeResolver = resolveCodexRuntime,
+    nodeVersion = process.versions.node
   }: DoctorDependencies = {}
 ) {
   const runtime = runtimeResolver();
@@ -146,7 +158,7 @@ export async function doctorProject(
     ));
   }
 
-  const nodeSupported = Number(process.versions.node.split(".")[0]) >= 20;
+  const nodeSupported = isSupportedNodeVersion(nodeVersion);
   const healthy = nodeSupported
     && issues.length === 0
     && compatibility.status !== "unsupported"
@@ -156,7 +168,7 @@ export async function doctorProject(
 
   return {
     healthy,
-    node: { version: process.versions.node, supported: nodeSupported, range: ">=20" },
+    node: { version: nodeVersion, supported: nodeSupported, range: NODE_SUPPORT_RANGE },
     codex: compatibility,
     capabilities: {
       appServer: isRecord(diagnosticValue.appServer) && isRecord(diagnosticValue.appServer.capabilities)

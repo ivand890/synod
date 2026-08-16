@@ -32,6 +32,18 @@ export const RECOVERY_OBJECTS_PATH = "objects";
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024;
 const MAX_OBJECT_BYTES = 256 * 1024 * 1024;
 const MAX_ENTRIES = 100_000;
+const MAX_LOCAL_DOC_ENTRIES = 5;
+const MAX_LOCAL_DOC_BYTES = 1024 * 1024;
+
+/** Human-owned Synod notes may be exported only as explicit supplemental material. */
+export const RECOVERY_LOCAL_DOC_PATHS = Object.freeze([
+  "docs/synod/DECISIONS.md",
+  "docs/synod/GOAL.md",
+  "docs/synod/PLAN.md",
+  "docs/synod/STATE.md",
+  "docs/synod/WORKLOG.md"
+] as const);
+const RECOVERY_LOCAL_DOC_PATH_SET = new Set<string>(RECOVERY_LOCAL_DOC_PATHS);
 
 type RawGitRunner = (directory: string, args: string[]) => Promise<Buffer>;
 
@@ -44,6 +56,7 @@ export interface BundleExportOptions {
   directory?: string;
   destination: string;
   includeUntracked?: boolean;
+  includeLocalDocs?: boolean;
 }
 
 export interface BundleVerifyOptions {
@@ -77,6 +90,17 @@ export interface RecoveryEntry {
   worktree: RecoveryWorktreeEntry;
 }
 
+export interface RecoverySupplementalLocalDoc {
+  path: (typeof RECOVERY_LOCAL_DOC_PATHS)[number];
+  mode: "100644" | "100755";
+  object: string;
+  size: number;
+}
+
+export interface RecoverySupplemental {
+  localDocs: RecoverySupplementalLocalDoc[];
+}
+
 export interface RecoveryManifestPayload {
   schemaVersion: typeof RECOVERY_BUNDLE_SCHEMA_VERSION;
   synodVersion: string;
@@ -85,6 +109,7 @@ export interface RecoveryManifestPayload {
   checkpoint: { fingerprint: string; snapshotHash: string };
   event: { sequence: number; hash: string };
   proposal?: RecoveryProposalIdentity;
+  supplemental?: RecoverySupplemental;
   includeUntracked: boolean;
   entries: RecoveryEntry[];
   objects: RecoveryObject[];
@@ -127,6 +152,7 @@ export interface SnapshotBundleExportOptions {
   proposal?: RecoveryProposalIdentity;
   guardCheckpoint: GitCheckpoint;
   includeUntracked?: boolean;
+  includeLocalDocs?: boolean;
   allowInsideSource?: boolean;
 }
 
@@ -176,6 +202,98 @@ function filteredMaterial(relativePath: string, content: Buffer): Buffer | undef
 
 function recoveryMaterial(relativePath: string, content: Buffer): Buffer | undefined {
   return isFilteredPath(relativePath) ? filteredMaterial(relativePath, content) : content;
+}
+
+function isLocalDocPath(value: unknown): value is (typeof RECOVERY_LOCAL_DOC_PATHS)[number] {
+  return typeof value === "string" && RECOVERY_LOCAL_DOC_PATH_SET.has(value);
+}
+
+function localDocMode(mode: number): "100644" | "100755" {
+  return (mode & 0o111) === 0 ? "100644" : "100755";
+}
+
+interface SupplementalCapture {
+  supplemental: RecoverySupplemental;
+  materials: Map<string, Buffer>;
+}
+
+/**
+ * Read the explicitly allowlisted human notes without following an unsafe
+ * ancestor. These files are deliberately separate from checkpoint entries:
+ * they are ignored, user-owned context rather than canonical release state.
+ */
+async function captureSupplementalLocalDocs(directory: string): Promise<SupplementalCapture> {
+  const localDocs: RecoverySupplementalLocalDoc[] = [];
+  const materials = new Map<string, Buffer>();
+  let bytes = 0;
+  for (const relativePath of RECOVERY_LOCAL_DOC_PATHS) {
+    const absolutePath = path.resolve(directory, ...relativePath.split("/"));
+    let current = directory;
+    let absentAncestor = false;
+    for (const segment of relativePath.split("/").slice(0, -1)) {
+      current = path.join(current, segment);
+      let ancestor;
+      try {
+        ancestor = await lstat(current);
+      } catch (error) {
+        if (errorCode(error) === "ENOENT") {
+          absentAncestor = true;
+          break;
+        }
+        throw error;
+      }
+      if (ancestor.isSymbolicLink() || !ancestor.isDirectory()) {
+        invalid("Supplemental local-doc ancestors must be real directories.", { path: relativePath });
+      }
+    }
+    if (absentAncestor) continue;
+    let stats;
+    try {
+      stats = await lstat(absolutePath);
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") continue;
+      throw error;
+    }
+    if (stats.isSymbolicLink() || !stats.isFile()) {
+      invalid("Supplemental local docs must be bounded regular files, not symlinks or directories.", { path: relativePath });
+    }
+    const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0);
+    const handle = await open(absolutePath, flags);
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.size > MAX_LOCAL_DOC_BYTES) {
+        invalid("Supplemental local docs must stay within the per-file size limit.", {
+          path: relativePath,
+          maximumBytes: MAX_LOCAL_DOC_BYTES
+        });
+      }
+      const content = await handle.readFile();
+      if (content.byteLength > MAX_LOCAL_DOC_BYTES) {
+        invalid("Supplemental local docs must stay within the per-file size limit.", {
+          path: relativePath,
+          maximumBytes: MAX_LOCAL_DOC_BYTES
+        });
+      }
+      const object = hashBytes(content);
+      localDocs.push({
+        path: relativePath,
+        mode: localDocMode(opened.mode),
+        object,
+        size: content.byteLength
+      });
+      materials.set(object, content);
+      bytes += content.byteLength;
+      if (bytes > MAX_LOCAL_DOC_ENTRIES * MAX_LOCAL_DOC_BYTES) {
+        invalid("Supplemental local docs exceed the aggregate size limit.", {
+          maximumBytes: MAX_LOCAL_DOC_ENTRIES * MAX_LOCAL_DOC_BYTES
+        });
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+  localDocs.sort((left, right) => compareCheckpointPaths(left.path, right.path));
+  return { supplemental: { localDocs }, materials };
 }
 
 function invalid(message: string, details?: unknown): never {
@@ -364,12 +482,46 @@ function validateEntry(value: unknown): RecoveryEntry {
   };
 }
 
+function validateSupplemental(value: unknown): RecoverySupplemental {
+  if (!isRecord(value) || !exactKeys(value, ["localDocs"])
+    || !Array.isArray(value.localDocs)
+    || value.localDocs.length > MAX_LOCAL_DOC_ENTRIES) {
+    invalid("Recovery bundle supplemental local-doc metadata is invalid.");
+  }
+  const localDocs = value.localDocs.map(item => {
+    if (!isRecord(item)
+      || !exactKeys(item, ["path", "mode", "object", "size"])
+      || !isLocalDocPath(item.path)
+      || !["100644", "100755"].includes(String(item.mode))
+      || !isHash(item.object)
+      || typeof item.size !== "number"
+      || !Number.isSafeInteger(item.size)
+      || item.size < 0
+      || item.size > MAX_LOCAL_DOC_BYTES) {
+      invalid("Recovery bundle contains an invalid supplemental local-doc descriptor.");
+    }
+    return {
+      path: item.path,
+      mode: item.mode as "100644" | "100755",
+      object: item.object,
+      size: item.size
+    };
+  });
+  const sorted = [...localDocs].sort((left, right) => compareCheckpointPaths(left.path, right.path));
+  if (stableStringify(localDocs) !== stableStringify(sorted)
+    || new Set(localDocs.map(item => item.path)).size !== localDocs.length
+    || localDocs.reduce((total, item) => total + item.size, 0) > MAX_LOCAL_DOC_ENTRIES * MAX_LOCAL_DOC_BYTES) {
+    invalid("Recovery bundle supplemental local docs must be unique, sorted, and bounded.");
+  }
+  return { localDocs };
+}
+
 export function validateRecoveryManifest(value: unknown): RecoveryManifest {
   if (!isRecord(value)
     || !exactKeys(value, [
       "schemaVersion", "bundleId", "synodVersion", "createdAt", "source", "checkpoint",
       "event", "includeUntracked", "entries", "objects"
-    ], ["proposal"])
+    ], ["proposal", "supplemental"])
     || value.schemaVersion !== RECOVERY_BUNDLE_SCHEMA_VERSION
     || !isHash(value.bundleId)
     || typeof value.synodVersion !== "string"
@@ -397,6 +549,7 @@ export function validateRecoveryManifest(value: unknown): RecoveryManifest {
     || !isHash(value.event.hash)) {
     invalid("Recovery bundle manifest schema is invalid.");
   }
+  const supplemental = value.supplemental === undefined ? undefined : validateSupplemental(value.supplemental);
   let proposal: RecoveryProposalIdentity | undefined;
   if (value.proposal !== undefined) {
     const candidate = value.proposal;
@@ -446,6 +599,12 @@ export function validateRecoveryManifest(value: unknown): RecoveryManifest {
   ));
   if (stableStringify(entries) !== stableStringify(sortedEntries)) invalid("Recovery bundle entries are not sorted.");
   validatePathSet(entries);
+  if (supplemental) {
+    const entryPaths = new Set(entries.flatMap(entry => [entry.path, ...(entry.sourcePath ? [entry.sourcePath] : [])]));
+    if (supplemental.localDocs.some(localDoc => entryPaths.has(localDoc.path))) {
+      invalid("Supplemental local docs cannot overlap checkpoint entries.");
+    }
+  }
 
   const objects: RecoveryObject[] = value.objects.map(item => {
     if (!isRecord(item)
@@ -469,6 +628,7 @@ export function validateRecoveryManifest(value: unknown): RecoveryManifest {
     for (const item of entry.index) if (item.object) references.add(item.object);
     if (entry.worktree.object) references.add(entry.worktree.object);
   }
+  for (const item of supplemental?.localDocs || []) references.add(item.object);
   if (stableStringify([...references].sort(compareCheckpointPaths)) !== stableStringify(objects.map(item => item.hash))) {
     invalid("Recovery bundle object declarations do not exactly match referenced material.");
   }
@@ -486,6 +646,7 @@ export function validateRecoveryManifest(value: unknown): RecoveryManifest {
     },
     event: { sequence: value.event.sequence, hash: value.event.hash as string },
     ...(proposal ? { proposal } : {}),
+    ...(supplemental ? { supplemental } : {}),
     includeUntracked: value.includeUntracked,
     entries,
     objects
@@ -864,7 +1025,8 @@ async function materializeSnapshotBundle(
     event,
     guardCheckpoint,
     proposal,
-    includeUntracked
+    includeUntracked,
+    includeLocalDocs
   }: Omit<SnapshotBundleExportOptions, "directory" | "destination" | "allowInsideSource">,
   dependencies: RecoveryDependencies
 ): Promise<BundleExportResult> {
@@ -879,6 +1041,7 @@ async function materializeSnapshotBundle(
       details: { paths: untracked }
     });
   }
+  const supplementalCapture = includeLocalDocs ? await captureSupplementalLocalDocs(targetDirectory) : undefined;
   const rawGitRunner = dependencies.rawGitRunner || defaultRawGitRunner;
   let indexOutput: Buffer;
   try {
@@ -928,7 +1091,14 @@ async function materializeSnapshotBundle(
     });
   }
   entries.sort((left, right) => compareCheckpointPaths(`${left.path}\0${left.sourcePath || ""}`, `${right.path}\0${right.sourcePath || ""}`));
-  const objectList = [...objects.entries()]
+  if (supplementalCapture) {
+    for (const [hash, content] of supplementalCapture.materials) {
+      if (!objects.has(hash)) {
+        objects.set(hash, content);
+      }
+    }
+  }
+  const finalObjectList = [...objects.entries()]
     .sort(([left], [right]) => compareCheckpointPaths(left, right))
     .map(([hash, content]) => ({ hash, size: content.byteLength }));
   const payload: RecoveryManifestPayload = {
@@ -939,13 +1109,20 @@ async function materializeSnapshotBundle(
     checkpoint: { fingerprint: snapshot.worktreeFingerprint, snapshotHash: snapshot.contentHash },
     event,
     ...(proposal ? { proposal } : {}),
+    ...(supplementalCapture ? { supplemental: supplementalCapture.supplemental } : {}),
     includeUntracked: Boolean(includeUntracked),
     entries,
-    objects: objectList
+    objects: finalObjectList
   };
   const manifest: RecoveryManifest = { ...payload, bundleId: payloadHash(payload) };
   validateRecoveryManifest(manifest);
   await assertSourceStillMatches(targetDirectory, guardCheckpoint, dependencies);
+  if (supplementalCapture) {
+    const current = await captureSupplementalLocalDocs(targetDirectory);
+    if (stableStringify(current.supplemental) !== stableStringify(supplementalCapture.supplemental)) {
+      sourceChanged("Supplemental local docs changed during recovery export.", { paths: RECOVERY_LOCAL_DOC_PATHS });
+    }
+  }
 
   const parent = path.dirname(destinationPath);
   await assertDirectoryIdentity(destinationParent, "Recovery bundle parent");
@@ -960,6 +1137,12 @@ async function materializeSnapshotBundle(
     await writeDurableFile(path.join(temporary, RECOVERY_MANIFEST_PATH), serializeManifest(manifest));
     await verifyRecoveryBundle({ bundle: temporary });
     await assertSourceStillMatches(targetDirectory, guardCheckpoint, dependencies);
+    if (supplementalCapture) {
+      const current = await captureSupplementalLocalDocs(targetDirectory);
+      if (stableStringify(current.supplemental) !== stableStringify(supplementalCapture.supplemental)) {
+        sourceChanged("Supplemental local docs changed during recovery bundle publication.", { paths: RECOVERY_LOCAL_DOC_PATHS });
+      }
+    }
     await publishBundle(temporary, destinationPath, destinationParent, dependencies.beforePublish);
     const verified = await verifyRecoveryBundle({ bundle: destinationPath });
     return { ...verified, destination: destinationPath };
@@ -988,12 +1171,13 @@ export async function exportSnapshotRecoveryBundle(
     event: options.event,
     ...(options.proposal ? { proposal: options.proposal } : {}),
     guardCheckpoint: options.guardCheckpoint,
-    includeUntracked: Boolean(options.includeUntracked)
+    includeUntracked: Boolean(options.includeUntracked),
+    includeLocalDocs: Boolean(options.includeLocalDocs)
   }, dependencies);
 }
 
 export async function exportRecoveryBundle(
-  { directory = ".", destination, includeUntracked = false }: BundleExportOptions,
+  { directory = ".", destination, includeUntracked = false, includeLocalDocs = false }: BundleExportOptions,
   dependencies: RecoveryDependencies = {}
 ): Promise<BundleExportResult> {
   const targetDirectory = await realpath(path.resolve(directory));
@@ -1010,7 +1194,8 @@ export async function exportRecoveryBundle(
       source: { branch: source.state.checkpoint.branch, head: source.state.checkpoint.head },
       event: { sequence: source.state.lastEvent.sequence, hash: source.state.lastEvent.hash },
       guardCheckpoint: source.state.checkpoint,
-      includeUntracked
+      includeUntracked,
+      includeLocalDocs
     }, dependencies);
   });
 }

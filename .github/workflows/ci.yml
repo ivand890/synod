@@ -21,7 +21,6 @@ jobs:
       fail-fast: false
       matrix:
         node-version:
-          - 20
           - 22
           - 24
     steps:
@@ -48,8 +47,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            node-version: 20
           - os: ubuntu-latest
             node-version: 22
           - os: ubuntu-latest
@@ -82,21 +79,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - codex-version: "0.141.0"
-            expected-status: unsupported
-            expected-healthy: "false"
-          - codex-version: "0.142.0"
-            expected-status: known-good
-            expected-healthy: "true"
-          - codex-version: "0.145.0"
+          - codex-version: "0.148.0-alpha.1"
             expected-status: supported
             expected-healthy: "true"
-          - codex-version: "0.147.0"
+          - codex-version: "0.148.0-alpha.9"
             expected-status: known-good
             expected-healthy: "true"
-          - codex-version: "0.148.0-alpha.1"
-            expected-status: unsupported
-            expected-healthy: "false"
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -122,6 +110,64 @@ jobs:
           SYNOD_EXPECTED_DOCTOR_HEALTHY: ${{ matrix.expected-healthy }}
         run: pnpm test:codex-compatibility
 
+  release-closeout:
+    name: Release closeout
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Enable pnpm
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Read closeout phase
+        id: closeout_phase
+        run: |
+          closeout_status="$(node --input-type=module -e "import closeout from './RELEASE-CLOSEOUT.json' with { type: 'json' }; process.stdout.write(typeof closeout.publicVerification?.status === 'string' ? closeout.publicVerification.status : '')")"
+          case "$closeout_status" in
+            pending|verified) printf 'status=%s\n' "$closeout_status" >> "$GITHUB_OUTPUT" ;;
+            *) echo "Release closeout has an unsupported publication phase: $closeout_status" >&2; exit 1 ;;
+          esac
+      - name: Validate pending closeout locally
+        if: steps.closeout_phase.outputs.status == 'pending'
+        run: |
+          package_name="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.name)")"
+          package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
+          pnpm exec tsx scripts/validate-release-closeout.ts \
+            --phase pre-tag \
+            --package "$package_name" \
+            --version "$package_version" \
+            --tag "v$package_version" \
+            --json
+      - name: Verify published closeout against public evidence
+        if: steps.closeout_phase.outputs.status == 'verified'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          package_name="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.name)")"
+          package_version="$(node --input-type=module -e "import manifest from './package.json' with { type: 'json' }; process.stdout.write(manifest.version)")"
+          release_tag="$(node --input-type=module -e "import closeout from './RELEASE-CLOSEOUT.json' with { type: 'json' }; process.stdout.write(closeout.tag)")"
+          tagged_commit="$(git rev-parse "$release_tag^{commit}")"
+          pnpm exec tsx scripts/verify-public-release-closeout.ts \
+            --file RELEASE-CLOSEOUT.json \
+            --package "$package_name" \
+            --version "$package_version" \
+            --tag "$release_tag" \
+            --tag-sha "$tagged_commit" \
+            --repository "$GITHUB_REPOSITORY" \
+            --json
+
   required:
     name: Required
     if: always()
@@ -129,6 +175,7 @@ jobs:
       - test
       - package-smoke
       - codex_compatibility
+      - release-closeout
     runs-on: ubuntu-latest
     steps:
       - name: Confirm required jobs passed
@@ -136,7 +183,9 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           PACKAGE_RESULT: ${{ needs.package-smoke.result }}
           CODEX_RESULT: ${{ needs.codex_compatibility.result }}
+          CLOSEOUT_RESULT: ${{ needs.release-closeout.result }}
         run: |
           test "$TEST_RESULT" = "success"
           test "$PACKAGE_RESULT" = "success"
           test "$CODEX_RESULT" = "success"
+          test "$CLOSEOUT_RESULT" = "success"

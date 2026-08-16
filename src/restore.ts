@@ -33,9 +33,10 @@ import type {
   BundleVerification,
   RecoveryEntry,
   RecoveryIndexEntry,
-  RecoveryManifest
+  RecoveryManifest,
+  RecoverySupplementalLocalDoc
 } from "./recovery.js";
-import { verifyRecoveryBundle } from "./recovery.js";
+import { RECOVERY_LOCAL_DOC_PATHS, verifyRecoveryBundle } from "./recovery.js";
 import {
   appendAgentsBlock,
   extractManagedAgentsBlock,
@@ -47,6 +48,7 @@ import { errorCode, errorMessage, isRecord, parseJson } from "./validation.js";
 const RESTORE_JOURNAL_SCHEMA_VERSION = 1;
 const RESTORE_JOURNAL_NAME = "synod-recovery-journal.json";
 const MAX_GIT_OUTPUT = 260 * 1024 * 1024;
+const MAX_JOURNAL_LOCAL_DOC_BYTES = 1024 * 1024;
 
 type RestorePhase =
   | "before-index-install"
@@ -62,6 +64,7 @@ export interface RestoreDependencies extends OrchestrationDependencies {
 export interface BundleRestoreOptions {
   bundle: string;
   directory?: string;
+  includeLocalDocs?: boolean;
 }
 
 export interface BundleRestoreResult extends BundleVerification {
@@ -69,6 +72,7 @@ export interface BundleRestoreResult extends BundleVerification {
   baseHead: string;
   fingerprint: string;
   recoveredInterruptedRestore: boolean;
+  localDocsRestored: number;
 }
 
 export interface OverlayRestoreResult extends BundleRestoreResult {
@@ -119,6 +123,8 @@ interface RestoreJournal {
   desiredIndexHash: string;
   paths: JournalPath[];
   createdDirectories: string[];
+  includeLocalDocs: boolean;
+  localDocs: RecoverySupplementalLocalDoc[];
 }
 
 interface JournalContext {
@@ -141,9 +147,10 @@ function serialize(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
-function exactKeys(value: Record<string, unknown>, required: string[]): boolean {
+function exactKeys(value: Record<string, unknown>, required: string[], optional: string[] = []): boolean {
+  const allowed = new Set([...required, ...optional]);
   return required.every(key => Object.hasOwn(value, key))
-    && Object.keys(value).every(key => required.includes(key));
+    && Object.keys(value).every(key => allowed.has(key));
 }
 
 function isHash(value: unknown): value is string {
@@ -198,12 +205,45 @@ function descriptor(value: unknown): MaterialDescriptor {
   return { type, mode: value.mode as number | null, object: value.object as string | null };
 }
 
+function journalLocalDocs(value: unknown): RecoverySupplementalLocalDoc[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > RECOVERY_LOCAL_DOC_PATHS.length) {
+    throw new SynodError(ERROR_CODES.RECOVERY_JOURNAL_INVALID, "The interrupted recovery journal local-doc selection is invalid.");
+  }
+  const localDocs = value.map(item => {
+    if (!isRecord(item)
+      || !exactKeys(item, ["path", "mode", "object", "size"])
+      || !RECOVERY_LOCAL_DOC_PATHS.includes(item.path as (typeof RECOVERY_LOCAL_DOC_PATHS)[number])
+      || !["100644", "100755"].includes(String(item.mode))
+      || !isHash(item.object)
+      || typeof item.size !== "number"
+      || !Number.isSafeInteger(item.size)
+      || item.size < 0
+      || item.size > MAX_JOURNAL_LOCAL_DOC_BYTES) {
+      throw new SynodError(ERROR_CODES.RECOVERY_JOURNAL_INVALID, "The interrupted recovery journal local-doc selection is invalid.");
+    }
+    return {
+      path: item.path as RecoverySupplementalLocalDoc["path"],
+      mode: item.mode as RecoverySupplementalLocalDoc["mode"],
+      object: item.object,
+      size: item.size
+    };
+  });
+  const sorted = [...localDocs].sort((left, right) => compareCheckpointPaths(left.path, right.path));
+  if (stableCheckpointStringify(localDocs) !== stableCheckpointStringify(sorted)
+    || new Set(localDocs.map(item => item.path)).size !== localDocs.length
+    || localDocs.reduce((total, item) => total + item.size, 0) > RECOVERY_LOCAL_DOC_PATHS.length * MAX_JOURNAL_LOCAL_DOC_BYTES) {
+    throw new SynodError(ERROR_CODES.RECOVERY_JOURNAL_INVALID, "The interrupted recovery journal local-doc selection is not canonical.");
+  }
+  return localDocs;
+}
+
 function validateJournal(value: unknown): RestoreJournal {
   if (!isRecord(value)
     || !exactKeys(value, [
       "schemaVersion", "id", "bundleId", "baseHead", "backupDirectory",
       "indexMode", "originalIndexHash", "desiredIndexHash", "paths", "createdDirectories"
-    ])
+    ], ["includeLocalDocs", "localDocs"])
     || value.schemaVersion !== RESTORE_JOURNAL_SCHEMA_VERSION
     || typeof value.id !== "string"
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.id)
@@ -220,6 +260,14 @@ function validateJournal(value: unknown): RestoreJournal {
     || !Array.isArray(value.paths)
     || !Array.isArray(value.createdDirectories)) {
     throw new SynodError(ERROR_CODES.RECOVERY_JOURNAL_INVALID, "The interrupted recovery journal is invalid.");
+  }
+  const includeLocalDocs = value.includeLocalDocs === undefined ? false : value.includeLocalDocs;
+  if (typeof includeLocalDocs !== "boolean") {
+    throw new SynodError(ERROR_CODES.RECOVERY_JOURNAL_INVALID, "The interrupted recovery journal local-doc selection is invalid.");
+  }
+  const localDocs = journalLocalDocs(value.localDocs);
+  if (!includeLocalDocs && localDocs.length > 0) {
+    throw new SynodError(ERROR_CODES.RECOVERY_JOURNAL_INVALID, "The interrupted recovery journal selected local docs without enabling local-doc restore.");
   }
   const paths = value.paths.map(item => {
     if (!isRecord(item)
@@ -253,7 +301,9 @@ function validateJournal(value: unknown): RestoreJournal {
     originalIndexHash: value.originalIndexHash,
     desiredIndexHash: value.desiredIndexHash,
     paths,
-    createdDirectories
+    createdDirectories,
+    includeLocalDocs,
+    localDocs
   };
 }
 
@@ -457,7 +507,8 @@ async function buildPlans(
   directory: string,
   manifest: RecoveryManifest,
   objects: Map<string, Buffer>,
-  objectFormat: string
+  objectFormat: string,
+  includeLocalDocs: boolean
 ): Promise<{ paths: RestorePathPlan[]; indexObjectIds: Map<string, string[]>; indexMaterials: Map<string, Buffer> }> {
   const plans = new Map<string, Material>();
   const indexObjectIds = new Map<string, string[]>();
@@ -503,12 +554,40 @@ async function buildPlans(
       addPlan(entry.sourcePath, { type: "missing", mode: null });
     }
   }
+  if (includeLocalDocs && manifest.supplemental) {
+    for (const localDoc of manifest.supplemental.localDocs) {
+      const content = objects.get(localDoc.object);
+      if (!content || content.byteLength !== localDoc.size || hashBytes(content) !== localDoc.object) {
+        throw new SynodError(ERROR_CODES.RECOVERY_BUNDLE_CORRUPT, "Supplemental local-doc material is missing after verification.", {
+          details: { path: localDoc.path, hash: localDoc.object }
+        });
+      }
+      addPlan(localDoc.path, {
+        type: "file",
+        mode: modeNumber(localDoc.mode),
+        content
+      });
+    }
+  }
   return {
     paths: [...plans.entries()].map(([relativePath, desired]) => ({ path: relativePath, desired }))
       .sort((left, right) => compareCheckpointPaths(left.path, right.path)),
     indexObjectIds,
     indexMaterials
   };
+}
+
+function selectedLocalDocs(manifest: RecoveryManifest, includeLocalDocs: boolean): RecoverySupplementalLocalDoc[] {
+  return includeLocalDocs ? [...(manifest.supplemental?.localDocs || [])] : [];
+}
+
+function journalSelectionMatches(
+  manifest: RecoveryManifest,
+  journal: RestoreJournal,
+  includeLocalDocs: boolean
+): boolean {
+  return journal.includeLocalDocs === includeLocalDocs
+    && stableCheckpointStringify(journal.localDocs) === stableCheckpointStringify(selectedLocalDocs(manifest, includeLocalDocs));
 }
 
 function materialDescriptor(material: Material): MaterialDescriptor {
@@ -543,6 +622,27 @@ async function inspectMaterial(directory: string, relativePath: string): Promise
   throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "Recovery cannot replace a directory or special filesystem path.", {
     details: { path: relativePath }
   });
+}
+
+async function assertSupplementalDestinationSafe(
+  directory: string,
+  manifest: RecoveryManifest,
+  objects: Map<string, Buffer>,
+  includeLocalDocs: boolean
+): Promise<void> {
+  if (!includeLocalDocs || !manifest.supplemental) return;
+  for (const localDoc of manifest.supplemental.localDocs) {
+    const current = await inspectMaterial(directory, localDoc.path);
+    if (current.type === "missing") continue;
+    const content = objects.get(localDoc.object);
+    if (!content || current.type !== "file" || !current.content
+      || hashBytes(current.content) !== localDoc.object
+      || (current.mode === null ? null : ((current.mode & 0o111) === 0 ? "100644" : "100755")) !== localDoc.mode) {
+      throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "Recovery refuses to overwrite different supplemental local docs.", {
+        details: { path: localDoc.path }
+      });
+    }
+  }
 }
 
 function descriptorMatches(material: Material, expected: MaterialDescriptor): boolean {
@@ -666,6 +766,7 @@ async function createJournal(
   manifest: RecoveryManifest,
   plans: RestorePathPlan[],
   desiredIndex: Buffer,
+  includeLocalDocs: boolean,
   locations: { journalPath: string; indexPath: string }
 ): Promise<JournalContext> {
   if (await pathType(locations.journalPath) !== "missing") {
@@ -704,7 +805,9 @@ async function createJournal(
       originalIndexHash: hashBytes(originalIndex),
       desiredIndexHash: hashBytes(desiredIndex),
       paths: journalPaths,
-      createdDirectories: await anticipatedDirectories(directory, plans)
+      createdDirectories: await anticipatedDirectories(directory, plans),
+      includeLocalDocs,
+      localDocs: selectedLocalDocs(manifest, includeLocalDocs)
     };
     const temporary = path.join(path.dirname(locations.journalPath), `.${RESTORE_JOURNAL_NAME}.${id}`);
     try {
@@ -984,7 +1087,7 @@ async function writeGitObjects(directory: string, materials: Map<string, Buffer>
 }
 
 export async function restoreRecoveryBundle(
-  { bundle, directory = "." }: BundleRestoreOptions,
+  { bundle, directory = ".", includeLocalDocs = false }: BundleRestoreOptions,
   dependencies: RestoreDependencies = {}
 ): Promise<BundleRestoreResult> {
   const verification = await verifyRecoveryBundle({ bundle });
@@ -992,13 +1095,16 @@ export async function restoreRecoveryBundle(
   if (!manifest.source.head) {
     throw new SynodError(ERROR_CODES.RECOVERY_BASE_MISMATCH, "Recovery bundles without a Git base cannot be restored.");
   }
+  const localDocsRestored = includeLocalDocs ? (manifest.supplemental?.localDocs.length || 0) : 0;
   const targetDirectory = await realpath(path.resolve(directory));
   return await maybeWithOrchestrationLock(targetDirectory, async () => {
     const locations = await journalLocations(targetDirectory);
     const interrupted = await readJournal(targetDirectory, locations);
     let recoveredInterruptedRestore = false;
     if (interrupted) {
-      if (interrupted.journal.bundleId === manifest.bundleId && await journalMatchesDesired(targetDirectory, interrupted)) {
+      const sameBundle = interrupted.journal.bundleId === manifest.bundleId;
+      const sameSelection = sameBundle && journalSelectionMatches(manifest, interrupted.journal, includeLocalDocs);
+      if (sameSelection && await journalMatchesDesired(targetDirectory, interrupted)) {
         const completed = await captureGitCheckpointSnapshot(targetDirectory, dependencies);
         if (completed.checkpoint.head === manifest.source.head
           && completed.checkpoint.worktree.fingerprint === manifest.checkpoint.fingerprint) {
@@ -1008,17 +1114,23 @@ export async function restoreRecoveryBundle(
             destination: targetDirectory,
             baseHead: manifest.source.head!,
             fingerprint: manifest.checkpoint.fingerprint,
-            recoveredInterruptedRestore: true
+            recoveredInterruptedRestore: true,
+            localDocsRestored
           };
         }
       }
+      // A retry with a different supplemental selection must never finalize the
+      // old journal: roll its exact plan back first, then execute the new mode.
+      // Journals written before supplemental support have no selection fields,
+      // which validate as the canonical false/empty mode above.
       await rollbackJournal(targetDirectory, interrupted);
       recoveredInterruptedRestore = true;
     }
     await assertCleanBase(targetDirectory, manifest.source.head!, dependencies);
     const objectFormat = (await runGit(targetDirectory, ["rev-parse", "--show-object-format"])).toString("utf8").trim();
     const objects = await readBundleObjects(verification);
-    const plans = await buildPlans(targetDirectory, manifest, objects, objectFormat);
+    await assertSupplementalDestinationSafe(targetDirectory, manifest, objects, includeLocalDocs);
+    const plans = await buildPlans(targetDirectory, manifest, objects, objectFormat, includeLocalDocs);
     const expectedEntries = expectedCheckpointEntries(manifest, plans.indexObjectIds);
     const expectedFingerprint = fingerprint(expectedEntries);
     if (expectedFingerprint !== manifest.checkpoint.fingerprint) {
@@ -1035,7 +1147,7 @@ export async function restoreRecoveryBundle(
     );
     let context: JournalContext | undefined;
     try {
-      context = await createJournal(targetDirectory, manifest, plans.paths, temporaryIndex.bytes, locations);
+      context = await createJournal(targetDirectory, manifest, plans.paths, temporaryIndex.bytes, includeLocalDocs, locations);
       await assertCleanBase(targetDirectory, manifest.source.head!, dependencies);
       const liveIndex = await regularFileBytes(locations.indexPath, "Git index");
       if (hashBytes(liveIndex) !== context.journal.originalIndexHash) {
@@ -1098,7 +1210,8 @@ export async function restoreRecoveryBundle(
         destination: targetDirectory,
         baseHead: manifest.source.head!,
         fingerprint: manifest.checkpoint.fingerprint,
-        recoveredInterruptedRestore
+        recoveredInterruptedRestore,
+        localDocsRestored
       };
     } catch (error) {
       if (context) {
@@ -1154,7 +1267,7 @@ export async function restoreRecoveryBundleOverlayUnderLock(
   }
   const objectFormat = (await runGit(targetDirectory, ["rev-parse", "--show-object-format"])).toString("utf8").trim();
   const objects = await readBundleObjects(verification);
-  const plans = await buildPlans(targetDirectory, manifest, objects, objectFormat);
+  const plans = await buildPlans(targetDirectory, manifest, objects, objectFormat, false);
   const expectedEntries = expectedCheckpointEntries(manifest, plans.indexObjectIds);
   if (fingerprint(expectedEntries) !== manifest.checkpoint.fingerprint) {
     throw new SynodError(ERROR_CODES.RECOVERY_BUNDLE_INVALID, "Proposal manifest cannot reproduce its declared checkpoint fingerprint.");
@@ -1175,6 +1288,7 @@ export async function restoreRecoveryBundleOverlayUnderLock(
       baseHead: manifest.source.head,
       fingerprint: manifest.checkpoint.fingerprint,
       recoveredInterruptedRestore,
+      localDocsRestored: 0,
       alreadyApplied: true,
       overallFingerprint: initial.checkpoint.worktree.fingerprint
     };
@@ -1199,7 +1313,7 @@ export async function restoreRecoveryBundleOverlayUnderLock(
   );
   let context: JournalContext | undefined;
   try {
-    context = await createJournal(targetDirectory, manifest, plans.paths, temporaryIndex.bytes, locations);
+    context = await createJournal(targetDirectory, manifest, plans.paths, temporaryIndex.bytes, false, locations);
     if (hashBytes(liveIndex) !== context.journal.originalIndexHash) {
       throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "The control index changed after the proposal index seed was read.");
     }
@@ -1262,6 +1376,7 @@ export async function restoreRecoveryBundleOverlayUnderLock(
       baseHead: manifest.source.head,
       fingerprint: manifest.checkpoint.fingerprint,
       recoveredInterruptedRestore,
+      localDocsRestored: 0,
       alreadyApplied: false,
       overallFingerprint: restored.checkpoint.worktree.fingerprint
     };

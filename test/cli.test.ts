@@ -7,7 +7,7 @@ import test from "node:test";
 import { WARNING_CODES, baseDiagnostics } from "../src/contracts.js";
 import { ERROR_CODES, asSynodError } from "../src/errors.js";
 import { run } from "../src/cli.js";
-import { parseLeaseArgs, parseProposalArgs, parseTaskArgs, parseWorktreeArgs } from "../src/command-options.js";
+import { parseLeaseArgs, parseProposalArgs, parseStatusArgs, parseTaskArgs, parseWorktreeArgs } from "../src/command-options.js";
 import { initProject } from "../src/lifecycle.js";
 import { packageName, packageVersion } from "../src/package.js";
 
@@ -56,6 +56,31 @@ test("keeps canonical diagnostics authoritative and preserves error-like message
   assert.equal(diagnostics.nodeVersion, process.versions.node);
   assert.equal(diagnostics.platform, process.platform);
   assert.equal(asSynodError({ message: "injected client failure" }).message, "injected client failure");
+});
+
+test("status selectors are single, explicit, and mutually exclusive", () => {
+  assert.deepEqual(parseStatusArgs(["--task", "T-001", "--json"]), {
+    directory: ".",
+    json: true,
+    taskId: "T-001"
+  });
+  assert.deepEqual(parseStatusArgs(["--active-only"]), {
+    directory: ".",
+    json: false,
+    activeOnly: true
+  });
+  assert.throws(
+    () => parseStatusArgs(["--task", "T-001", "--task", "T-002"]),
+    error => error instanceof Error && (error as Error & { code?: string }).code === ERROR_CODES.UNKNOWN_OPTION
+  );
+  assert.throws(
+    () => parseStatusArgs(["--active-only", "--changed-since-checkpoint"]),
+    error => error instanceof Error && (error as Error & { code?: string }).code === ERROR_CODES.UNKNOWN_OPTION
+  );
+  assert.throws(
+    () => parseStatusArgs(["--task", "T-001", "--explain"]),
+    error => error instanceof Error && (error as Error & { code?: string }).code === ERROR_CODES.UNKNOWN_OPTION
+  );
 });
 
 test("the installed entry point keeps init dry-run free of runtime and project writes", async () => {
@@ -321,6 +346,22 @@ test("typed task-next and proposal-submit parsing reject copied transition fence
     json: true,
     actor: "supervisor"
   });
+  assert.deepEqual(parseTaskArgs([
+    "correct", "t-api", "--revision", "2", "--reason", "review feedback", "--evidence", "review:one", "--cwd", "/tmp/project", "--json"
+  ]), {
+    action: "correct",
+    id: "t-api",
+    revision: 2,
+    reason: "review feedback",
+    evidence: ["review:one"],
+    directory: "/tmp/project",
+    json: true,
+    actor: "supervisor"
+  });
+  assert.throws(
+    () => parseTaskArgs(["correct", "t-api", "--reason", "review feedback", "--evidence", "review:one"]),
+    error => error instanceof Error && error.message.includes("--revision")
+  );
   assert.deepEqual(parseProposalArgs([
     "submit", "t-api", "--evidence", "test:pass", "--evidence", "test:pass", "--cwd", "/tmp/project", "--json"
   ]), {
@@ -341,7 +382,7 @@ test("recognized nested help wins before positional validation and mutation", as
   const parserCases = [
     { parser: parseLeaseArgs, actions: ["reserve", "bind", "cancel", "acquire", "heartbeat", "release", "expire", "revoke", "recover"] },
     { parser: parseWorktreeArgs, actions: ["create", "seal", "integrate", "cleanup", "status"] },
-    { parser: parseTaskArgs, actions: ["add", "transition", "override", "split", "next"] },
+    { parser: parseTaskArgs, actions: ["add", "transition", "correct", "override", "split", "next"] },
     { parser: parseProposalArgs, actions: ["submit"] }
   ];
   for (const { parser, actions } of parserCases) {
@@ -607,7 +648,7 @@ test("doctor text identifies the Desktop executable, version, and shared Codex h
             codexExecutable: executable,
             codexHome: "/Users/test/.codex",
             codexSurface: "desktop",
-            codexVersion: "0.147.0",
+            codexVersion: "0.148.0-alpha.9",
             appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
           };
         }
@@ -615,7 +656,7 @@ test("doctor text identifies the Desktop executable, version, and shared Codex h
     });
 
     assert.equal(status, 0);
-    assert.match(messages[0] ?? "", /Codex Desktop: 0\.147\.0 \(known-good; desktop\)/);
+    assert.match(messages[0] ?? "", /Codex Desktop: 0\.148\.0-alpha\.9 \(known-good; desktop\)/);
     assert.match(messages[0] ?? "", /Codex executable: \/Applications\/ChatGPT\.app\/Contents\/Resources\/codex \(desktop-process\)/);
     assert.match(messages[0] ?? "", /Codex home: \/Users\/test\/\.codex/);
   } finally {
@@ -655,7 +696,7 @@ test("shared client factories receive the doctor runtime executable", async () =
             return {
               codexExecutable: executable,
               codexSurface: "cli",
-              codexVersion: "0.147.0",
+              codexVersion: "0.148.0-alpha.9",
               appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
             };
           }
@@ -752,6 +793,61 @@ test("task and status commands expose canonical orchestration through schema-1 e
     const checkText = takeMessage(messages);
     assert.match(checkText, /Installed template:/);
     assert.match(checkText, /State template:/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("status selectors bound task and checkpoint output in text and JSON", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-status-selector-test-"));
+  const { messages, output } = capturedOutput();
+
+  try {
+    await run(["init", directory], output);
+    await run([
+      "task", "add", "T-SELECT",
+      "--objective", "Exercise status task selection",
+      "--executor", "synod_implementer",
+      "--acceptance", "The task is selected",
+      "--verification", "pnpm test",
+      "--cwd", directory
+    ], output);
+    await run(["task", "transition", "T-SELECT", "READY", "--revision", "0", "--cwd", directory], output);
+    messages.length = 0;
+
+    const taskCode = await run(["status", directory, "--task", "T-SELECT", "--json"], output);
+    const taskEnvelope = JSON.parse(takeMessage(messages));
+    assert.equal(taskCode, 0);
+    assert.equal(taskEnvelope.ok, true);
+    assert.deepEqual(taskEnvelope.data.tasks.map((task: { id: string }) => task.id), ["T-SELECT"]);
+    assert.equal(taskEnvelope.data.selection.type, "task");
+    assert.equal(taskEnvelope.data.selection.taskId, "T-SELECT");
+
+    const textCode = await run(["status", directory, "--active-only"], output);
+    const text = takeMessage(messages);
+    assert.equal(textCode, 0);
+    assert.match(text, /Selection: active-only/);
+    assert.match(text, /T-SELECT/);
+
+    const changedTextCode = await run(["status", directory, "--changed-since-checkpoint"], output);
+    const changedText = takeMessage(messages);
+    assert.equal(changedTextCode, 0);
+    assert.match(changedText, /Selection: changed-since-checkpoint/);
+
+    const unknownCode = await run(["status", directory, "--task", "T-MISSING", "--json"], output);
+    const unknown = JSON.parse(takeMessage(messages));
+    assert.equal(unknownCode, 1);
+    assert.equal(unknown.error.code, ERROR_CODES.TASK_NOT_FOUND);
+
+    const duplicateCode = await run(["status", directory, "--task", "T-SELECT", "--task", "T-SELECT", "--json"], output);
+    const duplicate = JSON.parse(takeMessage(messages));
+    assert.equal(duplicateCode, 1);
+    assert.equal(duplicate.error.code, ERROR_CODES.UNKNOWN_OPTION);
+
+    const incompatibleCode = await run(["status", directory, "--active-only", "--changed-since-checkpoint", "--json"], output);
+    const incompatible = JSON.parse(takeMessage(messages));
+    assert.equal(incompatibleCode, 1);
+    assert.equal(incompatible.error.code, ERROR_CODES.UNKNOWN_OPTION);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1314,6 +1410,7 @@ test("CLI summary view keeps status and lease mutation fences while full stays d
     const full = JSON.parse(takeMessage(messages));
     assert.equal(fullCode, 0);
     assert.ok(full.data.tasks[0].evidence);
+    assert.equal(Object.hasOwn(full.data, "selection"), false);
 
     const summaryCode = await run(["status", directory, "--json", "--view", "summary"], output);
     const summary = JSON.parse(takeMessage(messages));
@@ -1321,6 +1418,7 @@ test("CLI summary view keeps status and lease mutation fences while full stays d
     assert.equal(summary.data.healthy, true);
     assert.equal(summary.data.tasks[0].state, "READY");
     assert.equal(Object.hasOwn(summary.data.tasks[0], "evidence"), false);
+    assert.equal(Object.hasOwn(summary.data, "selection"), false);
 
     const reserveCode = await run([
       "lease", "reserve", "T-VIEW", "--write", "src/output-view.ts", "--cwd", directory,

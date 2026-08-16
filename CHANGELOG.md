@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+No unreleased changes.
+
+## [0.9.4] - 2026-08-15
+
+### Changed
+
+- Removed Node 20 support from the unreleased `v0.9.4` source candidate. Its
+  package engine and doctor now require Node `>=22`, and CI/package smoke
+  exercise Node 22/24 on Ubuntu plus Node 24 on macOS and Windows.
+- Replaced the unreleased candidate Codex compatibility contract with the
+  numeric `0.148` minor line: every valid `0.148.x` version is supported,
+  `0.148.0-alpha.9` is known-good, and versions below `0.148`, at or above
+  `0.149`, or invalid semver remain unsupported.
+
 ## [0.9.3] - 2026-08-14
 
 ### Added
@@ -137,7 +151,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- Migrated the CLI, lifecycle, orchestration, tests, and release tooling to strict TypeScript 7 while preserving the Node 20/22/24 runtime contract and existing command behavior.
+- Migrated the CLI, lifecycle, orchestration, tests, and release tooling to strict TypeScript 7 while preserving the historical Node 20/22/24 runtime contract and existing command behavior.
 - Packages now compile ESM into `dist` before packing, retain the JavaScript executable shim and legacy `src/*.js` deep-import surface, and ship no runtime TypeScript source.
 
 ## [0.6.2] - 2026-08-09
@@ -251,7 +265,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/ivand890/synod/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/ivand890/synod/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/ivand890/synod/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/ivand890/synod/compare/v0.9.0...v0.9.1

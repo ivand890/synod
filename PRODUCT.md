@@ -32,6 +32,22 @@ separation between host, App Server, and canonical wait authority. The strict
 shapes: they do not add persistence, runners, process ownership, spawn/resume
 observation, or an execution plane.
 
+The current `v0.9.4` source candidate adds an injected
+`HostDelegationAdapter` for host-owned spawn identity, bind authorization, wait
+observation, and lease liveness. Without that adapter, the standalone CLI fails
+closed or returns an incomplete handoff; Synod never claims execution
+ownership. Candidate proposal evidence also keeps independent Git lanes:
+`proposalAdded`, `gitTracked`, `staged`, and `committed` are separate facts,
+not one completion signal. These are implemented candidate surfaces, not public
+`v0.9.3` behavior, until a release and explicit project runtime upgrade.
+
+Human-owned Markdown under `docs/synod/` is local/private supporting context,
+not canonical orchestration state, Git evidence, or release proof. The five
+allowlisted notes (`GOAL.md`, `PLAN.md`, `STATE.md`, `DECISIONS.md`, and
+`WORKLOG.md`) become portable only through the explicit, hash-verified
+`--include-local-docs` recovery-bundle path; generated `STATUS.md` remains a
+local projection and is never exported as proof.
+
 Success means an operator can follow the lifecycle from `READY` through
 reservation, read-only spawn, bind, explicit authorization, wait, proposal,
 acceptance, verification, and `DONE` without guessing. `DONE` proves only the
@@ -78,7 +94,10 @@ Synod is precise, calm, and accountable.
    rather than silently accepting or discarding it.
 5. **Documentation follows runtime truth:** operator guidance, product context,
    release metadata, and tests must agree with the released package and its
-   observed boundaries.
+   observed boundaries. Advisor policy describes what the supervisor should
+   attempt; runtime output and persisted events describe what actually
+   happened. Policy cannot be presented as an owner-continuity or publication
+   guarantee.
 
 ## Accessibility & Inclusion
 

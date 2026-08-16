@@ -4,3 +4,10 @@ coverage/
 .DS_Store
 *.log
 *.tgz
+
+# Ignore dogfood files
+.synod
+.agents
+.codex
+docs/synod/*.md
+AGENTS.md

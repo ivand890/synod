@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "package": "@ivand890/synod",
+  "version": "0.9.3",
+  "tag": "v0.9.3",
+  "sourcePreparation": {
+    "status": "closed",
+    "tagSha": "ddbcaf4953f1dd3f0ec5cb82ba6403b6e9699788",
+    "mainAncestorRequired": true,
+    "localPackageSmoke": {
+      "artifact": "local tarball",
+      "command": "pnpm test:package",
+      "status": "passed",
+      "version": "0.9.3"
+    }
+  },
+  "publicVerification": {
+    "status": "verified",
+    "tagSha": "ddbcaf4953f1dd3f0ec5cb82ba6403b6e9699788",
+    "npm": {
+      "package": "@ivand890/synod",
+      "version": "0.9.3",
+      "gitHead": "ddbcaf4953f1dd3f0ec5cb82ba6403b6e9699788",
+      "latest": "0.9.3"
+    },
+    "githubRelease": {
+      "tag": "v0.9.3",
+      "url": "https://github.com/ivand890/synod/releases/tag/v0.9.3",
+      "publishedAt": "2026-08-14T19:29:39Z",
+      "isDraft": false,
+      "isPrerelease": false,
+      "isImmutable": true,
+      "isLatest": true
+    },
+    "registryInstalledPackage": {
+      "spec": "@ivand890/synod@0.9.3",
+      "dist": {
+        "integrity": "sha512-U9NagkGCOWXHQ3giKEBRaD87UGI6hwAn7Emd5sJwdhr6Qp10zdWHe+DGrNz1iSjkXzxczSzYd6RsivKwtQAa7w==",
+        "attestations": {
+          "url": "https://registry.npmjs.org/-/npm/v1/attestations/@ivand890%2fsynod@0.9.3",
+          "provenance": {
+            "predicateType": "https://slsa.dev/provenance/v1"
+          }
+        }
+      },
+      "consumerCommand": "pnpm add --ignore-scripts --save-exact @ivand890/synod@0.9.3",
+      "verification": {
+        "command": "pnpm exec synod --version",
+        "status": "passed",
+        "version": "0.9.3"
+      },
+      "status": "passed",
+      "version": "0.9.3"
+    },
+    "publicCli": {
+      "command": "pnpm dlx @ivand890/synod@0.9.3 --version",
+      "status": "passed",
+      "version": "0.9.3"
+    }
+  },
+  "documentation": {
+    "status": "verified",
+    "paths": [
+      "README.md",
+      "ROADMAP.md",
+      "RELEASING.md"
+    ],
+    "rule": "Advance these paths together only when publicVerification is verified."
+  }
+}

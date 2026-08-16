@@ -2,18 +2,29 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { classifyCodexVersion, compareVersions, parseVersion } from "../src/compatibility.js";
 
-test("classifies known-good, supported, and unsupported Codex versions", () => {
-  assert.equal(classifyCodexVersion("0.142.0").status, "known-good");
-  assert.equal(classifyCodexVersion("0.147.0").status, "known-good");
-  assert.equal(classifyCodexVersion("0.145.1").status, "supported");
-  assert.equal(classifyCodexVersion("0.141.9").status, "unsupported");
-  assert.equal(classifyCodexVersion("0.148.0").status, "unsupported");
-  assert.deepEqual(classifyCodexVersion("0.147.0-alpha.6.5"), {
+test("classifies the complete 0.148 minor line and rejects adjacent versions", () => {
+  assert.equal(classifyCodexVersion("0.148.0-alpha.9").status, "known-good");
+  assert.equal(classifyCodexVersion("0.148.0-alpha.9+ci.1").status, "known-good");
+  assert.deepEqual(classifyCodexVersion("0.148.0-alpha.1"), {
     status: "supported",
     reason: "preview_inside_supported_range"
   });
-  assert.equal(classifyCodexVersion("0.148.0-alpha.1").status, "unsupported");
-  assert.equal(classifyCodexVersion("0.147.0+ci.1").status, "known-good");
+  assert.deepEqual(classifyCodexVersion("0.148.0"), {
+    status: "supported",
+    reason: "inside_supported_range"
+  });
+  assert.deepEqual(classifyCodexVersion("0.148.1+ci.1"), {
+    status: "supported",
+    reason: "inside_supported_range"
+  });
+  assert.equal(classifyCodexVersion("0.148.10-alpha.6.5").status, "supported");
+  assert.equal(classifyCodexVersion("0.147.999").status, "unsupported");
+  assert.equal(classifyCodexVersion("0.147.999-alpha.1").status, "unsupported");
+  assert.equal(classifyCodexVersion("0.149.0").status, "unsupported");
+  assert.equal(classifyCodexVersion("0.149.0-alpha.1").status, "unsupported");
+  assert.equal(classifyCodexVersion("0.149.0+ci.1").status, "unsupported");
+  assert.equal(classifyCodexVersion("0.148").status, "unsupported");
+  assert.equal(classifyCodexVersion("0.148.0-01").status, "unsupported");
   assert.equal(compareVersions("0.147.0", "0.142.0"), 1);
 });
 
