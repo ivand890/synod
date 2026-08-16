@@ -2,18 +2,17 @@
 
 Synod publishes `@ivand890/synod` and its matching GitHub Release from GitHub Actions. npm uses trusted publishing; no npm publish token is stored in GitHub.
 
-The public `v0.9.3` source and post-publication evidence is immutable and
-archived in `release-closeouts/v0.9.3.json`, bound to tag commit
-`ddbcaf4953f1dd3f0ec5cb82ba6403b6e9699788`. The root `RELEASE-CLOSEOUT.json`
-is the current `v0.9.4` pre-tag candidate record: source preparation is
-`prepared`, publication and documentation are `pending`, and no tag SHA or
-passed package-smoke claim is recorded. Public latest remains `v0.9.3` until
-the protected `v0.9.4` workflow and a separately authorized post-publication
-closeout commit verify the external evidence. Do not rerun the historical
-`0.9.3` tag or publication commands.
+The public `v0.9.4` source is anchored by signed tag commit
+`f116a38acffb86c752f6e5c3f8013407ecfea267` and its externally immutable GitHub
+Release (`isImmutable: true`). Post-publication evidence is recorded in the
+versioned `release-closeouts/v0.9.4.json`. The prior `v0.9.3` evidence is
+recorded in versioned `release-closeouts/v0.9.3.json`, bound to signed tag
+commit `ddbcaf4953f1dd3f0ec5cb82ba6403b6e9699788`. The root
+`RELEASE-CLOSEOUT.json` records the same verified public v0.9.4 evidence. Do
+not rerun historical tag or publication commands.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
-workflow; the tag workflow validates only the immutable prepared/pending source
-record before publication.
+workflow; the tag workflow validates only the strict prepared/pending source
+record for the next release before publication.
 The commands below remain the protected release procedure for a future version.
 
 ## Two-phase closeout
@@ -21,10 +20,11 @@ The commands below remain the protected release procedure for a future version.
 Release documentation advances in two explicit phases:
 
 1. **Source preparation:** `package.json`, changelog, workflow, tests, and the
-   release documents are reviewed on `main`; the root closeout remains
-   `prepared`/`pending` with no self-referential tag SHA. The protected workflow
-   authenticates the exact tag, package version, and `main` ancestry, runs tests
-   and package smoke, then validates that realizable pre-tag record.
+   release documents are reviewed on `main`; the root closeout for the next
+   release is `prepared`/`pending` with no self-referential tag SHA. The
+   protected workflow authenticates the exact tag, package version, and `main`
+   ancestry, runs tests and package smoke, then validates that realizable
+   pre-tag record.
 2. **Public verification:** after the protected workflow publishes, record the
    exact npm `gitHead`, GitHub Release state, registry-installed package result
    (exact registry spec, `dist` integrity/attestation/provenance, and a clean
@@ -43,10 +43,13 @@ post-publication commit on `main`.
 The shared strict validator accepts only these complete shapes:
 
 ```bash
+release_version="${RELEASE_VERSION:?Set RELEASE_VERSION to the release version}"
+release_tag="v$release_version"
+release_tag_sha="${RELEASE_TAG_SHA:?Set RELEASE_TAG_SHA to the exact tag commit}"
 pnpm exec tsx scripts/validate-release-closeout.ts --phase tag \
-  --tag v0.9.4 --tag-sha <tag-commit-sha> --json
+  --tag "$release_tag" --tag-sha "$release_tag_sha" --json
 pnpm exec tsx scripts/validate-release-closeout.ts --phase post-publication \
-  --tag v0.9.4 --tag-sha <tag-commit-sha> --json
+  --tag "$release_tag" --tag-sha "$release_tag_sha" --json
 ```
 
 The tag phase requires `prepared`/`pending`, an absent tag SHA, and pending
@@ -60,8 +63,8 @@ verifier after resolving the exact tag commit:
 
 ```bash
 pnpm exec tsx scripts/verify-public-release-closeout.ts \
-  --file RELEASE-CLOSEOUT.json --tag v0.9.4 \
-  --tag-sha <tag-commit-sha> --repository ivand890/synod --json
+  --file RELEASE-CLOSEOUT.json --tag "$release_tag" \
+  --tag-sha "$release_tag_sha" --repository ivand890/synod --json
 ```
 
 It compares the recorded npm version, `gitHead`, `latest`, `dist` integrity,

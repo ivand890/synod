@@ -8,31 +8,27 @@ Synod installs a persistent, reviewed advisor loop for Codex projects. The selec
 
 [Open the interactive trace](https://htmlpreview.github.io/?https://github.com/ivand890/synod/blob/main/docs/synod/synod-cycle.html).
 
-The public `v0.9.3` release is verified at tag commit
-`ddbcaf4953f1dd3f0ec5cb82ba6403b6e9699788`. Its immutable source and
-post-publication evidence is archived in
-[`release-closeouts/v0.9.3.json`](release-closeouts/v0.9.3.json). The root
-[`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) is now the `v0.9.4` source
-candidate's pre-tag `prepared`/`pending` record: it intentionally has no tag
-SHA and does not claim a passed package smoke. Public latest remains `v0.9.3`
-until a separately authorized `v0.9.4` tag, publication, and post-publication
-closeout commit are verified.
-The phase-2 live verifier runs on the protected closeout PR, not the tag
-workflow; the tag workflow validates only the immutable prepared/pending source
-record before publication.
+The public `v0.9.4` release is verified at signed tag commit
+`f116a38acffb86c752f6e5c3f8013407ecfea267`; its matching GitHub Release is
+externally immutable. Post-publication evidence is recorded in the versioned
+[`release-closeouts/v0.9.4.json`](release-closeouts/v0.9.4.json). The prior
+`v0.9.3` evidence remains recorded in the versioned
+[`release-closeouts/v0.9.3.json`](release-closeouts/v0.9.3.json), and the root
+[`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) records the same verified
+public v0.9.4 evidence. The phase-2 live verifier runs on the protected
+closeout PR, not the tag workflow; the tag workflow validates only the strict
+prepared/pending source record before publication.
 
-## Public release versus source candidate
+## Public release and source tree
 
-The public and pinned `@ivand890/synod@0.9.3` is the release described above.
-A project using `pnpm dlx @ivand890/synod@0.9.3`, or a project runtime pinned
-to `0.9.3`, exposes the released command surface only. The current source
-checkout also contains the `v0.9.4` candidate from the SYN-094 tasks. Those
-surfaces are implemented and regression-tested locally, but are not published,
-are not part of the `0.9.3` tarball, and remain unavailable to a pinned
-runtime until a future release is published and that project is explicitly
-upgraded.
+The public and pinned `@ivand890/synod@0.9.4` is the release described above.
+A project using `pnpm dlx @ivand890/synod@0.9.4`, or a project runtime pinned
+to `0.9.4`, exposes the released command surface. The source tree contains
+the same v0.9.4 surfaces and their regression tests; future source increments
+remain unavailable to a pinned runtime until a corresponding release is
+published and that project is explicitly upgraded.
 
-Candidate-only source surfaces include:
+The v0.9.4 source surfaces include:
 
 - `synod task correct`, which records an evidence-backed correction while an
   active lease remains in force.
@@ -47,18 +43,17 @@ Candidate-only source surfaces include:
 - The explicit `--include-local-docs` recovery-bundle path and reproducible
   Chrome + ffmpeg release-closeout recipe.
 
-These candidate commands become available only after a future release and an
-explicit project runtime upgrade. The public/pinned `v0.9.3` `doctor` support
-range remains `>=0.142.0 <0.148.0`. The unreleased `v0.9.4` source candidate
-uses the support expression `>=0.148.0-0 <0.149.0 (all 0.148.x variants)`.
+These commands are available in the public v0.9.4 release. The public/pinned
+`v0.9.4` `doctor` support expression is
+`>=0.148.0-0 <0.149.0 (all 0.148.x variants)`.
 Every valid `0.148.x` semantic version is accepted, including prerelease,
 stable, patch, and build-metadata variants; `0.148.0-alpha.9` is known-good.
 Valid versions below `0.148` or at and above `0.149`, plus invalid semver, are
 unsupported.
 
-The unreleased `v0.9.4` source candidate requires Node.js `>=22`; Node 20 is
-unsupported by this candidate. Its CI tests Node 22 and 24 on Ubuntu, plus
-Node 24 package smoke on macOS and Windows.
+The v0.9.4 release requires Node.js `>=22`; Node 20 is unsupported. Its CI
+tests Node 22 and 24 on Ubuntu, plus Node 24 package smoke on macOS and
+Windows.
 
 ## Install
 
@@ -244,7 +239,7 @@ synod lease bind T-001 \
 
 The successful bind JSON adds an activation handoff derived from the existing `lease.bound` event: task and lease identity, `boundAt`, the exact event `{ sequence, id, hash }`, `writeAuthorized:true`, `supervisorNotification.status: "required-not-observed"`, and a typed `wait --task T-001` follow-up. The supervisor must send explicit write authorization to the worker only after bind succeeds, then run that task-aware wait; the receipt never claims that Codex notification, receipt, or execution was observed and never repeats the reservation token.
 
-If spawn fails, run `lease cancel` with the complete reservation fence and a reason. If no owner ID returns, wait for the reservation TTL and use the reservation form of `lease expire`. Neither pre-bind cleanup path creates an abandoned-worker recovery record because the reservation never authorized writes. The public/pinned `0.9.3` CLI cannot invoke Codex `spawn_agent` or claim execution ownership. The current source candidate provides `delegate start` only through an injected `HostDelegationAdapter`; an unadapted standalone CLI fails closed or returns the explicit incomplete host handoff.
+If spawn fails, run `lease cancel` with the complete reservation fence and a reason. If no owner ID returns, wait for the reservation TTL and use the reservation form of `lease expire`. Neither pre-bind cleanup path creates an abandoned-worker recovery record because the reservation never authorized writes. The public/pinned `0.9.4` CLI cannot invoke Codex `spawn_agent` or claim execution ownership. The released CLI provides `delegate start` only through an injected `HostDelegationAdapter`; an unadapted standalone CLI fails closed or returns the explicit incomplete host handoff.
 
 Callers that already know the worker identity may still use `lease acquire`. After bind or acquire, the JSON result contains the active lease ID, generation, task revision, owner, and `heartbeatAt`. Copy those exact values into heartbeat, release, worktree, revocation, or recovery commands; a stale value fails closed:
 
@@ -352,9 +347,8 @@ synod status --json
 
 `status` exits non-zero with `SYNOD_CHECKPOINT_DRIFT` when branch, `HEAD`, or relevant working-tree content differs. `status --explain` adds a read-only path delta in text or JSON that distinguishes committed, staged, unstaged, untracked, deleted, renamed, resolved, and binary paths since the acknowledged checkpoint. Synod-owned infrastructure and orchestration records are excluded so Synod does not create its own drift.
 
-The current source candidate also adds bounded selectors; these are not part of
-the public/pinned `0.9.3` command contract until a future release is published
-and upgraded into the project:
+The v0.9.4 release also adds bounded selectors; use them from a project pinned
+to the released runtime:
 
 ```bash
 synod status --task T-001
@@ -438,7 +432,7 @@ Export requires an acknowledged Git `HEAD`; the live branch, `HEAD`, Git index, 
 
 A schema-1 bundle contains canonical `manifest.json` plus raw content-addressed objects under `objects/`. The manifest binds the bundle ID to source branch/`HEAD`, checkpoint and snapshot hashes, last event identity, path modes and types, object sizes and SHA-256 values, and whether untracked material was included. Its deterministic `createdAt` is the acknowledged snapshot capture time, so repeated exports of the same checkpoint with the same Synod version serialize identically. Bundles can contain source code, secrets, binary data, and symlink targets, so keep them local and protect them like the checkout itself.
 
-`docs/synod/GOAL.md`, `PLAN.md`, `STATE.md`, `DECISIONS.md`, and `WORKLOG.md` are ignored, human-owned supporting context—not Git, checkpoint, or release proof. They never enter a default bundle or alter a checkpoint fingerprint. `--include-untracked` keeps its existing meaning and does not include them. Use the separate, explicit `--include-local-docs` opt-in to add only those five bounded regular files as verified `supplemental.localDocs`; generated `STATUS.md` and every other ignored path are excluded. Restore leaves supplemental notes untouched unless `--include-local-docs` is supplied, rejects unsafe ancestors and conflicting destination content, and journals the write transactionally. These notes may contain prompts, credentials, tokens, or other secrets: inspect and redact them before export, transfer, or publication. The opt-in local-doc path is a current `v0.9.4` candidate surface, not a command supplied by the public/pinned `0.9.3` runtime.
+`docs/synod/GOAL.md`, `PLAN.md`, `STATE.md`, `DECISIONS.md`, and `WORKLOG.md` are ignored, human-owned supporting context—not Git, checkpoint, or release proof. They never enter a default bundle or alter a checkpoint fingerprint. `--include-untracked` keeps its existing meaning and does not include them. Use the separate, explicit `--include-local-docs` opt-in to add only those five bounded regular files as verified `supplemental.localDocs`; generated `STATUS.md` and every other ignored path are excluded. Restore leaves supplemental notes untouched unless `--include-local-docs` is supplied, rejects unsafe ancestors and conflicting destination content, and journals the write transactionally. These notes may contain prompts, credentials, tokens, or other secrets: inspect and redact them before export, transfer, or publication. The opt-in local-doc path is part of the public v0.9.4 recovery contract.
 
 The `pnpm test:package` local tarball smoke is source-preparation evidence only;
 it cannot satisfy public verification. The public phase requires a clean
@@ -449,7 +443,7 @@ Verification parses external JSON fail-closed, requires canonical serialization,
 
 Restore requires a destination checkout at the bundle's exact base `HEAD` with no relevant staged, unstaged, or untracked changes. It derives the expected normalized checkpoint fingerprint before mutation, writes required content-addressed blobs without changing commits or refs, constructs a private temporary index, and journals the exact prior index bytes and every affected filesystem path inside the destination Git directory. It holds Git's standard `index.lock` across final index installation so another Git writer cannot be overwritten. The operation commits only after a fresh capture exactly matches the bundled fingerprint. Any ordinary failure restores the prior index and worktree; a killed process leaves the durable journal, and the next restore invocation safely rolls it back before retrying. If a journaled path, index, or index lock changed outside Synod, rollback fails closed with `SYNOD_RECOVERY_ROLLBACK_FAILED` and preserves the journal instead of overwriting concurrent content.
 
-To regenerate the checked-in cycle asset with the same document, use the dependency-free Chrome + ffmpeg recipe. This reproducible release-closeout surface is also a current `v0.9.4` candidate and is not available from a pinned `0.9.3` runtime until release and upgrade:
+To regenerate the checked-in cycle asset with the same document, use the dependency-free Chrome + ffmpeg recipe. This reproducible release-closeout surface is part of v0.9.4 and is available from a runtime pinned to that release:
 
 ```bash
 scripts/capture-synod-cycle-gif.sh
@@ -554,7 +548,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
   "data": {},
   "warnings": [],
   "diagnostics": {
-    "synodVersion": "0.9.3",
+    "synodVersion": "0.9.4",
     "nodeVersion": "24.12.0",
     "platform": "darwin",
     "codexVersion": "0.142.0"
@@ -596,18 +590,17 @@ CLI and Desktop may share `~/.codex` while running different Codex versions. Ins
 
 It then classifies that surface's Codex version independently from model availability:
 
-- Public/pinned `v0.9.3` support: `>=0.142.0 <0.148.0`.
-- Unreleased `v0.9.4` source candidate support expression:
+- Public/pinned `v0.9.4` support expression:
   `>=0.148.0-0 <0.149.0 (all 0.148.x variants)`.
-- Candidate known-good and exercised in CI: `0.148.0-alpha.9`.
-- Candidate supported: every valid semantic version whose numeric major/minor
+- Known-good and exercised in CI: `0.148.0-alpha.9`.
+- Supported: every valid semantic version whose numeric major/minor
   is exactly `0.148`, including stable, patch, prerelease, and build metadata.
   This version classification alone does not assert profile availability.
-- Candidate unsupported: valid versions below `0.148`, valid versions at or
+- Unsupported: valid versions below `0.148`, valid versions at or
   above `0.149`, and invalid semantic versions.
 
-The public numeric version range plus the candidate's numeric 0.148 minor-line
-classifier determine `codex.status` and version eligibility; only the
+The public numeric version range plus the numeric 0.148 minor-line classifier
+determine `codex.status` and version eligibility; only the
 matrix-tested preview is `known-good`. Live App Server and model probes
 independently determine `modelCompatible` and profile compatibility. Overall
 health requires both an eligible version and the selected profile's required
@@ -635,6 +628,6 @@ pnpm test:codex-compatibility # requires explicit SYNOD_EXPECTED_* environment v
 pnpm pack --pack-destination dist
 ```
 
-Source uses strict TypeScript 7 with explicit `.js` ESM specifiers and compiles into `dist`; published consumers execute JavaScript and do not need TypeScript. The current source candidate's CI exercises the installed tarball on Node 22 and 24 on Ubuntu, plus Node 24 on macOS and Windows.
+Source uses strict TypeScript 7 with explicit `.js` ESM specifiers and compiles into `dist`; published consumers execute JavaScript and do not need TypeScript. The v0.9.4 CI exercises the installed tarball on Node 22 and 24 on Ubuntu, plus Node 24 on macOS and Windows.
 
 Every change lands through a pull request with required CI. Protected `vX.Y.Z` tags publish both npm and GitHub releases, with exact-commit and `latest` parity enforced before the workflow succeeds; see [RELEASING.md](RELEASING.md).

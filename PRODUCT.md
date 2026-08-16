@@ -32,14 +32,15 @@ separation between host, App Server, and canonical wait authority. The strict
 shapes: they do not add persistence, runners, process ownership, spawn/resume
 observation, or an execution plane.
 
-The current `v0.9.4` source candidate adds an injected
+The public `v0.9.4` release adds an injected
 `HostDelegationAdapter` for host-owned spawn identity, bind authorization, wait
 observation, and lease liveness. Without that adapter, the standalone CLI fails
 closed or returns an incomplete handoff; Synod never claims execution
-ownership. Candidate proposal evidence also keeps independent Git lanes:
+ownership. Proposal evidence also keeps independent Git lanes:
 `proposalAdded`, `gitTracked`, `staged`, and `committed` are separate facts,
-not one completion signal. These are implemented candidate surfaces, not public
-`v0.9.3` behavior, until a release and explicit project runtime upgrade.
+not one completion signal. These are public v0.9.4 surfaces; future source
+increments remain unavailable to a pinned runtime until a corresponding release
+and explicit project runtime upgrade.
 
 Human-owned Markdown under `docs/synod/` is local/private supporting context,
 not canonical orchestration state, Git evidence, or release proof. The five

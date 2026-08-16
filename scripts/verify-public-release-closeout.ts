@@ -460,7 +460,7 @@ export function verifyExactRegistryInstall(
       packageSpec,
     ], { cwd: temporaryDirectory, env: packageEnvironment.environment });
     return versionOutput(
-      commandRunner("pnpm", ["exec", "synod", "--version"], {
+      commandRunner("pnpm", ["--reporter=silent", "exec", "synod", "--version"], {
         cwd: temporaryDirectory,
         env: packageEnvironment.environment,
       }),
@@ -482,6 +482,7 @@ export function verifyPublicDlx(
   try {
     return versionOutput(
       commandRunner("pnpm", [
+        "--reporter=silent",
         "dlx",
         `--config.registry=${DEFAULT_REGISTRY}`,
         packageSpec,

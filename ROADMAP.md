@@ -1,25 +1,24 @@
 # Synod Roadmap
 
-Last updated: 2026-08-15
-Current public release: `v0.9.3`
-Current source candidate: `v0.9.4` (unreleased)
-Last verified public release at this update: `v0.9.3`
+Last updated: 2026-08-16
+Current public release: `v0.9.4`
+Current source release: `v0.9.4`
+Last verified public release at this update: `v0.9.4`
 
 This roadmap converts the advisor loop's remaining operational risks into
 versioned, testable increments. Entries at or below the last verified public
-release are delivered. The current source candidate may contain implemented and
-tested commands that are not shipped. Later increments remain unavailable to a
-public/pinned runtime until their release is published and the project is
-explicitly upgraded. Exact CLI spelling remains provisional until an increment
-is implemented and released. Source preparation and post-publication npm,
-GitHub, registry-installed package, and public CLI evidence for `v0.9.3` are
-captured in immutable `release-closeouts/v0.9.3.json`. The root
-`RELEASE-CLOSEOUT.json` now records the `v0.9.4` pre-tag `prepared`/`pending`
-phase without a tag SHA or passed-smoke claim; public latest remains `v0.9.3`
-until a separately authorized tag, publication, and post-publication closeout
-commit are verified.
+release are delivered. Later increments remain unavailable to a public/pinned
+runtime until their release is published and the project is explicitly
+upgraded. Exact CLI spelling remains provisional until an increment is
+implemented and released. Source preparation and post-publication npm,
+GitHub, registry-installed package, and public CLI evidence for `v0.9.4` are
+captured in the versioned `release-closeouts/v0.9.4.json`; the prior `v0.9.3`
+evidence remains recorded in the versioned `release-closeouts/v0.9.3.json`.
+The signed tag and GitHub Release `isImmutable: true` provide the external
+release anchors; the root `RELEASE-CLOSEOUT.json` records the same verified
+v0.9.4 evidence.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
-workflow; the tag workflow validates only the immutable prepared/pending source
+workflow; the tag workflow validates only the strict prepared/pending source
 record before publication.
 
 The `v0.9.1` release delivered pre-spawn lease reservations and corrected
@@ -80,7 +79,7 @@ its own.
 Status: delivered in `v0.6.3`.
 
 The v0.6.3 migration historically supported Node 20/22/24. The current
-unreleased v0.9.4 source candidate requires Node `>=22` and removes Node 20
+v0.9.4 release requires Node `>=22` and removes Node 20
 support. Synod will publish compiled ESM JavaScript and keep a minimal
 JavaScript `bin/synod.js` shim; consumers will not need TypeScript and no
 production dependency will be added. Source imports keep their explicit `.js`
@@ -88,7 +87,7 @@ specifiers under `module: NodeNext`.
 
 The migration acceptance rows below retain their historical Node 20/22/24
 runtime gates; they describe the delivered v0.6.x foundation, not the current
-candidate runtime requirement.
+release runtime requirement.
 
 | ID | Outcome | Depends on | Acceptance gate |
 |---|---|---|---|
@@ -186,10 +185,9 @@ Goal: make runtime/version identity and wait ownership explicit while shipping a
 strict, validation-only durable job contract with no execution plane.
 
 Status: delivered and publicly verified. The exact tag SHA and post-publication
-npm/GitHub, registry-installed package, and public CLI facts are verified; the
-documentary closeout record is currently in the uncommitted candidate worktree
-and becomes repository/main evidence only after a separately authorized commit
-and merge. The local tarball smoke remains source-preparation evidence only.
+npm/GitHub, registry-installed package, and public CLI facts are verified in the
+versioned v0.9.3 closeout archive. The local tarball smoke remains
+source-preparation evidence only.
 
 | ID | Outcome | Acceptance gate |
 |---|---|---|
@@ -202,45 +200,39 @@ Release gate: source preparation is satisfied by the protected workflow and
 exact signed release tag, including the local tarball smoke; public
 verification is satisfied only by the exact npm `gitHead`, GitHub Release
 state, registry-installed package integrity/attestation/provenance and clean
-consumer check, and public CLI parity recorded in immutable
-`release-closeouts/v0.9.3.json` with README, ROADMAP, and RELEASING advancing
-together only after an authorized post-publication repository commit. The root
-closeout is reserved for the current `v0.9.4` prepared/pending turn.
+consumer check, and public CLI parity recorded in versioned
+`release-closeouts/v0.9.3.json`.
 
-## v0.9.4 — Candidate surfaces (unreleased)
+## v0.9.4 — Review, host, status, and recovery surfaces
 
 Goal: make the next review, host, status, recovery, and release surfaces
-explicit without presenting source-checkout behavior as public `v0.9.3` truth.
+explicit while preserving the public release's fail-closed boundaries.
 
-Status: implemented and regression-tested in the current source worktree, but
-unshipped and unavailable to public or pinned `v0.9.3` runtimes. These surfaces
-become available only after a future `v0.9.4` release is published and each
-project explicitly upgrades its pinned runtime. The public/pinned `v0.9.3`
-`doctor` support ceiling remains `<0.148.0`; its full public support range is
-`>=0.142.0 <0.148.0`. The candidate support expression is
+Status: delivered and publicly verified. These surfaces are available to
+public and pinned `v0.9.4` runtimes. The public/pinned `v0.9.4` `doctor`
+support expression is
 `>=0.148.0-0 <0.149.0 (all 0.148.x variants)`. Every valid semantic version
 whose numeric major/minor is exactly `0.148` is accepted, including any patch,
 prerelease, stable, and build metadata; `0.148.0-alpha.9` is known-good.
 Valid versions below `0.148`, valid versions at or above `0.149`, and invalid
 semantic versions remain unsupported.
-The candidate package engine and doctor range are Node `>=22`; Node 20 is
-unsupported. Candidate CI retains Ubuntu Node 22/24 tests and package smoke,
+The package engine and doctor range are Node `>=22`; Node 20 is unsupported.
+CI retains Ubuntu Node 22/24 tests and package smoke,
 plus Node 24 smoke on macOS and Windows.
 
-| ID | Candidate outcome | Candidate acceptance boundary |
+| ID | Outcome | Acceptance boundary |
 |---|---|---|
 | SYN-094-REVIEW-001 | Record pre-proposal corrections and expose exact per-path Git-lane provenance for sealed proposals. | Correction budget is consumed while `ACTIVE`; `proposalAdded`, `gitTracked`, `staged`, and `committed` remain independent facts and drift fails closed. |
 | SYN-094-HOST-002 | Add an injected host delegation adapter for spawn identity, bind authorization, wait observation, and lease liveness. | The host owns execution; an unadapted CLI/Desktop path remains an explicit incomplete handoff and never claims execution ownership. |
 | SYN-094-STATUS-003 | Add bounded task, active-only, and changed-since-checkpoint status selectors without changing default status compatibility. | Text/JSON selectors are mutually exclusive, bounded, read-only, and fail closed for unknown tasks or incompatible options. |
-| SYN-094-SURFACES-004 | Make release closeout, dependency-free GIF generation, and local-versus-portable documentation policy reproducible. | Closeout evidence, 1120×622 GIF validation, and opt-in hash-verified local docs remain candidate surfaces until release and upgrade. |
+| SYN-094-SURFACES-004 | Make release closeout, dependency-free GIF generation, and local-versus-portable documentation policy reproducible. | Closeout evidence, 1120×622 GIF validation, and opt-in hash-verified local docs are reproducible public release surfaces. |
 | SYN-094-PACKAGE-CLEANUP-005 | Remove supervisor-generated npm-init metadata without changing the package contract. | `package.json` is byte-identical to the released contract and no unrelated path changes. |
-| SYN-094-DOC-VERSION-006 | Separate public `0.9.3` runtime truth from implemented but unpublished candidate commands across product documentation. | README, PRODUCT, and ROADMAP classify candidate commands; standalone host delegation fails closed. |
-| SYN-094-RELEASE-011 | Prepare the accepted candidate as a realizable fail-closed `v0.9.4` source release. | The protected workflow authenticates tag/package/main identity, runs tests and package smoke before strict closeout validation, and supports exact post-publication evidence without changing public `v0.9.3` truth early. |
+| SYN-094-DOC-VERSION-006 | Separate the public `0.9.4` runtime truth from source-only future changes across product documentation. | README, PRODUCT, and ROADMAP describe the released commands; standalone host delegation fails closed. |
+| SYN-094-RELEASE-011 | Prepare the accepted increment as a realizable fail-closed `v0.9.4` source release. | The protected workflow authenticates tag/package/main identity, runs tests and package smoke before strict closeout validation, and records exact post-publication evidence. |
 
-Candidate release gate: all seven SYN-094 tasks must be reviewed and verified
-on the exact source revision, then published and consumed through an explicit
-project runtime upgrade before their commands or documentation can be treated
-as public product behavior. `SYN-094-RELEASE-011` additionally requires an
+Release gate: all seven SYN-094 tasks were reviewed and verified on the exact
+source revision, then published and consumed through the exact public v0.9.4
+package. `SYN-094-RELEASE-011` additionally requires an
 authenticated tag/package/main ancestry check, test and package-smoke run, and
 phase-strict closeout validation before publication. Its phase-2 live verifier
 runs on the protected closeout PR, not the tag workflow, and performs the

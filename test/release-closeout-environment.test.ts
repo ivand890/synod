@@ -216,7 +216,7 @@ test("package install and dlx use isolated environments, forced public registry,
           assert.deepEqual(args.slice(0, 5), ["add", "--ignore-scripts", "--save-exact", "--registry", PUBLIC_REGISTRY]);
           return "";
         }
-        assert.deepEqual(args, ["exec", "synod", "--version"]);
+        assert.deepEqual(args, ["--reporter=silent", "exec", "synod", "--version"]);
         return "0.9.4\n";
       },
     );
@@ -234,7 +234,7 @@ test("package install and dlx use isolated environments, forced public registry,
       "0.9.4",
       (command, args, options) => {
         assert.equal(command, "pnpm");
-        assert.deepEqual(args, ["dlx", `--config.registry=${PUBLIC_REGISTRY}`, "@ivand890/synod@0.9.4", "--version"]);
+        assert.deepEqual(args, ["--reporter=silent", "dlx", `--config.registry=${PUBLIC_REGISTRY}`, "@ivand890/synod@0.9.4", "--version"]);
         assert.ok(options?.env);
         assert.ok(options?.cwd);
         assertCleanPackageEnvironment(options.env, options.cwd);
@@ -268,7 +268,7 @@ test("package install and dlx use isolated environments, forced public registry,
 test("pnpm dlx public registry option is accepted by the local CLI parser", () => {
   const parsed = spawnSync(
     "pnpm",
-    ["dlx", `--config.registry=${PUBLIC_REGISTRY}`, "--help"],
+    ["--reporter=silent", "dlx", `--config.registry=${PUBLIC_REGISTRY}`, "--help"],
     { cwd: process.cwd(), encoding: "utf8", env: { PATH: process.env.PATH } },
   );
   assert.equal(parsed.status, 0, parsed.stderr);
