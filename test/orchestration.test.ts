@@ -800,16 +800,24 @@ test("proposal Git path lanes batch literal pathspecs by bytes and union exact r
   const directory = await temporaryProject();
   await mkdir(path.join(directory, "src"), { recursive: true });
   await initializeGitHead(directory);
+  const paths = Array.from({ length: 300 }, (_, index) =>
+    `src/batch-${String(index).padStart(3, "0")}-${"界".repeat(40)}-${"é".repeat(20)}.ts`
+  );
+  const earlyPath = paths[0]!;
+  const finalPath = paths.at(-1)!;
+  await writeFile(path.join(directory, earlyPath), "export const value0 = 0;\n", "utf8");
+  await writeFile(path.join(directory, finalPath), "export const value299 = 299;\n", "utf8");
+  await git(directory, "add", "--", earlyPath, finalPath);
+  await git(directory, "commit", "--quiet", "-m", "commit representative batch paths");
   await addDefaultTask(directory);
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
   await acquireTaskLease({ directory, id: "T-001", ownerThread: "test:T-001", writeTree: ["src"] });
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
-  const paths = Array.from({ length: 300 }, (_, index) =>
-    `src/batch-${String(index).padStart(3, "0")}-${"界".repeat(40)}-${"é".repeat(20)}.ts`
-  );
-  await Promise.all(paths.map((relativePath, index) =>
-    writeFile(path.join(directory, relativePath), `export const value${index} = ${index};\n`, "utf8")
+  await Promise.all(paths.slice(1, -1).map((relativePath, index) =>
+    writeFile(path.join(directory, relativePath), `export const value${index + 1} = ${index + 1};\n`, "utf8")
   ));
+  await writeFile(path.join(directory, earlyPath), "export const value0 = 0;\nexport const changedEarly = true;\n", "utf8");
+  await writeFile(path.join(directory, finalPath), "export const value299 = 299;\nexport const changedFinal = true;\n", "utf8");
   const proposalGitArguments: string[][] = [];
   const delivered = await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery:batched"] }, {
     gitRunner: async (gitDirectory, args) => {
@@ -823,6 +831,17 @@ test("proposal Git path lanes batch literal pathspecs by bytes and union exact r
   const headBatches = proposalGitArguments.filter(args => args[0] === "ls-tree" && args.some(arg => arg.startsWith(":(literal)")));
   assert.ok(indexBatches.length > 1);
   assert.ok(headBatches.length > 1);
+  assert.ok(indexBatches[0]?.includes(`:(literal)${earlyPath}`));
+  assert.ok(indexBatches.at(-1)?.includes(`:(literal)${finalPath}`));
+  assert.ok(headBatches[0]?.includes(`:(literal)${earlyPath}`));
+  assert.ok(headBatches.at(-1)?.includes(`:(literal)${finalPath}`));
+  const proposalPathStates = delivered.task.proposal?.pathStates ?? [];
+  for (const representativePath of [earlyPath, finalPath]) {
+    const pathState = proposalPathStates.find(item => item.path === representativePath);
+    assert.ok(pathState);
+    assert.equal(pathState.gitTracked, true);
+    assert.equal(pathState.committed, true);
+  }
   const argvBytes = (args: readonly string[]) => args.reduce(
     (total, arg) => total + Buffer.byteLength(arg, "utf8") + 1,
     0
