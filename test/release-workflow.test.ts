@@ -28,6 +28,7 @@ const productPath = new URL("../PRODUCT.md", import.meta.url);
 const releasingPath = new URL("../RELEASING.md", import.meta.url);
 const closeoutPath = new URL("../RELEASE-CLOSEOUT.json", import.meta.url);
 const archivedCloseoutPath = new URL("../release-closeouts/v0.9.3.json", import.meta.url);
+const archivedCurrentCloseoutPath = new URL("../release-closeouts/v0.9.4.json", import.meta.url);
 const gifScriptPath = new URL("../scripts/capture-synod-cycle-gif.sh", import.meta.url);
 const cyclePath = new URL("../docs/synod/synod-cycle.html", import.meta.url);
 const cycleGifPath = new URL("../docs/synod/assets/synod-cycle-loop.gif", import.meta.url);
@@ -195,8 +196,8 @@ test("installed-package smoke covers the production-shaped release contract", as
   assert.match(packageSmoke, /const installedTemplateVersion = "0\.0\.1"/);
 });
 
-test("archived 0.9.3 evidence and product/docs contract stay explicit", async () => {
-  const [packageText, changelog, roadmap, readme, product, releasing, closeoutText, packageSmoke] = await Promise.all([
+test("verified 0.9.4 evidence, archived 0.9.3 evidence, and product/docs contract stay explicit", async () => {
+  const [packageText, changelog, roadmap, readme, product, releasing, archivedCloseoutText, closeoutText, archivedCurrentCloseoutText, packageSmoke] = await Promise.all([
     readFile(packagePath, "utf8"),
     readFile(changelogPath, "utf8"),
     readFile(roadmapPath, "utf8"),
@@ -204,10 +205,14 @@ test("archived 0.9.3 evidence and product/docs contract stay explicit", async ()
     readFile(productPath, "utf8"),
     readFile(releasingPath, "utf8"),
     readFile(archivedCloseoutPath, "utf8"),
+    readFile(closeoutPath, "utf8"),
+    readFile(archivedCurrentCloseoutPath, "utf8"),
     readFile(packageSmokePath, "utf8")
   ]);
   const packageJson = parseJson(packageText);
-  const closeout = parseJson(closeoutText);
+  const closeout = parseJson(archivedCloseoutText);
+  const currentCloseout = parseJson(closeoutText);
+  const archivedCurrentCloseout = parseJson(archivedCurrentCloseoutText);
   assert.ok(isRecord(packageJson));
   assert.ok(isRecord(closeout));
   assert.equal(packageJson.version, "0.9.4");
@@ -262,28 +267,86 @@ test("archived 0.9.3 evidence and product/docs contract stay explicit", async ()
   assert.equal((closeout.documentation as Record<string, unknown>).status, "verified");
   assert.deepEqual((closeout.documentation as Record<string, unknown>).paths, ["README.md", "ROADMAP.md", "RELEASING.md"]);
 
+  assert.equal(closeoutText, archivedCurrentCloseoutText, "root and archived v0.9.4 closeouts must be byte-identical");
+  assert.deepEqual(currentCloseout, archivedCurrentCloseout);
+  assert.ok(isRecord(currentCloseout));
+  assert.equal(currentCloseout.schemaVersion, 1);
+  assert.equal(currentCloseout.package, "@ivand890/synod");
+  assert.equal(currentCloseout.version, "0.9.4");
+  assert.equal(currentCloseout.tag, "v0.9.4");
+  assert.deepEqual(currentCloseout.sourcePreparation, {
+    status: "closed",
+    tagSha: "f116a38acffb86c752f6e5c3f8013407ecfea267",
+    mainAncestorRequired: true,
+    localPackageSmoke: {
+      artifact: "local tarball",
+      command: "pnpm test:package",
+      status: "passed",
+      version: "0.9.4",
+    },
+  });
+  const currentPublicVerification = currentCloseout.publicVerification as Record<string, unknown>;
+  assert.deepEqual(currentPublicVerification.npm, {
+    package: "@ivand890/synod",
+    version: "0.9.4",
+    gitHead: "f116a38acffb86c752f6e5c3f8013407ecfea267",
+    latest: "0.9.4",
+  });
+  assert.deepEqual(currentPublicVerification.githubRelease, {
+    tag: "v0.9.4",
+    url: "https://github.com/ivand890/synod/releases/tag/v0.9.4",
+    publishedAt: "2026-08-16T02:36:20Z",
+    isDraft: false,
+    isPrerelease: false,
+    isImmutable: true,
+    isLatest: true,
+  });
+  assert.deepEqual(currentPublicVerification.registryInstalledPackage, {
+    spec: "@ivand890/synod@0.9.4",
+    dist: {
+      integrity: "sha512-21Y4vRcUHFRaSgotBdBBYhbJ7/cHRueYJZA5/VdcwF6a5h6ANO3UpwxRvwWWObkTni1uVGxVVVXvBwkQTJuxLA==",
+      attestations: {
+        url: "https://registry.npmjs.org/-/npm/v1/attestations/@ivand890%2fsynod@0.9.4",
+        provenance: { predicateType: "https://slsa.dev/provenance/v1" },
+      },
+    },
+    consumerCommand: "pnpm add --ignore-scripts --save-exact @ivand890/synod@0.9.4",
+    verification: { command: "pnpm exec synod --version", status: "passed", version: "0.9.4" },
+    status: "passed",
+    version: "0.9.4",
+  });
+  assert.deepEqual(currentPublicVerification.publicCli, {
+    command: "pnpm dlx @ivand890/synod@0.9.4 --version",
+    status: "passed",
+    version: "0.9.4",
+  });
+  assert.deepEqual(currentCloseout.documentation, {
+    status: "verified",
+    paths: ["README.md", "ROADMAP.md", "RELEASING.md"],
+    rule: "Advance these paths together only when publicVerification is verified.",
+  });
+
   assert.match(changelog, /^## \[0\.9\.3\] - 2026-08-14$/m);
   assert.match(changelog, /^## \[0\.9\.4\] - 2026-08-15$/m);
   assert.match(changelog, /\[Unreleased\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.4\.\.\.HEAD/);
   assert.match(changelog, /\[0\.9\.4\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.3\.\.\.v0\.9\.4/);
   assert.match(changelog, /\[0\.9\.3\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.2\.\.\.v0\.9\.3/);
-  assert.match(roadmap, /Current public release: `v0\.9\.3`/);
-  assert.match(roadmap, /Current source candidate: `v0\.9\.4` \(unreleased\)/);
-  assert.match(roadmap, /Last verified public release at this update: `v0\.9\.3`/);
-  assert.match(roadmap, /immutable `release-closeouts\/v0\.9\.3\.json`/);
-  assert.match(roadmap, /root\s+`RELEASE-CLOSEOUT\.json` now records the `v0\.9\.4` pre-tag `prepared`\/`pending`/);
-  assert.match(roadmap, /public latest remains `v0\.9\.3`/);
+  assert.match(roadmap, /Current public release: `v0\.9\.4`/);
+  assert.match(roadmap, /Current source release: `v0\.9\.4`/);
+  assert.match(roadmap, /Last verified public release at this update: `v0\.9\.4`/);
+  assert.match(roadmap, /immutable `release-closeouts\/v0\.9\.4\.json`/);
+  assert.match(roadmap, /release-closeouts\/v0\.9\.3\.json/);
+  assert.match(roadmap, /root\s+`RELEASE-CLOSEOUT\.json` records the same verified v0\.9\.4 evidence/);
+  assert.doesNotMatch(roadmap, /public latest remains/);
   assert.match(roadmap, /Status: delivered and publicly verified/);
   assert.doesNotMatch(roadmap, /last verified public package remains `v0\.9\.2`/i);
   assert.doesNotMatch(roadmap, /public verification remains `v0\.9\.2`/i);
   assert.match(roadmap, /\| SYN-093-VERSIONS-001 \|/);
-  assert.match(roadmap, /## v0\.9\.4 — Candidate surfaces \(unreleased\)/);
-  assert.match(roadmap, /unshipped and unavailable to public or pinned\s+`v0\.9\.3` runtimes/);
-  assert.match(roadmap, /future `v0\.9\.4` release is published/);
-  assert.match(roadmap, /doctor` support\s+ceiling remains `<0\.148\.0`/);
-  assert.match(roadmap, /candidate support expression is\s+`>=0\.148\.0-0 <0\.149\.0 \(all 0\.148\.x variants\)`/);
-  assert.doesNotMatch(roadmap, /candidate support expression is\s+`>=0\.142\.0 <0\.148\.0/);
-  assert.match(roadmap, /v0\.9\.4 source candidate requires Node(?:\.js)? `>=22`/);
+  assert.match(roadmap, /## v0\.9\.4 — Review, host, status, and recovery surfaces/);
+  assert.match(roadmap, /public and pinned `v0\.9\.4` runtimes/);
+  assert.match(roadmap, /public\/pinned `v0\.9\.4` `doctor`\s+support expression/);
+  assert.doesNotMatch(roadmap, /unshipped|unreleased/);
+  assert.match(roadmap, /v0\.9\.4 release requires Node `>=22`/);
   for (const taskId of [
     "SYN-094-REVIEW-001",
     "SYN-094-HOST-002",
@@ -293,30 +356,29 @@ test("archived 0.9.3 evidence and product/docs contract stay explicit", async ()
     "SYN-094-DOC-VERSION-006",
     "SYN-094-RELEASE-011",
   ]) {
-    assert.match(roadmap, new RegExp(`\\| ${taskId} \\|`), `ROADMAP must include ${taskId} in the candidate section`);
+    assert.match(roadmap, new RegExp(`\\| ${taskId} \\|`), `ROADMAP must include ${taskId} in the release section`);
   }
   const v093Start = roadmap.indexOf("## v0.9.3");
   const v094Start = roadmap.indexOf("## v0.9.4", v093Start);
-  assert.ok(v093Start >= 0 && v094Start > v093Start, "ROADMAP candidate section must follow v0.9.3");
+  assert.ok(v093Start >= 0 && v094Start > v093Start, "ROADMAP release section must follow v0.9.3");
   assert.doesNotMatch(roadmap.slice(v093Start, v094Start), /SYN-094-SURFACES-004/);
   assert.doesNotMatch(roadmap, /two-phase closeout on `main`/i);
 
-  assert.match(readme, /Public release versus source candidate/);
+  assert.match(readme, /Public release and source tree/);
   assert.match(readme, /immutable source and\s+post-publication evidence is archived in/);
-  assert.match(readme, /pre-tag `prepared`\/`pending` record/);
-  assert.match(readme, /Public latest remains `v0\.9\.3`/);
-  assert.match(readme, /public and pinned `@ivand890\/synod@0\.9\.3`/);
-  assert.match(readme, /Candidate-only source surfaces/);
-  assert.match(readme, /v0\.9\.4` source candidate requires Node\.js `>=22`/);
-  assert.match(readme, /uses the support expression `>=0\.148\.0-0 <0\.149\.0 \(all 0\.148\.x variants\)`/);
-  assert.match(readme, /Candidate known-good and exercised in CI: `0\.148\.0-alpha\.9`/);
+  assert.match(readme, /public v0\.9\.4 evidence/);
+  assert.match(readme, /public and pinned `@ivand890\/synod@0\.9\.4`/);
+  assert.match(readme, /The v0\.9\.4 source surfaces include/);
+  assert.match(readme, /v0\.9\.4 release requires Node\.js `>=22`/);
+  assert.match(readme, /public\/pinned\s+`v0\.9\.4` `doctor` support expression/);
+  assert.match(readme, /Known-good and exercised in CI: `0\.148\.0-alpha\.9`/);
   assert.doesNotMatch(readme, /candidate support expression `>=0\.142\.0 <0\.148\.0/);
   assert.match(readme, /synod task correct/);
   assert.match(readme, /Git-lane provenance/);
   assert.match(readme, /HostDelegationAdapter/);
   assert.match(readme, /include-local-docs/);
-  assert.match(readme, /post-publication\s+closeout commit are verified/);
-  assert.match(readme, /phase-2 live verifier runs on the protected closeout PR,\s*not the tag\s+workflow/);
+  assert.match(readme, /phase-2 live verifier runs on the protected\s+closeout PR/);
+  assert.match(readme, /phase-2 live verifier runs on the protected\s+closeout PR,\s*not the tag\s+workflow/);
   assert.doesNotMatch(readme, /closeout(?: evidence)? (?:is|was) recorded (?:on|in) `main`/i);
   assert.match(changelog, /numeric `0\.148` minor line/);
 
@@ -355,11 +417,13 @@ test("archived 0.9.3 evidence and product/docs contract stay explicit", async ()
   assert.match(readme, /only that recovery path reassigns a replacement thread/);
   assert.doesNotMatch(readme, /A correction repeats the reservation, read-only spawn/);
 
-  assert.match(releasing, /public `v0\.9\.3` source and post-publication evidence is immutable/);
+  assert.match(releasing, /public `v0\.9\.4` source and post-publication evidence is immutable/);
+  assert.match(releasing, /bound to tag commit\s+`f116a38acffb86c752f6e5c3f8013407ecfea267`/);
   assert.match(releasing, /`release-closeouts\/v0\.9\.3\.json`/);
-  assert.match(releasing, /root `RELEASE-CLOSEOUT\.json`\s+is the current `v0\.9\.4` pre-tag candidate record/);
+  assert.match(releasing, /root `RELEASE-CLOSEOUT\.json`\s+records the same verified public v0\.9\.4 evidence/);
   assert.match(releasing, /prepared.*pending/);
-  assert.match(releasing, /Public latest remains `v0\.9\.3`/);
+  assert.doesNotMatch(releasing, /Public latest remains/);
+  assert.doesNotMatch(releasing, /pre-tag candidate record/);
   assert.match(releasing, /registry-installed package result/);
   assert.match(releasing, /local tarball smoke belongs under\s+`sourcePreparation\.localPackageSmoke`/);
   assert.match(readme, /local tarball smoke is source-preparation evidence only/);
@@ -370,8 +434,8 @@ test("archived 0.9.3 evidence and product/docs contract stay explicit", async ()
   assert.match(releasing, /scripts\/validate-release-closeout\.ts/);
   assert.match(releasing, /scripts\/verify-public-release-closeout\.ts/);
   assert.match(releasing, /phase-strict closeout validation|Malformed or mixed-phase records fail closed/);
-  assert.match(releasing, /phase-2 live verifier runs on the protected closeout PR,\s*not the tag\s+workflow/);
-  assert.match(roadmap, /phase-2 live verifier runs on the protected closeout PR,\s*not the tag\s+workflow/);
+  assert.match(releasing, /phase-2 live verifier runs on the protected\s+closeout PR,\s*not the tag\s+workflow/);
+  assert.match(roadmap, /phase-2 live verifier runs on the protected\s+closeout PR,\s*not the tag\s+workflow/);
 
   for (const phrase of [
     "runtimeVersion",
@@ -391,61 +455,54 @@ test("archived 0.9.3 evidence and product/docs contract stay explicit", async ()
   ]) {
     assert.ok(readme.includes(phrase), `README must document ${phrase}`);
   }
-  assert.equal(releasing.match(/release_version="\$\{RELEASE_VERSION/g)?.length, 2);
+  assert.equal(releasing.match(/release_version="\$\{RELEASE_VERSION/g)?.length, 3);
   assert.ok(packageSmoke.includes("hostWaitRequired"));
   assert.ok(packageSmoke.includes("validateJobHandle"));
   assert.ok(packageSmoke.includes("stateTemplateVersion"));
 });
 
 test("release closeout validation is strict across pre-tag and post-publication phases", async () => {
-  const [rootText, archivedText] = await Promise.all([
+  const [rootText, archivedText, archivedCurrentText] = await Promise.all([
     readFile(closeoutPath, "utf8"),
     readFile(archivedCloseoutPath, "utf8"),
+    readFile(archivedCurrentCloseoutPath, "utf8"),
   ]);
   const root = parseJson(rootText);
   const archived = parseJson(archivedText);
+  const archivedCurrent = parseJson(archivedCurrentText);
   const expected = {
     expectedPackage: "@ivand890/synod",
     expectedVersion: "0.9.4",
     expectedTag: "v0.9.4",
   } as const;
   assert.ok(isRecord(root) && isRecord(root.publicVerification));
-  const rootPublicationStatus = root.publicVerification.status;
-  if (rootPublicationStatus === "pending") {
-    assert.deepEqual(validateReleaseCloseout(root, { phase: "pre-tag", ...expected }), {
-      phase: "pre-tag",
-      package: "@ivand890/synod",
-      version: "0.9.4",
-      tag: "v0.9.4",
-    });
-    assert.deepEqual(validateReleaseCloseout(root, {
-      phase: "tag",
-      ...expected,
-      expectedTagSha: "0123456789abcdef0123456789abcdef01234567",
-    }), {
-      phase: "tag",
-      package: "@ivand890/synod",
-      version: "0.9.4",
-      tag: "v0.9.4",
-    });
-  } else if (rootPublicationStatus === "verified") {
-    assert.ok(isRecord(root.sourcePreparation));
-    const recordedTagSha = root.sourcePreparation.tagSha;
-    assert.equal(typeof recordedTagSha, "string");
-    assert.deepEqual(validateReleaseCloseout(root, {
-      phase: "post-publication",
-      ...expected,
-      expectedTagSha: recordedTagSha as string,
-    }), {
-      phase: "post-publication",
-      package: "@ivand890/synod",
-      version: "0.9.4",
-      tag: "v0.9.4",
-      tagSha: recordedTagSha,
-    });
-  } else {
-    assert.fail(`root closeout has an unsupported publication status: ${String(rootPublicationStatus)}`);
-  }
+  assert.equal(root.publicVerification.status, "verified");
+  assert.ok(isRecord(root.sourcePreparation));
+  const recordedTagSha = root.sourcePreparation.tagSha;
+  assert.equal(recordedTagSha, "f116a38acffb86c752f6e5c3f8013407ecfea267");
+  assert.deepEqual(validateReleaseCloseout(root, {
+    phase: "post-publication",
+    ...expected,
+    expectedTagSha: recordedTagSha as string,
+  }), {
+    phase: "post-publication",
+    package: "@ivand890/synod",
+    version: "0.9.4",
+    tag: "v0.9.4",
+    tagSha: recordedTagSha,
+  });
+  assert.deepEqual(validateReleaseCloseoutFile("release-closeouts/v0.9.4.json", {
+    phase: "post-publication",
+    ...expected,
+    expectedTagSha: "f116a38acffb86c752f6e5c3f8013407ecfea267",
+  }), {
+    phase: "post-publication",
+    package: "@ivand890/synod",
+    version: "0.9.4",
+    tag: "v0.9.4",
+    tagSha: "f116a38acffb86c752f6e5c3f8013407ecfea267",
+  });
+  assert.deepEqual(root, archivedCurrent);
   assert.deepEqual(validateReleaseCloseoutFile("release-closeouts/v0.9.3.json", {
     phase: "post-publication",
     expectedPackage: "@ivand890/synod",
@@ -671,58 +728,83 @@ test("public closeout verifier validates the exact post-publication record befor
   const commandRunner = (command: string, args: readonly string[]): string => {
     if (command === "npm") {
       return JSON.stringify({
-        version: "0.9.3",
-        gitHead: "ddbcaf4953f1dd3f0ec5cb82ba6403b6e9699788",
-        "dist-tags.latest": "0.9.3",
-        "dist.integrity": "sha512-U9NagkGCOWXHQ3giKEBRaD87UGI6hwAn7Emd5sJwdhr6Qp10zdWHe+DGrNz1iSjkXzxczSzYd6RsivKwtQAa7w==",
+        version: "0.9.4",
+        gitHead: "f116a38acffb86c752f6e5c3f8013407ecfea267",
+        "dist-tags.latest": "0.9.4",
+        "dist.integrity": "sha512-21Y4vRcUHFRaSgotBdBBYhbJ7/cHRueYJZA5/VdcwF6a5h6ANO3UpwxRvwWWObkTni1uVGxVVVXvBwkQTJuxLA==",
         "dist.attestations": {
-          url: "https://registry.npmjs.org/-/npm/v1/attestations/@ivand890%2fsynod@0.9.3",
+          url: "https://registry.npmjs.org/-/npm/v1/attestations/@ivand890%2fsynod@0.9.4",
           provenance: { predicateType: "https://slsa.dev/provenance/v1" },
         },
       });
     }
     if (command === "gh" && args[1] === "repos/ivand890/synod/releases/latest") {
-      return JSON.stringify({ tag_name: "v0.9.3" });
+      return JSON.stringify({ tag_name: "v0.9.4" });
     }
     if (command === "gh") {
       return JSON.stringify({
-        tag_name: "v0.9.3",
-        html_url: "https://github.com/ivand890/synod/releases/tag/v0.9.3",
-        published_at: "2026-08-14T19:29:39Z",
+        tag_name: "v0.9.4",
+        html_url: "https://github.com/ivand890/synod/releases/tag/v0.9.4",
+        published_at: "2026-08-16T02:36:20Z",
         draft: false,
         prerelease: false,
         immutable: true,
       });
     }
     if (command === "pnpm" && args[0] === "add") return "";
-    if (command === "pnpm") return "0.9.3\n";
+    if (command === "pnpm") return "0.9.4\n";
     throw new Error(`unexpected command ${command} ${args.join(" ")}`);
   };
   try {
     const result = verifyPublicReleaseCloseout({
-      filePath: "release-closeouts/v0.9.3.json",
+      filePath: "RELEASE-CLOSEOUT.json",
       expectedPackage: "@ivand890/synod",
-      expectedVersion: "0.9.3",
-      expectedTag: "v0.9.3",
-      expectedTagSha: "ddbcaf4953f1dd3f0ec5cb82ba6403b6e9699788",
+      expectedVersion: "0.9.4",
+      expectedTag: "v0.9.4",
+      expectedTagSha: "f116a38acffb86c752f6e5c3f8013407ecfea267",
       repository: "ivand890/synod",
       commandRunner,
     });
-    assert.equal(result.registryInstallVersion, "0.9.3");
-    assert.equal(result.publicCliVersion, "0.9.3");
+    assert.equal(result.registryInstallVersion, "0.9.4");
+    assert.equal(result.publicCliVersion, "0.9.4");
 
-    assert.throws(
-      () => verifyPublicReleaseCloseout({
-        filePath: "RELEASE-CLOSEOUT.json",
-        expectedPackage: "@ivand890/synod",
-        expectedVersion: "0.9.4",
-        expectedTag: "v0.9.4",
-        expectedTagSha: "0123456789abcdef0123456789abcdef01234567",
-        repository: "ivand890/synod",
-        commandRunner: () => { throw new Error("live command must not run for a pending record"); },
-      }),
-      /sourcePreparation|publicVerification\.status/,
-    );
+    const pendingDirectory = await mkdtemp(path.join(os.tmpdir(), "synod-pending-closeout-test-"));
+    const pendingPath = path.join(pendingDirectory, "RELEASE-CLOSEOUT.json");
+    const pendingRecord = parseJson(await readFile(closeoutPath, "utf8"));
+    assert.ok(isRecord(pendingRecord));
+    pendingRecord.sourcePreparation = {
+      status: "prepared",
+      mainAncestorRequired: true,
+      localPackageSmoke: {
+        artifact: "local tarball",
+        command: "pnpm test:package",
+        status: "pending",
+        version: "0.9.4",
+      },
+    };
+    pendingRecord.publicVerification = { status: "pending" };
+    pendingRecord.documentation = {
+      status: "pending",
+      paths: ["README.md", "ROADMAP.md", "RELEASING.md"],
+      rule: "Advance these paths together only when publicVerification is verified.",
+    };
+    await writeFile(pendingPath, `${JSON.stringify(pendingRecord)}\n`, "utf8");
+    try {
+      assert.throws(
+        () => verifyPublicReleaseCloseout({
+          filePath: pendingPath,
+          expectedPackage: "@ivand890/synod",
+          expectedVersion: "0.9.4",
+          expectedTag: "v0.9.4",
+          expectedTagSha: "f116a38acffb86c752f6e5c3f8013407ecfea267",
+          repository: "ivand890/synod",
+          commandRunner: () => { throw new Error("live command must not run for a pending record"); },
+        }),
+        /sourcePreparation|publicVerification\.status/,
+      );
+    } finally {
+      await rm(pendingDirectory, { recursive: true, force: true });
+    }
 
     assert.throws(
       () => verifyPublicReleaseCloseout({
