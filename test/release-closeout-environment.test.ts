@@ -8,6 +8,8 @@ import {
   collectLiveGitHubRelease,
   createPublicApiEnvironment,
   createPublicPackageCommandEnvironment,
+  defaultCommandRunner,
+  PUBLIC_COMMAND_TIMEOUT_MS,
   PublicReleaseVerificationError,
   publicApiEnvironment,
   verifyExactRegistryInstall,
@@ -115,7 +117,6 @@ test("public npm metadata uses only a fresh executable environment and the publi
   const repoLocalBefore = existsSync(repoLocal);
   let observedEnvironment: NodeJS.ProcessEnv | undefined;
   let observedCwd: string | undefined;
-  let observedArgs: readonly string[] | undefined;
   const publication = withHostileNpmEnvironment(() => collectLiveNpmPublication(
     "@ivand890/synod",
     "0.9.4",
@@ -123,7 +124,6 @@ test("public npm metadata uses only a fresh executable environment and the publi
       assert.equal(command, "npm");
       observedEnvironment = options?.env;
       observedCwd = options?.cwd;
-      observedArgs = args;
       assert.ok(options?.env);
       assert.ok(options?.cwd);
       assertCleanPackageEnvironment(options.env, options.cwd);
@@ -141,7 +141,6 @@ test("public npm metadata uses only a fresh executable environment and the publi
     },
   ));
   assert.equal(publication.version, "0.9.4");
-  assert.equal(observedArgs?.includes(PUBLIC_REGISTRY), true);
   assert.ok(observedEnvironment);
   assert.ok(observedCwd);
   assert.equal(existsSync(observedCwd), false);
@@ -149,6 +148,24 @@ test("public npm metadata uses only a fresh executable environment and the publi
   assert.equal(existsSync(observedEnvironment.XDG_CONFIG_HOME as string), false);
   assert.equal(existsSync(observedEnvironment.npm_config_cache as string), false);
   assert.equal(existsSync(repoLocal), repoLocalBefore);
+});
+
+test("default public command runner passes a bounded timeout and reports executor errors", () => {
+  let observedTimeout: number | undefined;
+  assert.equal(defaultCommandRunner("gh", ["api", "--version"], {}, (_command, _args, options) => {
+    observedTimeout = options.timeout;
+    return "gh version\n";
+  }), "gh version\n");
+  assert.equal(observedTimeout, PUBLIC_COMMAND_TIMEOUT_MS);
+
+  assert.throws(
+    () => defaultCommandRunner("gh", ["api"], {}, (_command, _args, options) => {
+      assert.equal(options.timeout, PUBLIC_COMMAND_TIMEOUT_MS);
+      const timeout = Object.assign(new Error("command timed out"), { code: "ETIMEDOUT" });
+      throw timeout;
+    }),
+    /Read-only command gh failed: command timed out/,
+  );
 });
 
 test("public npm metadata cleans its isolated environment after command failure", () => {

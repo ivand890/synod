@@ -55,12 +55,12 @@ if [[ ! -d "$output_parent" ]]; then
 fi
 
 normal_steps=(
-  intake ready reserve readonly-spawn bind authorize wait proposal accept verify done checkpoint handoff
+  intake ready reserve readonly-spawn bind authorize wait proposal accept verify "done" checkpoint handoff
 )
 correction_steps=(
   intake ready reserve readonly-spawn bind authorize wait proposal
   correction-policy correction-reserve correction-spawn correction-bind correction-authorize
-  correction-wait correction-proposal accept verify done checkpoint handoff
+  correction-wait correction-proposal accept verify "done" checkpoint handoff
 )
 expected_frames=$(( ${#normal_steps[@]} + ${#correction_steps[@]} ))
 if [[ "$expected_frames" -ne 33 ]]; then
@@ -236,8 +236,10 @@ if (bytes.subarray(0, 6).toString("ascii") !== "GIF89a") throw new Error("captur
 if (bytes.readUInt16LE(6) !== 1120 || bytes.readUInt16LE(8) !== 622) throw new Error("capture must be 1120x622");
 let frames = 0;
 let durationCentiseconds = 0;
-for (let index = 0; index + 7 < bytes.length; index += 1) {
+for (let index = 0; index + 8 < bytes.length; index += 1) {
   if (bytes[index] !== 0x21 || bytes[index + 1] !== 0xf9 || bytes[index + 2] !== 0x04) continue;
+  if (bytes[index + 7] !== 0x00
+    || (bytes[index + 8] !== 0x2c && bytes[index + 8] !== 0x21)) continue;
   frames += 1;
   const delay = bytes.readUInt16LE(index + 4);
   if (delay < 30 || delay > 36) throw new Error(`unexpected frame delay: ${delay}`);

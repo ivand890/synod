@@ -111,7 +111,7 @@ Usage:
   synod profiles [--json]
   synod usage [--session <thread-id>] [--cwd <directory>] [--since-event <sequence|id> | --since-checkpoint | --task <task-id>] [--until-event <sequence|id>] [--price-file <path>] [--by-model] [--json]
   synod wait (--task <task-id> | --thread <thread-id>) [--task <task-id>] [--thread <thread-id>] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
-  synod delegate start <task-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--wait] [--cwd <directory>] [--json]
+  synod delegate start <task-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--actor <id>] [--evidence <reference>] [--reservation-ttl-seconds <n>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--wait] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
   synod --help
   synod --version
 
@@ -181,6 +181,14 @@ Options:
   --include-local-docs
               Explicitly include or restore bounded human-owned docs/synod notes;
               generated STATUS.md and other ignored files remain excluded.
+  Delegate start options:
+    --actor <id>                   Record the supervisor or host actor identity.
+    --evidence <reference>         Attach scoped evidence to a correction bind.
+    --reservation-ttl-seconds <n>  Bound the pre-bind reservation lifetime.
+    --ttl-seconds <n>              Bound the post-bind writer lease lifetime.
+    --heartbeat-seconds <n>        Set the post-bind lease heartbeat interval.
+    --timeout-seconds <n>          Bound delegated waiting; requires --wait.
+    --poll-interval-ms <n>         Set delegated polling; requires --wait.
   --bundle    Verify and bind a recovery bundle to a canonical handoff.
   --json      Print a versioned machine-readable success, warning, or error envelope.
   -h, --help  Show help.

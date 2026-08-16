@@ -113,6 +113,7 @@ jobs:
   release-closeout:
     name: Release closeout
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:

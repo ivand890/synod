@@ -10,6 +10,7 @@ import {
 import { isRecord, parseJson, type UnknownRecord } from "../src/validation.js";
 
 const DEFAULT_REGISTRY = "https://registry.npmjs.org";
+export const PUBLIC_COMMAND_TIMEOUT_MS = 300_000;
 const SHA = /^[0-9a-f]{40}$/;
 const STABLE_TAG = /^v\d+\.\d+\.\d+$/;
 
@@ -47,6 +48,18 @@ export interface CommandRunnerOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
 }
+
+export interface ExternalCommandExecutionOptions extends CommandRunnerOptions {
+  encoding: "utf8";
+  stdio: ["ignore", "pipe", "pipe"];
+  timeout: number;
+}
+
+export type ExternalCommandExecutor = (
+  command: string,
+  args: readonly string[],
+  options: ExternalCommandExecutionOptions,
+) => string;
 
 export interface PublicApiEnvironmentScope {
   environment: NodeJS.ProcessEnv;
@@ -106,20 +119,22 @@ function booleanValue(value: unknown, label: string): boolean {
   return value;
 }
 
-function defaultCommandRunner(command: string, args: readonly string[], options: CommandRunnerOptions = {}): string {
-  const execOptions: {
-    cwd?: string;
-    encoding: "utf8";
-    env?: NodeJS.ProcessEnv;
-    stdio: ["ignore", "pipe", "pipe"];
-  } = {
+export function defaultCommandRunner(
+  command: string,
+  args: readonly string[],
+  options: CommandRunnerOptions = {},
+  executor: ExternalCommandExecutor = (file, commandArgs, execOptions) =>
+    execFileSync(file, [...commandArgs], execOptions),
+): string {
+  const execOptions: ExternalCommandExecutionOptions = {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
+    timeout: PUBLIC_COMMAND_TIMEOUT_MS,
   };
   if (options.cwd !== undefined) execOptions.cwd = options.cwd;
   if (options.env !== undefined) execOptions.env = options.env;
   try {
-    return execFileSync(command, [...args], execOptions);
+    return executor(command, args, execOptions);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     fail(`Read-only command ${command} failed: ${detail}`);

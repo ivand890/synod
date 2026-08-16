@@ -127,7 +127,7 @@ test("CI installs the pinned toolchain and smokes compiled packages on every sup
   assert.match(workflow, /codex-version: "0\.148\.0-alpha\.9"\n\s+expected-status: known-good/);
   assert.doesNotMatch(workflow, /codex-version: "0\.14(?:1|2|5|7)\.0"/);
   assert.match(workflow, /run: pnpm test:package/);
-  assert.match(workflow, /release-closeout:\n\s+name: Release closeout[\s\S]*fetch-depth: 0[\s\S]*pnpm install --frozen-lockfile/);
+  assert.match(workflow, /release-closeout:\n\s+name: Release closeout\n\s+runs-on: ubuntu-latest\n\s+timeout-minutes: 30[\s\S]*fetch-depth: 0[\s\S]*pnpm install --frozen-lockfile/);
   assert.match(workflow, /name: Validate pending closeout locally[\s\S]*--phase pre-tag[\s\S]*--json/);
   assert.match(workflow, /name: Verify published closeout against public evidence[\s\S]*GH_TOKEN: \$\{\{ github\.token \}\}[\s\S]*scripts\/verify-public-release-closeout\.ts[\s\S]*--tag-sha/);
   const requiredStart = workflow.indexOf("  required:\n");
@@ -717,6 +717,8 @@ test("cycle GIF capture is a dependency-free deterministic contract", async () =
   assert.match(script, /correction_steps=\(/);
   assert.match(script, /normalFrames < 1 \|\| correctionFrames < 1/);
   assert.match(script, /--dump-dom/);
+  assert.match(script, /bytes\[index \+ 7\] !== 0x00/);
+  assert.match(script, /bytes\[index \+ 8\] !== 0x2c && bytes\[index \+ 8\] !== 0x21/);
   assert.match(script, /gif-capture-sentinel/);
   assert.match(script, /normalHashes/);
   assert.match(script, /correctionHashes/);
@@ -725,6 +727,12 @@ test("cycle GIF capture is a dependency-free deterministic contract", async () =
   assert.match(script, /mv -f "\$asset_sibling" "\$output_path"/);
   assert.doesNotMatch(script, /mv -f "\$temporary_output" "\$output_path"/);
   assert.match(script, /mktemp -d/);
+  const normalSteps = script.match(/normal_steps=\(([\s\S]*?)\n\)/)?.[1];
+  const correctionSteps = script.match(/correction_steps=\(([\s\S]*?)\n\)/)?.[1];
+  assert.ok(normalSteps);
+  assert.ok(correctionSteps);
+  assert.match(normalSteps, /(?:^|\s)"done"(?:\s|$)/);
+  assert.match(correctionSteps, /(?:^|\s)"done"(?:\s|$)/);
 });
 
 test("Synod cycle visualizer documents the executable lease and wait boundaries", async () => {

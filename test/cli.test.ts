@@ -189,6 +189,20 @@ test("prints version and help", async () => {
     assert.match(help.stdout, /--write-tree/);
     assert.match(help.stdout, /--read-tree/);
     assert.match(help.stdout, /synod bundle export/);
+    for (const option of [
+      "--actor <id>",
+      "--evidence <reference>",
+      "--reservation-ttl-seconds <n>",
+      "--ttl-seconds <n>",
+      "--heartbeat-seconds <n>",
+      "--timeout-seconds <n>",
+      "--poll-interval-ms <n>",
+    ]) {
+      assert.match(help.stdout, new RegExp(option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    }
+    assert.match(help.stdout, /Delegate start options:/);
+    assert.match(help.stdout, /Bound delegated waiting; requires --wait\./);
+    assert.match(help.stdout, /Set delegated polling; requires --wait\./);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

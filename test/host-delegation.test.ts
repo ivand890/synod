@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { setTimeout as delay } from "node:timers/promises";
 import {
   startHostDelegation,
   type HostDelegationAdapter,
@@ -60,6 +59,7 @@ function lease(ownerThread = "opaque-owner", heartbeatAt = "2026-08-15T00:00:01.
 }
 
 function dependencies({
+  reserve,
   cancel,
   expire,
   reservationValue = reservation,
@@ -73,6 +73,7 @@ function dependencies({
   heartbeat,
   clock = () => Date.parse("2026-08-15T00:00:00.000Z")
 }: {
+  reserve?: HostDelegationDependencies["reserve"];
   cancel?: (options: Record<string, unknown>) => Promise<unknown>;
   expire?: (options: Record<string, unknown>) => Promise<unknown>;
   reservationValue?: TaskLeaseReservation;
@@ -81,7 +82,7 @@ function dependencies({
   clock?: () => number;
 } = {}): HostDelegationDependencies {
   const result: HostDelegationDependencies = {
-    reserve: async () => ({ task, reservation: reservationValue, writeAuthorized: false as const, state: { checkpoint: {}, lastEvent: {} } }) as never,
+    reserve: reserve || (async () => ({ task, reservation: reservationValue, writeAuthorized: false as const, state: { checkpoint: {}, lastEvent: {} } }) as never),
     clock
   };
   if (bind) result.bind = bind as unknown as NonNullable<HostDelegationDependencies["bind"]>;
@@ -89,6 +90,14 @@ function dependencies({
   if (expire) result.expire = expire as unknown as NonNullable<HostDelegationDependencies["expire"]>;
   if (heartbeat) result.heartbeat = heartbeat as unknown as NonNullable<HostDelegationDependencies["heartbeat"]>;
   return result;
+}
+
+async function waitForCondition(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for the host test condition.");
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
 }
 
 test("host delegation reserves, spawns read-only, binds the opaque owner, then authorizes", async () => {
@@ -109,6 +118,10 @@ test("host delegation reserves, spawns read-only, binds the opaque owner, then a
   };
   const result = await startHostDelegation({ id: "T-HOST", adapter, write: ["src/host-delegation.ts"] }, {
     ...dependencies(),
+    reserve: async () => {
+      calls.push("reserve");
+      return { task, reservation, writeAuthorized: false as const, state: { checkpoint: {}, lastEvent: {} } } as never;
+    },
     bind: async (options = {}) => {
       calls.push("bind");
       return {
@@ -120,7 +133,6 @@ test("host delegation reserves, spawns read-only, binds the opaque owner, then a
       } as never;
     }
   });
-  calls.unshift("reserve");
 
   assert.deepEqual(calls, ["reserve", "spawn", "bind", "authorize"]);
   assert.equal(spawnedRequest.writeAuthorized, false);
@@ -155,6 +167,9 @@ test("spawn failure cancels the complete reservation fence", async () => {
 
 test("never-resolving spawn expires the reservation and ignores a late owner", async () => {
   let lateOwnerResolved = false;
+  let releaseSpawn!: () => void;
+  let spawnStarted = false;
+  const spawnReleased = new Promise<void>(resolve => { releaseSpawn = resolve; });
   let expired: Record<string, unknown> | undefined;
   let bound = 0;
   let authorized = 0;
@@ -165,7 +180,8 @@ test("never-resolving spawn expires the reservation and ignores a late owner", a
   } as TaskLeaseReservation;
   const adapter: HostDelegationAdapter = {
     async spawn() {
-      await delay(40);
+      spawnStarted = true;
+      await spawnReleased;
       lateOwnerResolved = true;
       return "late-owner";
     },
@@ -189,7 +205,9 @@ test("never-resolving spawn expires the reservation and ignores a late owner", a
       return true;
     }
   );
-  await delay(50);
+  assert.equal(spawnStarted, true);
+  releaseSpawn();
+  await waitForCondition(() => lateOwnerResolved);
   assert.equal(lateOwnerResolved, true);
   assert.equal(bound, 0);
   assert.equal(authorized, 0);
