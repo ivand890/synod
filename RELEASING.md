@@ -8,8 +8,8 @@ Release (`isImmutable: true`). Post-publication evidence is recorded in the
 versioned `release-closeouts/v0.9.4.json`. The prior `v0.9.3` evidence is
 recorded in versioned `release-closeouts/v0.9.3.json`, bound to signed tag
 commit `ddbcaf4953f1dd3f0ec5cb82ba6403b6e9699788`. The root
-`RELEASE-CLOSEOUT.json` records the same verified public v0.9.4 evidence. Do
-not rerun historical tag or publication commands.
+`RELEASE-CLOSEOUT.json` is the prepared/pending `v0.9.5` candidate; it has no
+public verification. Do not rerun historical tag or publication commands.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
 workflow; the tag workflow validates only the strict prepared/pending source
 record for the next release before publication.

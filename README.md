@@ -14,9 +14,9 @@ externally immutable. Post-publication evidence is recorded in the versioned
 [`release-closeouts/v0.9.4.json`](release-closeouts/v0.9.4.json). The prior
 `v0.9.3` evidence remains recorded in the versioned
 [`release-closeouts/v0.9.3.json`](release-closeouts/v0.9.3.json), and the root
-[`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) records the same verified
-public v0.9.4 evidence. The phase-2 live verifier runs on the protected
-closeout PR, not the tag workflow; the tag workflow validates only the strict
+[`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) is the prepared/pending
+`v0.9.5` candidate; it has no public verification. The phase-2 live verifier runs
+on the protected closeout PR, not the tag workflow; the tag workflow validates only the strict
 prepared/pending source record before publication.
 
 ## Public release and source tree
