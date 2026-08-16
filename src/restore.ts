@@ -52,6 +52,7 @@ const MAX_JOURNAL_LOCAL_DOC_BYTES = 1024 * 1024;
 
 type RestorePhase =
   | "before-index-install"
+  | "before-journal"
   | "after-index"
   | "before-path-install"
   | "after-path"
@@ -767,11 +768,13 @@ async function createJournal(
   plans: RestorePathPlan[],
   desiredIndex: Buffer,
   includeLocalDocs: boolean,
+  objects: Map<string, Buffer>,
   locations: { journalPath: string; indexPath: string }
 ): Promise<JournalContext> {
   if (await pathType(locations.journalPath) !== "missing") {
     throw new SynodError(ERROR_CODES.RECOVERY_JOURNAL_INVALID, "An interrupted recovery journal already exists.");
   }
+  await assertSupplementalDestinationSafe(directory, manifest, objects, includeLocalDocs);
   const id = randomUUID();
   const backupDirectory = `synod-recovery-${id}`;
   const backupPath = path.join(path.dirname(locations.journalPath), backupDirectory);
@@ -1147,12 +1150,14 @@ export async function restoreRecoveryBundle(
     );
     let context: JournalContext | undefined;
     try {
-      context = await createJournal(targetDirectory, manifest, plans.paths, temporaryIndex.bytes, includeLocalDocs, locations);
+      await dependencies.restoreHook?.("before-journal");
+      context = await createJournal(targetDirectory, manifest, plans.paths, temporaryIndex.bytes, includeLocalDocs, objects, locations);
       await assertCleanBase(targetDirectory, manifest.source.head!, dependencies);
       const liveIndex = await regularFileBytes(locations.indexPath, "Git index");
       if (hashBytes(liveIndex) !== context.journal.originalIndexHash) {
         throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "The destination index changed before recovery mutation.");
       }
+      await assertSupplementalDestinationSafe(targetDirectory, manifest, objects, includeLocalDocs);
       await writeGitObjects(targetDirectory, plans.indexMaterials, objectFormat);
       await installGitIndex(
         locations.indexPath,
@@ -1313,7 +1318,7 @@ export async function restoreRecoveryBundleOverlayUnderLock(
   );
   let context: JournalContext | undefined;
   try {
-    context = await createJournal(targetDirectory, manifest, plans.paths, temporaryIndex.bytes, false, locations);
+    context = await createJournal(targetDirectory, manifest, plans.paths, temporaryIndex.bytes, false, objects, locations);
     if (hashBytes(liveIndex) !== context.journal.originalIndexHash) {
       throw new SynodError(ERROR_CODES.RECOVERY_DESTINATION_DIRTY, "The control index changed after the proposal index seed was read.");
     }

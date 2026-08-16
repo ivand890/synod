@@ -59,7 +59,7 @@ test("keeps canonical diagnostics authoritative and preserves error-like message
 });
 
 test("status selectors are single, explicit, and mutually exclusive", () => {
-  assert.deepEqual(parseStatusArgs(["--task", "T-001", "--json"]), {
+  assert.deepEqual(parseStatusArgs(["--task", " t-001 ", "--json"]), {
     directory: ".",
     json: true,
     taskId: "T-001"
@@ -848,7 +848,7 @@ test("status selectors bound task and checkpoint output in text and JSON", async
     await run(["task", "transition", "T-SELECT", "READY", "--revision", "0", "--cwd", directory], output);
     messages.length = 0;
 
-    const taskCode = await run(["status", directory, "--task", "T-SELECT", "--json"], output);
+    const taskCode = await run(["status", directory, "--task", " t-select ", "--json"], output);
     const taskEnvelope = JSON.parse(takeMessage(messages));
     assert.equal(taskCode, 0);
     assert.equal(taskEnvelope.ok, true);

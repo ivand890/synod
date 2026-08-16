@@ -427,7 +427,7 @@ export function parseStatusArgs(args: string[]): StatusOptions | HelpOptions {
           details: { option: "--task" }
         });
       }
-      options.taskId = optionValue(args, index, arg);
+      options.taskId = optionValue(args, index, arg).trim().toUpperCase();
       index += 1;
     } else if (arg.startsWith("-")) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });

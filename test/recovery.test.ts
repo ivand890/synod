@@ -163,6 +163,32 @@ test("skips tracked modified supplemental docs because they already belong to ch
   assert.equal((await verifyRecoveryBundle({ bundle })).manifest.supplemental?.localDocs.some(item => item.path === "docs/synod/GOAL.md"), false);
 });
 
+test("revalidates supplemental local docs before creating the restore journal", async () => {
+  const { directory, parent } = await fixture();
+  const goalPath = path.join(directory, "docs/synod/GOAL.md");
+  await writeFile(goalPath, "Bundle goal note.\n", "utf8");
+  const bundle = path.join(parent, "supplemental-toctou.bundle");
+  await exportRecoveryBundle({ directory, destination: bundle, includeUntracked: true, includeLocalDocs: true });
+  const destination = await cloneBase(directory, parent, "supplemental-toctou-destination");
+  const destinationGoalPath = path.join(destination, "docs/synod/GOAL.md");
+  let hookCalled = false;
+
+  await assert.rejects(
+    restoreRecoveryBundle({ bundle, directory: destination, includeLocalDocs: true }, {
+      async restoreHook(phase) {
+        if (phase !== "before-journal") return;
+        hookCalled = true;
+        await mkdir(path.dirname(destinationGoalPath), { recursive: true });
+        await writeFile(destinationGoalPath, "Changed after supplemental preflight.\n", "utf8");
+      }
+    }),
+    { code: ERROR_CODES.RECOVERY_DESTINATION_DIRTY }
+  );
+  assert.equal(hookCalled, true);
+  assert.equal(await readFile(destinationGoalPath, "utf8"), "Changed after supplemental preflight.\n");
+  await assert.rejects(readFile(await gitPathForTest(destination, "synod-recovery-journal.json")), { code: "ENOENT" });
+});
+
 test("exports and verifies deterministic mixed dirty-state bundles without changing the source", async () => {
   const { directory, parent } = await fixture();
   const firstDestination = path.join(parent, "first.bundle");
