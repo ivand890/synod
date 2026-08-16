@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -50,6 +50,12 @@ export interface CommandRunnerOptions {
 
 export interface PublicApiEnvironmentScope {
   environment: NodeJS.ProcessEnv;
+  cleanup: () => void;
+}
+
+export interface PublicPackageCommandEnvironmentScope {
+  environment: NodeJS.ProcessEnv;
+  cwd: string;
   cleanup: () => void;
 }
 
@@ -173,11 +179,51 @@ export function createPublicApiEnvironment(
   }
 }
 
-function localCommandEnvironment(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  delete env.GH_TOKEN;
-  delete env.SYNOD_RUNTIME_PACKAGE_SPEC;
-  return env;
+/**
+ * Build a clean package-manager environment for public, unauthenticated reads.
+ *
+ * The caller's environment is deliberately not forwarded: npm and pnpm can
+ * interpret credentials and registry configuration from environment variables
+ * before command-line options are considered. The only inherited executable
+ * setting is PATH; all user/config/cache homes are fresh temporary paths.
+ */
+export function createPublicPackageCommandEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+): PublicPackageCommandEnvironmentScope {
+  const checkoutDirectory = process.cwd();
+  const temporaryDirectories: string[] = [];
+  try {
+    const root = mkdtempSync(path.join(os.tmpdir(), "synod-public-package-env-"));
+    temporaryDirectories.push(root);
+    if (isInside(root, checkoutDirectory)) {
+      throw new Error("Public package-manager directories must be outside the checkout.");
+    }
+    const home = path.join(root, "home");
+    const stateHome = path.join(root, "state");
+    const configHome = path.join(root, "config");
+    const cache = path.join(root, "cache");
+    for (const directory of [home, stateHome, configHome, cache]) mkdirSync(directory);
+    const cleanEnvironment: NodeJS.ProcessEnv = {};
+    if (environment.PATH !== undefined) cleanEnvironment.PATH = environment.PATH;
+    cleanEnvironment.HOME = home;
+    cleanEnvironment.XDG_STATE_HOME = stateHome;
+    cleanEnvironment.XDG_CONFIG_HOME = configHome;
+    cleanEnvironment.npm_config_cache = cache;
+    let cleaned = false;
+    const cleanup = (): void => {
+      if (cleaned) return;
+      cleaned = true;
+      for (const directory of temporaryDirectories) {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    };
+    return { environment: cleanEnvironment, cwd: root, cleanup };
+  } catch (error) {
+    for (const directory of temporaryDirectories) {
+      rmSync(directory, { recursive: true, force: true });
+    }
+    throw error;
+  }
 }
 
 function parseCommandJson(output: string, label: string): UnknownRecord {
@@ -285,31 +331,38 @@ export function collectLiveNpmPublication(
   version: string,
   commandRunner: CommandRunner = defaultCommandRunner,
 ): LiveNpmPublication {
-  const metadata = parseCommandJson(
-    commandRunner("npm", [
-      "view",
-      `${packageName}@${version}`,
-      "version",
-      "gitHead",
-      "dist-tags.latest",
-      "dist.integrity",
-      "dist.attestations",
-      "--json",
-      "--prefer-online",
-    ], { env: localCommandEnvironment() }),
-    "npm view",
-  );
-  const attestations = record(metadata["dist.attestations"], "npm dist.attestations");
-  const provenance = record(attestations.provenance, "npm dist.attestations.provenance");
-  return {
-    package: packageName,
-    version: stringValue(metadata.version, "npm version"),
-    gitHead: stringValue(metadata.gitHead, "npm gitHead"),
-    latest: stringValue(metadata["dist-tags.latest"], "npm dist-tags.latest"),
-    integrity: stringValue(metadata["dist.integrity"], "npm dist.integrity"),
-    attestationUrl: stringValue(attestations.url, "npm dist.attestations.url"),
-    provenancePredicateType: stringValue(provenance.predicateType, "npm provenance.predicateType"),
-  };
+  const packageEnvironment = createPublicPackageCommandEnvironment();
+  try {
+    const metadata = parseCommandJson(
+      commandRunner("npm", [
+        "view",
+        `${packageName}@${version}`,
+        "version",
+        "gitHead",
+        "dist-tags.latest",
+        "dist.integrity",
+        "dist.attestations",
+        "--json",
+        "--prefer-online",
+        "--registry",
+        DEFAULT_REGISTRY,
+      ], { cwd: packageEnvironment.cwd, env: packageEnvironment.environment }),
+      "npm view",
+    );
+    const attestations = record(metadata["dist.attestations"], "npm dist.attestations");
+    const provenance = record(attestations.provenance, "npm dist.attestations.provenance");
+    return {
+      package: packageName,
+      version: stringValue(metadata.version, "npm version"),
+      gitHead: stringValue(metadata.gitHead, "npm gitHead"),
+      latest: stringValue(metadata["dist-tags.latest"], "npm dist-tags.latest"),
+      integrity: stringValue(metadata["dist.integrity"], "npm dist.integrity"),
+      attestationUrl: stringValue(attestations.url, "npm dist.attestations.url"),
+      provenancePredicateType: stringValue(provenance.predicateType, "npm provenance.predicateType"),
+    };
+  } finally {
+    packageEnvironment.cleanup();
+  }
 }
 
 function repositoryPath(repository: string): string {
@@ -373,8 +426,11 @@ export function verifyExactRegistryInstall(
   commandRunner: CommandRunner = defaultCommandRunner,
   registry = DEFAULT_REGISTRY,
 ): string {
+  if (registry !== DEFAULT_REGISTRY) fail(`Registry verification must use ${DEFAULT_REGISTRY}.`);
   const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), "synod-public-closeout-"));
+  let packageEnvironment: PublicPackageCommandEnvironmentScope | undefined;
   try {
+    packageEnvironment = createPublicPackageCommandEnvironment();
     writeFileSync(
       path.join(temporaryDirectory, "package.json"),
       JSON.stringify({ name: "synod-public-closeout-consumer", private: true }) + "\n",
@@ -385,18 +441,19 @@ export function verifyExactRegistryInstall(
       "--ignore-scripts",
       "--save-exact",
       "--registry",
-      registry,
+      DEFAULT_REGISTRY,
       packageSpec,
-    ], { cwd: temporaryDirectory, env: localCommandEnvironment() });
+    ], { cwd: temporaryDirectory, env: packageEnvironment.environment });
     return versionOutput(
       commandRunner("pnpm", ["exec", "synod", "--version"], {
         cwd: temporaryDirectory,
-        env: localCommandEnvironment(),
+        env: packageEnvironment.environment,
       }),
       "clean registry install",
       expectedVersion,
     );
   } finally {
+    packageEnvironment?.cleanup();
     rmSync(temporaryDirectory, { recursive: true, force: true });
   }
 }
@@ -406,11 +463,24 @@ export function verifyPublicDlx(
   expectedVersion: string,
   commandRunner: CommandRunner = defaultCommandRunner,
 ): string {
-  return versionOutput(
-    commandRunner("pnpm", ["dlx", packageSpec, "--version"], { env: localCommandEnvironment() }),
-    "public pnpm dlx",
-    expectedVersion,
-  );
+  const packageEnvironment = createPublicPackageCommandEnvironment();
+  try {
+    return versionOutput(
+      commandRunner("pnpm", [
+        "dlx",
+        `--config.registry=${DEFAULT_REGISTRY}`,
+        packageSpec,
+        "--version",
+      ], {
+        cwd: packageEnvironment.cwd,
+        env: packageEnvironment.environment,
+      }),
+      "public pnpm dlx",
+      expectedVersion,
+    );
+  } finally {
+    packageEnvironment.cleanup();
+  }
 }
 
 export function verifyPublicReleaseCloseout(

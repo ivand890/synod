@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import type { AppServerEvent } from "../src/app-server.js";
 import {
   resolveWaitSelection,
@@ -55,6 +56,56 @@ class FakeAdapter implements ThreadStatusAdapter {
   async close() { this.closed += 1; }
   getWarnings() { return []; }
   getDiagnostics() { return { fake: true, closed: this.closed }; }
+}
+
+class ReceiverReadCursorHost {
+  readonly calls: string[] = [];
+  readonly owner = "receiver-thread";
+
+  async start() {
+    this.calls.push("start");
+  }
+
+  capabilities() {
+    return { notification: false, cursor: true };
+  }
+
+  async read(threadIds: string[]) {
+    this.calls.push(`read:${threadIds.join(",")}`);
+    return {
+      statuses: [{ threadId: this.owner, status: { type: "active" as const, activeFlags: [] as Array<"waitingOnApproval" | "waitingOnUserInput"> } }],
+      cursor: "cursor:one"
+    };
+  }
+
+  async waitForCursorChange(cursor: string, threadIds: string[]) {
+    this.calls.push(`cursor:${cursor}:${threadIds.join(",")}`);
+    return {
+      statuses: [{ threadId: this.owner, status: { type: "idle" as const } }],
+      cursor: "cursor:two"
+    };
+  }
+
+  async close() {
+    this.calls.push("close");
+  }
+}
+
+class ReceiverObserveHost {
+  readonly calls: string[] = [];
+
+  async start() {
+    this.calls.push("start");
+  }
+
+  async observe(request: { threadIds: string[]; timeoutMs: number }) {
+    this.calls.push(`observe:${request.threadIds.join(",")}:${request.timeoutMs}`);
+    return { statuses: [{ threadId: request.threadIds[0]!, status: { type: "idle" as const } }] };
+  }
+
+  async close() {
+    this.calls.push("close");
+  }
 }
 
 const active = (threadId: string): ObservedThreadStatus => ({
@@ -529,4 +580,77 @@ test("timeout, abort, and approval-needed exits clean up the adapter", async () 
   assert.equal(input.approvalNeeded, false);
   assert.equal(input.userInputNeeded, true);
   assert.equal(input.incomplete, true);
+});
+
+test("host adapter closures preserve class receivers across read, start, cursor, and cleanup", async () => {
+  const host = new ReceiverReadCursorHost();
+  const report = await waitForThreads(
+    { threadIds: [host.owner], timeoutMs: 100 },
+    { hostAdapter: host },
+  );
+
+  assert.equal(report.waitAuthority, "host");
+  assert.equal(report.mode, "cursor");
+  assert.equal(report.incomplete, false);
+  assert.deepEqual(host.calls, [
+    "start",
+    "read:receiver-thread",
+    "cursor:cursor:one:receiver-thread",
+    "close",
+  ]);
+});
+
+test("host observe receiver is preserved and delayed start shares one absolute deadline", async () => {
+  class DelayedObserveHost {
+    requestTimeoutMs = 0;
+    closed = 0;
+
+    async start() {
+      await delay(25);
+    }
+
+    async observe(request: { threadIds: string[]; timeoutMs: number }) {
+      this.requestTimeoutMs = request.timeoutMs;
+      await delay(100);
+      return { statuses: [{ threadId: request.threadIds[0]!, status: { type: "idle" as const } }] };
+    }
+
+    async close() {
+      this.closed += 1;
+    }
+  }
+
+  const host = new DelayedObserveHost();
+  const startedAt = Date.now();
+  const report = await waitForThreads(
+    { threadIds: ["delayed-thread"], timeoutMs: 60 },
+    { hostAdapter: host },
+  );
+  const elapsed = Date.now() - startedAt;
+
+  assert.equal(report.waitAuthority, "host");
+  assert.equal(report.timedOut, true);
+  assert.equal(report.incomplete, true);
+  assert.ok(host.requestTimeoutMs > 0);
+  assert.ok(host.requestTimeoutMs < 45, `observe received ${host.requestTimeoutMs}ms instead of remaining budget`);
+  assert.ok(elapsed < 100, `wait consumed ${elapsed}ms; start and observe appear to have separate budgets`);
+  assert.equal(host.closed, 1);
+});
+
+test("host cleanup keeps an independent bound and reports its timeout", async () => {
+  class SlowCleanupHost extends ReceiverObserveHost {
+    override async close() {
+      await delay(50);
+    }
+  }
+
+  const host = new SlowCleanupHost();
+  const report = await waitForThreads(
+    { threadIds: ["cleanup-thread"], timeoutMs: 100 },
+    { hostAdapter: host, cleanupTimeoutMs: 5 },
+  );
+
+  assert.equal(report.incomplete, false);
+  assert.ok(report.warnings.some(warning => warning.code === "SYNOD_WAIT_CLEANUP_FAILED"));
+  assert.ok(report.warnings.some(warning => warning.message.includes("cleanup did not finish")));
 });

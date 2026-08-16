@@ -559,6 +559,7 @@ async function waitThroughHost(
   const ids = [...new Set(options.threadIds.map(value => String(value).trim()).filter(Boolean))];
   const startedAt = now();
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const deadline = startedAt + timeoutMs;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   let timedOut = false;
   let aborted = false;
@@ -567,53 +568,69 @@ async function waitThroughHost(
   const cleanupWarnings: Warning[] = [];
   try {
     if (host.start) {
-      const startOutcome = await boundedOperation(() => host.start!(), timeoutMs, options.signal);
-      if (startOutcome.outcome === "timeout") timedOut = true;
-      else if (startOutcome.outcome === "abort") aborted = true;
-    }
-    if (!timedOut && !aborted) {
-      const observe = host.wait || host.observe;
-      if (observe) {
-        const outcome = await boundedOperation(
-          () => observe.call(host, {
-            threadIds: ids,
-            ...(options.cwd ? { cwd: options.cwd } : {}),
-            timeoutMs,
-            pollIntervalMs,
-            ...(options.signal ? { signal: options.signal } : {})
-          }),
-          timeoutMs,
+      const remaining = deadline - now();
+      if (remaining <= 0) timedOut = true;
+      else {
+        const startOutcome = await boundedOperation(
+          () => host.start!.call(host),
+          remaining,
           options.signal
         );
-        if (outcome.outcome === "timeout") timedOut = true;
-        else if (outcome.outcome === "abort") aborted = true;
+        if (startOutcome.outcome === "timeout") timedOut = true;
+        else if (startOutcome.outcome === "abort") aborted = true;
+      }
+    }
+    if (!timedOut && !aborted) {
+      const observe = host.wait
+        ? (request: HostWaitRequest) => host.wait!.call(host, request)
+        : host.observe
+          ? (request: HostWaitRequest) => host.observe!.call(host, request)
+          : undefined;
+      if (observe) {
+        const remaining = deadline - now();
+        if (remaining <= 0) timedOut = true;
         else {
-          const snapshot = normalizeHostWaitResult(outcome.value, ids);
-          const final = completion(snapshot.statuses);
-          report = {
-            mode: snapshot.mode || "poll",
-            waitAuthority: "host",
-            threadIds: ids,
-            wakeCount: snapshot.wakeCount || 0,
-            fallbackPollCount: snapshot.fallbackPollCount || 0,
-            elapsedMs: Math.max(0, now() - startedAt),
-            timedOut: false,
-            aborted: false,
-            incomplete: final.incomplete,
-            approvalNeeded: final.approvalNeeded,
-            userInputNeeded: final.userInputNeeded,
-            hostWaitRequired: false,
-            hostWaitThreadIds: [],
-            hostFallbackRequired: false,
-            hostFallbackThreadIds: [],
-            statuses: snapshot.statuses,
-            warnings: snapshot.warnings || [],
-            diagnostics: {
-              ...(snapshot.diagnostics || {}),
+          const outcome = await boundedOperation(
+            () => observe({
+              threadIds: ids,
+              ...(options.cwd ? { cwd: options.cwd } : {}),
+              timeoutMs: remaining,
+              pollIntervalMs,
+              ...(options.signal ? { signal: options.signal } : {})
+            }),
+            remaining,
+            options.signal
+          );
+          if (outcome.outcome === "timeout") timedOut = true;
+          else if (outcome.outcome === "abort") aborted = true;
+          else {
+            const snapshot = normalizeHostWaitResult(outcome.value, ids);
+            const final = completion(snapshot.statuses);
+            report = {
+              mode: snapshot.mode || "poll",
               waitAuthority: "host",
-              observation: "host-adapter"
-            }
-          };
+              threadIds: ids,
+              wakeCount: snapshot.wakeCount || 0,
+              fallbackPollCount: snapshot.fallbackPollCount || 0,
+              elapsedMs: Math.max(0, now() - startedAt),
+              timedOut: false,
+              aborted: false,
+              incomplete: final.incomplete,
+              approvalNeeded: final.approvalNeeded,
+              userInputNeeded: final.userInputNeeded,
+              hostWaitRequired: false,
+              hostWaitThreadIds: [],
+              hostFallbackRequired: false,
+              hostFallbackThreadIds: [],
+              statuses: snapshot.statuses,
+              warnings: snapshot.warnings || [],
+              diagnostics: {
+                ...(snapshot.diagnostics || {}),
+                waitAuthority: "host",
+                observation: "host-adapter"
+              }
+            };
+          }
         }
       } else if (!host.read) {
         throw new SynodError(ERROR_CODES.HOST_ADAPTER_INVALID, "The injected host adapter has no wait, observe, or read method.");
@@ -647,7 +664,7 @@ async function waitThroughHost(
   } finally {
     if (host.close) {
       try {
-        const closeOutcome = await boundedOperation(() => host.close!(), cleanupTimeoutMs);
+        const closeOutcome = await boundedOperation(() => host.close!.call(host), cleanupTimeoutMs);
         if (closeOutcome.outcome === "timeout") {
           cleanupWarnings.push(warning(
             WARNING_CODES.WAIT_CLEANUP_FAILED,
@@ -660,8 +677,8 @@ async function waitThroughHost(
       }
     }
   }
-  const warnings = [...(host.getWarnings?.() || []), ...cleanupWarnings];
-  const diagnostics = host.getDiagnostics?.() || {};
+  const warnings = [...(host.getWarnings ? host.getWarnings.call(host) : []), ...cleanupWarnings];
+  const diagnostics = host.getDiagnostics ? host.getDiagnostics.call(host) : {};
   if (failure) {
     failure.warnings = warnings;
     failure.diagnostics = diagnostics;
@@ -699,14 +716,24 @@ export async function waitForThreads({
   if (!adapter && host?.read) {
     hostAuthority = true;
     adapter = {
-      start: host.start || (async () => {}),
-      capabilities: host.capabilities || (() => ({ notification: false, cursor: false })),
-      read: host.read,
-      ...(host.subscribe ? { subscribe: host.subscribe } : {}),
-      ...(host.waitForCursorChange ? { waitForCursorChange: host.waitForCursorChange } : {}),
-      close: host.close || (async () => {}),
-      ...(host.getWarnings ? { getWarnings: host.getWarnings } : {}),
-      ...(host.getDiagnostics ? { getDiagnostics: host.getDiagnostics } : {})
+      start: host.start
+        ? () => host.start!.call(host)
+        : async () => {},
+      capabilities: host.capabilities
+        ? () => host.capabilities!.call(host)
+        : () => ({ notification: false, cursor: false }),
+      read: threadIds => host.read!.call(host, threadIds),
+      ...(host.subscribe
+        ? { subscribe: (listener: (event: unknown) => void, onFailure: (error: unknown) => void) => host.subscribe!.call(host, listener, onFailure) }
+        : {}),
+      ...(host.waitForCursorChange
+        ? { waitForCursorChange: (cursor: string, threadIds: string[], cursorSignal?: AbortSignal) => host.waitForCursorChange!.call(host, cursor, threadIds, cursorSignal) }
+        : {}),
+      close: host.close
+        ? () => host.close!.call(host)
+        : async () => {},
+      ...(host.getWarnings ? { getWarnings: () => host.getWarnings!.call(host) } : {}),
+      ...(host.getDiagnostics ? { getDiagnostics: () => host.getDiagnostics!.call(host) } : {})
     };
   }
   if (!adapter) {
