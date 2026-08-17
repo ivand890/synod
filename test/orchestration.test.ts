@@ -91,10 +91,10 @@ test("task-next guidance advertises fence resolution instead of rejected transit
 
   assert.deepEqual(reservedTask.legalTransitions, []);
   assert.equal(reservedTask.constraints.reservationRequiresBind, true);
-  assert.equal(reservedTask.actions[0]?.operation, "lease.bind");
-  const bindArguments: unknown = reservedTask.actions[0]?.arguments;
-  assert.ok(isRecord(bindArguments));
-  assert.equal(bindArguments.leaseId, reserved.reservation.id);
+  assert.equal(reservedTask.actions[0]?.operation, "delegate.complete");
+  assert.deepEqual(reservedTask.actions[0]?.argv, ["delegate", "complete", "T-RESERVED"]);
+  assert.deepEqual(reservedTask.actions[0]?.requirements, ["owner-thread"]);
+  assert.equal((reservedTask.actions[0] as { fence?: { leaseId?: string } }).fence?.leaseId, reserved.reservation.id);
   assert.deepEqual(expiredReservationTask.legalTransitions, []);
   assert.equal(expiredReservationTask.constraints.reservationRequiresBind, true);
   assert.equal(expiredReservationTask.constraints.reservationExpired, true);
@@ -147,15 +147,27 @@ test("task-next guidance reserves no-lease activation and fences correction evid
     assert.ok(task);
     assert.equal(task.state, entry.state);
     assert.ok(task.legalTransitions.includes("ACTIVE"));
-    assert.equal(task.actions[0]?.operation, "lease.reserve");
-    assert.deepEqual(task.actions[0]?.arguments, {
-      taskId: entry.id,
-      write: [],
-      writeTree: [],
-      read: [],
-      readTree: []
-    });
-    assert.deepEqual(task.actions[0]?.requirements, ["write-scope"]);
+    const expectedOperation = entry.state === "READY"
+      ? "delegate.start"
+      : entry.state === "REVIEW"
+        ? "task.transition"
+        : entry.state === "ACCEPTED"
+          ? "task.transition"
+          : "task.transition";
+    assert.equal(task.actions[0]?.operation, expectedOperation);
+    if (entry.state === "READY") {
+      assert.deepEqual(task.actions[0]?.arguments, {
+        taskId: entry.id,
+        write: [],
+        writeTree: [],
+        read: [],
+        readTree: []
+      });
+      assert.deepEqual(task.actions[0]?.requirements, ["write-scope"]);
+      assert.deepEqual(task.actions[0]?.argv, ["delegate", "start", entry.id]);
+    } else {
+      assert.equal((task.actions[0]?.arguments as { to?: string }).to, entry.state === "REVIEW" ? "ACCEPTED" : entry.state === "ACCEPTED" ? "VERIFIED" : "DONE");
+    }
   }
 
   const reserved = await reserveTaskLease({
@@ -166,18 +178,17 @@ test("task-next guidance reserves no-lease activation and fences correction evid
   const correctionGuidance = await nextTaskGuidance({ directory });
   const correctionTask = correctionGuidance.tasks.find(task => task.id === "T-REVIEW");
   assert.ok(correctionTask);
-  assert.equal(correctionTask.actions[0]?.operation, "lease.bind");
+  assert.equal(correctionTask.actions[0]?.operation, "delegate.complete");
   assert.deepEqual(correctionTask.actions[0]?.requirements, ["owner-thread", "evidence"]);
-  assert.deepEqual(correctionTask.actions[0]?.arguments, {
-    taskId: "T-REVIEW",
+  assert.deepEqual(correctionTask.actions[0]?.arguments, { taskId: "T-REVIEW" });
+  assert.deepEqual(correctionTask.actions[0]?.argv, ["delegate", "complete", "T-REVIEW"]);
+  assert.deepEqual((correctionTask.actions[0] as { fence?: Record<string, unknown> }).fence, {
     reservationToken: reserved.reservation.token,
     leaseId: reserved.reservation.id,
     generation: reserved.reservation.generation,
     revision: reserved.reservation.taskRevision,
     expectedReservedAt: reserved.reservation.reservedAt,
-    baselineHash: reserved.reservation.baseline.snapshotContentHash,
-    ownerThread: null,
-    evidence: []
+    baselineHash: reserved.reservation.baseline.snapshotContentHash
   });
 });
 
@@ -654,7 +665,10 @@ test("ACTIVE supervisor corrections consume rounds and retain scoped evidence be
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
 
   const guidance = await nextTaskGuidance({ directory });
-  const correctionAction = guidance.tasks.find(task => task.id === "T-001")?.actions[0];
+  const activeActions = guidance.tasks.find(task => task.id === "T-001")?.actions || [];
+  assert.equal(activeActions[0]?.operation, "wait.task");
+  assert.deepEqual(activeActions[0]?.argv, ["wait", "--task", "T-001"]);
+  const correctionAction = activeActions.find(action => action.operation === "task.correct");
   assert.equal(correctionAction?.operation, "task.correct");
   assert.deepEqual(correctionAction?.arguments, {
     taskId: "T-001",

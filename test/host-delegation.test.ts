@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  completeHostDelegation,
+  isCodexHostOperator,
+  probeCodexHostAdapter,
+  resolveHostDelegationAdapter,
   startHostDelegation,
+  startHostDelegationHandoff,
   type HostDelegationAdapter,
   type HostDelegationDependencies
 } from "../src/host-delegation.js";
@@ -436,9 +441,83 @@ test("CLI delegate start fails closed without a host adapter", async () => {
     log: value => messages.push(String(value)),
     warn() {},
     error() {}
+  }, {
+    hostRuntimeResolver: () => ({
+      surface: "cli",
+      executable: "codex",
+      executableSource: "PATH",
+      resolved: true
+    })
   });
   const envelope = JSON.parse(messages[0]!);
   assert.equal(status, 1);
   assert.equal(envelope.ok, false);
   assert.equal(envelope.error.code, ERROR_CODES.HOST_ADAPTER_REQUIRED);
+});
+
+test("resolver uses an injected adapter and fails closed for SYNOD_HOST_ADAPTER", () => {
+  const adapter: HostDelegationAdapter = {
+    async spawn() { return "opaque-owner"; },
+    async authorize() { return { status: "authorized" }; }
+  };
+  assert.equal(resolveHostDelegationAdapter({ adapter }), adapter);
+  assert.equal(resolveHostDelegationAdapter({}, {}), undefined);
+  assert.throws(
+    () => resolveHostDelegationAdapter({}, { SYNOD_HOST_ADAPTER: "unix:/tmp/synod-host.sock" }),
+    error => error instanceof Error && (error as Error & { code?: string }).code === ERROR_CODES.HOST_ADAPTER_INVALID
+  );
+});
+
+test("Codex host-only probe never constructs an App Server", () => {
+  const desktop = probeCodexHostAdapter({ surface: "desktop" });
+  assert.equal(desktop.found, false);
+  assert.equal(desktop.constructedAppServer, false);
+  assert.equal(desktop.reason, "host-only-not-found");
+  assert.equal(desktop.surface, "desktop");
+  assert.equal(isCodexHostOperator({ surface: "desktop", resolved: false, executableSource: "PATH-fallback" }), true);
+  assert.equal(isCodexHostOperator({ surface: "cli", resolved: true, executableSource: "cli-process" }), true);
+  assert.equal(isCodexHostOperator({ surface: "cli", resolved: true, executableSource: "PATH" }), false);
+});
+
+test("Codex handoff reserves and complete binds the stored fence", async () => {
+  const handoff = await startHostDelegationHandoff({
+    id: "T-HOST",
+    write: ["src/host-delegation.ts"]
+  }, {
+    ...dependencies(),
+    hostRuntimeResolver: () => ({
+      surface: "desktop",
+      executable: "/Applications/ChatGPT.app/Contents/Resources/codex",
+      executableSource: "desktop-process",
+      resolved: true
+    })
+  });
+  assert.equal(handoff.hostSpawnRequired, true);
+  assert.equal(handoff.readOnlyContract.writeAuthorized, false);
+  assert.equal(handoff.nextCommand.operation, "delegate.complete");
+  assert.deepEqual(handoff.nextCommand.requirements, ["owner-thread"]);
+  assert.equal(handoff.probe.constructedAppServer, false);
+  assert.equal(handoff.reservationFence.reservationToken, reservation.token);
+
+  const completed = await completeHostDelegation({
+    id: "T-HOST",
+    ownerThread: "opaque-owner"
+  }, {
+    ...dependencies(),
+    read: (async () => ({
+      state: { tasks: { "T-HOST": { id: "T-HOST", leaseReservation: reservation } } },
+      events: [],
+      leaseBaselines: { baselines: [] }
+    })) as never
+  });
+  assert.equal(completed.ownerThread, "opaque-owner");
+  assert.equal(completed.authorization.status, "accepted");
+  assert.equal(completed.authorization.hostNotificationRequired, true);
+});
+
+test("handoff --wait without an adapter fails closed", async () => {
+  await assert.rejects(
+    () => startHostDelegationHandoff({ id: "T-HOST", wait: true }, dependencies()),
+    error => error instanceof Error && (error as Error & { code?: string }).code === ERROR_CODES.HOST_ADAPTER_REQUIRED
+  );
 });

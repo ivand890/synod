@@ -6,7 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-No unreleased changes.
+### Added
+
+- Added Codex host-operator `delegate start` handoff and `delegate complete
+  --owner-thread` so an agent can finish the golden path without reconstructing
+  a reservation fence. An injected adapter still owns reserve-spawn-bind-
+  authorize. Standalone non-Codex CLIs still fail closed.
+- Added blindly executable `argv` fields on `task next` actions and on
+  delegate/wait/proposal next-operation receipts.
+
+### Changed
+
+- READY now recommends `delegate.start` instead of `lease.reserve`. Active
+  reservations recommend `delegate.complete`. Bound writers recommend
+  `wait --task`. Review recommends accept at the exact revision.
+- Shrunk the advisor skill and managed `AGENTS.md` block to the golden path
+  plus `task next`. They no longer require loading `docs/synod/` or citing
+  `STATE.md`. Desktop remains host authority before any child App Server.
 
 ## [0.9.5] - 2026-08-15
 

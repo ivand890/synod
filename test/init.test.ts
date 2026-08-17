@@ -40,9 +40,9 @@ test("initializes a fresh project with durable state, agents, and skill", async 
   assert.match(agents, /\$synod-advisor/);
   assert.ok(agents.includes(`pnpm dlx @ivand890/synod@${packageVersion} status`));
   assert.ok(agents.includes("pnpm dlx @ivand890/synod@<target-version> upgrade [directory]"));
-  assert.match(agents, /Before spawning a writer, reserve/);
-  assert.match(agents, /writes, worktrees, and implementation commands must wait/);
-  assert.match(agents, /Keep `lease acquire` only for an already-known worker identity/);
+  assert.match(agents, /Golden path: `task add` → `delegate start` → `wait --task`/);
+  assert.match(agents, /execute the returned `argv`/);
+  assert.match(agents, /Do not load README, PRODUCT, ROADMAP, STATE notes/);
   assert.match(agents, /proposal summary returns a typed exact-revision acceptance action/);
   assert.doesNotMatch(agents, /receipt preserves the exact next-operation lease fence/);
 
@@ -213,21 +213,20 @@ test("keeps the primary agent supervisory and delegates routine implementation",
   const agents = await readFile(path.join(directory, "AGENTS.md"), "utf8");
   const decisions = await readFile(path.join(directory, "docs/synod/DECISIONS.md"), "utf8");
 
-  assert.match(skill, /Do not use the supervising model as the routine implementation worker\./);
+  assert.match(skill, /Do not use the supervising model as the routine implementation worker/);
   assert.match(skill, /synod_implementer.*selected profile/);
-  assert.match(skill, /rotation verify --recommendation <event-id> --session <id>/);
-  assert.match(skill, /usage --since-event <start> --until-event <end> --price-file <path>/);
-  assert.match(skill, /usage --task <task-id> --session <session-id>/);
-  assert.match(skill, /incomplete usage fails closed/);
-  assert.match(skill, /Before spawning a writer, run `[^`]+ lease reserve/);
-  assert.match(skill, /wait --task <task-id>/);
-  assert.match(skill, /call direct platform `wait_agent` for exactly the returned `hostWaitThreadIds`/);
-  assert.match(skill, /waitAuthority: canonical/);
-  assert.match(skill, /hostFallbackRequired`\/`hostFallbackThreadIds` as compatibility aliases/);
-  assert.match(skill, /Only after a successful bind may the supervisor send explicit write authorization/);
-  assert.match(skill, /activation receipt does not claim that notification was observed/);
-  assert.match(skill, /atomic `delegate start` remains deferred/);
-  assert.match(skill, /summary returns a typed exact-revision acceptance action/);
+  assert.match(skill, /task add → delegate start → wait --task → proposal submit/);
+  assert.match(skill, /task next --json --view summary/);
+  assert.match(skill, /execute the returned `argv`/);
+  assert.match(skill, /Do not load README, PRODUCT, ROADMAP, STATE notes/);
+  assert.doesNotMatch(skill, /STATE\.md/);
+  assert.match(skill, /wait --task <id>/);
+  assert.match(skill, /wait_agent` only for the exact `hostWaitThreadIds/);
+  assert.match(skill, /hostFallbackRequired` \/ `hostFallbackThreadIds` as compatibility aliases/);
+  assert.match(skill, /On Desktop without an injected adapter/);
+  assert.match(skill, /Do not start a child App Server/);
+  assert.match(skill, /delegate complete --owner-thread/);
+  assert.doesNotMatch(skill, /atomic `delegate start` remains deferred/);
   assert.doesNotMatch(skill, /receipt preserves the exact next-operation lease fence/);
   assert.match(agents, /Do not use the supervising model as the default implementation worker\./);
   assert.match(decisions, /Cost-efficient agents perform implementation/);
@@ -249,9 +248,6 @@ test("renders the GPT-5.6 profile with a spawn-safe default and Luna custom-agen
   assert.match(mechanical, /model = "gpt-5\.6-luna"/);
   assert.match(skill, /Omit explicit `model` and `reasoning_effort` spawn overrides/);
   assert.match(skill, /full-history fork inherits the parent agent type/);
-  assert.match(skill, /target configured custom-agent type and a fresh fork without full parent history/);
-  assert.match(skill, /Omit explicit `model` and `reasoning_effort`, then inspect/);
-  assert.match(skill, /persisted `turn_context`/);
   assert.ok(skill.includes(`pnpm dlx @ivand890/synod@${packageVersion} doctor`));
   assert.ok(skill.includes("pnpm dlx @ivand890/synod@<target-version> upgrade [directory]"));
 });

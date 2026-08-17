@@ -60,7 +60,19 @@ export interface DelegateStartCommandOptions {
   pollIntervalMs: number;
 }
 
-export type DelegateCommandOptions = DelegateStartCommandOptions;
+export interface DelegateCompleteCommandOptions {
+  action: "complete";
+  id: string;
+  cwd: string;
+  json: boolean;
+  actor: string;
+  ownerThread: string;
+  ttlSeconds?: number;
+  heartbeatIntervalSeconds?: number;
+  evidence: string[];
+}
+
+export type DelegateCommandOptions = DelegateStartCommandOptions | DelegateCompleteCommandOptions;
 
 export interface CheckpointOptions {
   directory: string;
@@ -575,12 +587,59 @@ export function parseDelegateArgs(args: string[]): DelegateCommandOptions | Help
   args = parseOutputViewArgs(args).args;
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
-  if (action !== "start") {
+  if (action !== "start" && action !== "complete") {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown delegate action: ${action}`, { details: { action } });
   }
   if (hasHelpFlagAfterAction(args)) return { help: true };
   const id = args[1];
-  if (!id || id.startsWith("-")) throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, "Delegate start requires a task ID.");
+  if (!id || id.startsWith("-")) {
+    throw new SynodError(
+      ERROR_CODES.UNEXPECTED_ARGUMENT,
+      action === "complete" ? "Delegate complete requires a task ID." : "Delegate start requires a task ID."
+    );
+  }
+  if (action === "complete") {
+    const options: DelegateCompleteCommandOptions = {
+      action: "complete",
+      id,
+      cwd: ".",
+      json: false,
+      actor: "supervisor",
+      ownerThread: "",
+      evidence: []
+    };
+    for (let index = 2; index < args.length; index += 1) {
+      const arg = args[index];
+      if (!arg) continue;
+      if (arg === "-h" || arg === "--help") return { help: true };
+      if (arg === "--json") { options.json = true; continue; }
+      const valueOptions = ["--cwd", "--actor", "--owner-thread", "--evidence", "--ttl-seconds", "--heartbeat-seconds"];
+      if (!valueOptions.includes(arg)) {
+        if (arg.startsWith("-")) throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
+        throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
+      }
+      const value = optionValue(args, index, arg);
+      if (arg === "--cwd") options.cwd = value;
+      else if (arg === "--actor") options.actor = value;
+      else if (arg === "--owner-thread") options.ownerThread = value;
+      else if (arg === "--evidence") options.evidence.push(value);
+      else if (arg === "--ttl-seconds") options.ttlSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+      else options.heartbeatIntervalSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+      index += 1;
+    }
+    if (!options.ownerThread.trim()) {
+      throw new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Delegate complete requires --owner-thread.");
+    }
+    for (const [name, value] of [
+      ["--ttl-seconds", options.ttlSeconds],
+      ["--heartbeat-seconds", options.heartbeatIntervalSeconds]
+    ] as const) {
+      if (value !== undefined && Number.isNaN(value)) {
+        throw new SynodError(ERROR_CODES.LEASE_INVALID, `Delegate complete requires an integer value for ${name}.`, { details: { option: name } });
+      }
+    }
+    return { ...options, ownerThread: options.ownerThread.trim(), evidence: [...new Set(options.evidence)] };
+  }
   const options: DelegateStartCommandOptions = {
     action: "start",
     id,

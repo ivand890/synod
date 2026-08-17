@@ -353,6 +353,97 @@ test("wait parsing requires a task or thread and rejects out-of-range fallback i
   }
 });
 
+test("delegate complete requires an owner thread and rejects unknown actions", () => {
+  assert.throws(
+    () => parseDelegateArgs(["complete", "T-001"]),
+    error => error instanceof Error && (error as Error & { code?: string }).code === ERROR_CODES.HOST_OWNER_MISSING
+  );
+  const parsed = parseDelegateArgs(["complete", "T-001", "--owner-thread", "thread:worker", "--json"]);
+  assert.equal("help" in parsed, false);
+  if ("help" in parsed) return;
+  assert.equal(parsed.action, "complete");
+  assert.equal(parsed.action === "complete" ? parsed.ownerThread : "", "thread:worker");
+  assert.throws(
+    () => parseDelegateArgs(["begin", "T-001"]),
+    error => error instanceof Error && (error as Error & { code?: string }).code === ERROR_CODES.UNEXPECTED_ARGUMENT
+  );
+});
+
+test("CLI delegate start on Desktop reserves a host spawn handoff", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-delegate-handoff-"));
+  const { messages, output } = capturedOutput();
+  try {
+    await run(["init", directory], output);
+    initializeGitHead(directory);
+    await run(["checkpoint", directory], output);
+    await run([
+      "task", "add", "T-HOST",
+      "--objective", "Exercise Desktop host handoff",
+      "--executor", "synod_implementer",
+      "--acceptance", "Reservation is returned",
+      "--verification", "pnpm test",
+      "--cwd", directory
+    ], output);
+    await run(["task", "transition", "T-HOST", "READY", "--revision", "0", "--cwd", directory], output);
+    messages.length = 0;
+    const startStatus = await run(
+      ["delegate", "start", "T-HOST", "--write", "AGENTS.md", "--cwd", directory, "--json"],
+      output,
+      {
+        hostRuntimeResolver: () => ({
+          surface: "desktop",
+          executable: "/Applications/ChatGPT.app/Contents/Resources/codex",
+          executableSource: "desktop-process",
+          resolved: true
+        })
+      }
+    );
+    const start = JSON.parse(takeMessage(messages));
+    assert.equal(startStatus, 1);
+    assert.equal(start.ok, true);
+    assert.equal(start.data.hostSpawnRequired, true);
+    assert.equal(start.data.nextCommand.operation, "delegate.complete");
+    assert.equal(start.data.probe.constructedAppServer, false);
+    assert.equal(start.data.readOnlyContract.writeAuthorized, false);
+
+    messages.length = 0;
+    const completeStatus = await run(
+      ["delegate", "complete", "T-HOST", "--owner-thread", "thread:desktop-worker", "--cwd", directory, "--json"],
+      output
+    );
+    const complete = JSON.parse(takeMessage(messages));
+    assert.equal(completeStatus, 0);
+    assert.equal(complete.ok, true);
+    assert.equal(complete.data.ownerThread, "thread:desktop-worker");
+    assert.equal(complete.data.authorization.status, "accepted");
+    assert.equal(complete.data.hostNotificationRequired, true);
+    assert.deepEqual(complete.data.nextCommand, {
+      operation: "wait.task",
+      argv: ["wait", "--task", "T-HOST"],
+      requirements: []
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("CLI delegate start fails closed when SYNOD_HOST_ADAPTER is set", async () => {
+  const { messages, output } = capturedOutput();
+  const status = await run(["delegate", "start", "T-HOST", "--json"], output, {
+    hostAdapterEnv: { SYNOD_HOST_ADAPTER: "unix:/tmp/missing.sock" },
+    hostRuntimeResolver: () => ({
+      surface: "desktop",
+      executable: "/Applications/ChatGPT.app/Contents/Resources/codex",
+      executableSource: "desktop-process",
+      resolved: true
+    })
+  });
+  const envelope = JSON.parse(takeMessage(messages));
+  assert.equal(status, 1);
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error.code, ERROR_CODES.HOST_ADAPTER_INVALID);
+});
+
 test("delegate timeout and poll options require explicit waiting", () => {
   for (const args of [
     ["start", "T-001", "--timeout-seconds", "10"],
@@ -367,9 +458,12 @@ test("delegate timeout and poll options require explicit waiting", () => {
   const parsed = parseDelegateArgs([
     "start", "T-001", "--timeout-seconds", "10", "--poll-interval-ms", "200", "--wait"
   ]);
-  assert.equal("help" in parsed ? false : parsed.wait, true);
-  assert.equal("help" in parsed ? undefined : parsed.timeoutMs, 10_000);
-  assert.equal("help" in parsed ? undefined : parsed.pollIntervalMs, 200);
+  assert.equal("help" in parsed, false);
+  if ("help" in parsed) return;
+  assert.equal(parsed.action, "start");
+  assert.equal(parsed.action === "start" ? parsed.wait : false, true);
+  assert.equal(parsed.action === "start" ? parsed.timeoutMs : 0, 10_000);
+  assert.equal(parsed.action === "start" ? parsed.pollIntervalMs : 0, 200);
 });
 
 test("typed task-next and proposal-submit parsing reject copied transition fences", () => {
@@ -1302,6 +1396,49 @@ test("wait command returns an explicit Desktop host handoff without creating a c
   assert.deepEqual(envelope.data.hostWaitThreadIds, ["thread:one"]);
 });
 
+test("wait uses the same host adapter resolver and does not request a host handoff", async () => {
+  const { messages, output } = capturedOutput();
+  let created = false;
+  const status = await run([
+    "wait",
+    "--thread", "opaque-owner",
+    "--json"
+  ], output, {
+    waitClientFactory: () => {
+      created = true;
+      return {
+        async start() {},
+        async request() { return {}; },
+        async close() {}
+      };
+    },
+    hostDelegationAdapterFactory: () => ({
+      async spawn() { return "opaque-owner"; },
+      async authorize() { return { status: "authorized" }; },
+      async wait() {
+        return {
+          statuses: [{ threadId: "opaque-owner", status: { type: "idle" } }],
+          mode: "notification",
+          wakeCount: 1
+        };
+      }
+    }),
+    waitRuntimeResolver: () => ({
+      surface: "desktop",
+      executable: "/Applications/ChatGPT.app/Contents/Resources/codex",
+      executableSource: "desktop-process",
+      resolved: true
+    })
+  });
+  const envelope = JSON.parse(takeMessage(messages));
+  assert.equal(status, 0);
+  assert.equal(created, false);
+  assert.equal(envelope.data.waitAuthority, "host");
+  assert.equal(envelope.data.incomplete, false);
+  assert.equal(envelope.data.hostWaitRequired, false);
+  assert.deepEqual(envelope.data.hostWaitThreadIds, []);
+});
+
 test("status explain returns the path delta inside checkpoint-drift JSON", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-delta-json-test-"));
   const { messages, output } = capturedOutput();
@@ -1498,7 +1635,8 @@ test("CLI task-next summary preserves typed lease-reserve guidance", async () =>
     assert.equal(fullCode, 0);
     const fullTask = full.data.guidance.tasks.find((task: { id: string }) => task.id === "T-NEXT");
     assert.ok(fullTask);
-    assert.equal(fullTask.actions[0].operation, "lease.reserve");
+    assert.equal(fullTask.actions[0].operation, "delegate.start");
+    assert.deepEqual(fullTask.actions[0].argv, ["delegate", "start", "T-NEXT"]);
     assert.ok(fullTask.constraints);
     assert.ok(fullTask.legalTransitions.includes("ACTIVE"));
     assert.ok(Object.hasOwn(fullTask, "incompleteDependencies"));
@@ -1511,7 +1649,8 @@ test("CLI task-next summary preserves typed lease-reserve guidance", async () =>
     assert.equal(summaryCode, 0);
     const summaryTask = summary.data.guidance.tasks.find((task: { id: string }) => task.id === "T-NEXT");
     assert.ok(summaryTask);
-    assert.equal(summaryTask.actions[0].operation, "lease.reserve");
+    assert.equal(summaryTask.actions[0].operation, "delegate.start");
+    assert.deepEqual(summaryTask.actions[0].argv, ["delegate", "start", "T-NEXT"]);
     assert.deepEqual(summaryTask.actions[0].arguments, {
       taskId: "T-NEXT",
       write: [],
@@ -1578,6 +1717,7 @@ test("CLI proposal summary exposes the exact acceptance action after releasing i
     assert.deepEqual(summary.data.nextOperation, {
       operation: "task.transition",
       arguments: { taskId: "T-PROPOSAL", to: "ACCEPTED", revision: 1, evidence: [] },
+      argv: ["task", "transition", "T-PROPOSAL", "ACCEPTED", "--revision", "1"],
       requirements: ["evidence"]
     });
     assert.equal(Object.hasOwn(summary.data.nextOperation, "fence"), false);
