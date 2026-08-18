@@ -56,7 +56,14 @@ import { formatRotationReport, formatRotationSuggestion } from "./rotation.js";
 import { formatCostReport, projectUsageCost, readPriceFile } from "./costs.js";
 import { parseOutputViewArgs, projectJsonEnvelope } from "./output-view.js";
 import type { JsonEnvelopeLike, OutputView } from "./output-view.js";
-import { startHostDelegation } from "./host-delegation.js";
+import { resolveCodexRuntime } from "./codex-runtime.js";
+import {
+  completeHostDelegation,
+  isCodexHostOperator,
+  resolveHostDelegationAdapter,
+  startHostDelegation,
+  startHostDelegationHandoff
+} from "./host-delegation.js";
 import type { HostDelegationAdapter } from "./host-delegation.js";
 
 const HELP = `Synod ${packageVersion}
@@ -112,6 +119,7 @@ Usage:
   synod usage [--session <thread-id>] [--cwd <directory>] [--since-event <sequence|id> | --since-checkpoint | --task <task-id>] [--until-event <sequence|id>] [--price-file <path>] [--by-model] [--json]
   synod wait (--task <task-id> | --thread <thread-id>) [--task <task-id>] [--thread <thread-id>] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
   synod delegate start <task-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--actor <id>] [--evidence <reference>] [--reservation-ttl-seconds <n>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--wait] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
+  synod delegate complete <task-id> --owner-thread <thread-id> [--actor <id>] [--evidence <reference>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
   synod --help
   synod --version
 
@@ -133,7 +141,7 @@ Commands:
   profiles    List built-in model profiles and their requirements.
   usage       Report attributable token and coordination activity for a session tree or canonical interval.
   wait        Observe child thread status changes without renewing worker leases.
-  delegate    Start a host-owned delegation through an injected adapter.
+  delegate    Start a host-owned delegation, or complete a reserved host handoff.
 
 Options:
   --profile   Select a built-in model profile for init or upgrade.
@@ -211,6 +219,8 @@ export interface CliDependencies extends LifecycleDependencies, OrchestrationDep
   hostWaitAdapter?: import("./wait.js").HostWaitAdapter;
   hostDelegationAdapter?: HostDelegationAdapter;
   hostDelegationAdapterFactory?: () => HostDelegationAdapter;
+  hostRuntimeResolver?: () => import("./codex-runtime.js").ResolvedCodexRuntime;
+  hostAdapterEnv?: NodeJS.ProcessEnv;
   waitRuntimeResolver?: () => WaitRuntime;
   waitSelectionResolver?: typeof resolveWaitSelection;
   worktreeDependencies?: TaskWorktreeDependencies;
@@ -458,8 +468,82 @@ export async function run(
     if (command === "delegate") {
       const options = parseDelegateArgs(args.slice(1));
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      const adapter = dependencies.hostDelegationAdapterFactory?.() || dependencies.hostDelegationAdapter;
-      if (!adapter) throw new SynodError(ERROR_CODES.HOST_ADAPTER_REQUIRED, "Host delegation requires an injected host adapter.");
+      const adapter = resolveHostDelegationAdapter({
+        ...(dependencies.hostDelegationAdapter ? { hostDelegationAdapter: dependencies.hostDelegationAdapter } : {}),
+        ...(dependencies.hostDelegationAdapterFactory
+          ? { hostDelegationAdapterFactory: dependencies.hostDelegationAdapterFactory }
+          : {}),
+        ...(dependencies.hostAdapterEnv ? { env: dependencies.hostAdapterEnv } : {})
+      });
+      const hostDependencies = dependencies as unknown as import("./host-delegation.js").HostDelegationDependencies;
+      if (options.action === "complete") {
+        const result = await completeHostDelegation({
+          id: options.id,
+          directory: options.cwd,
+          actor: options.actor,
+          ownerThread: options.ownerThread,
+          evidence: options.evidence,
+          ...(adapter ? { adapter } : {}),
+          ...(options.ttlSeconds === undefined ? {} : { ttlSeconds: options.ttlSeconds }),
+          ...(options.heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds: options.heartbeatIntervalSeconds })
+        }, hostDependencies);
+        const data = {
+          action: "complete",
+          task: result.task,
+          ownerThread: result.ownerThread,
+          lease: result.lease,
+          authorization: result.authorization,
+          hostNotificationRequired: result.authorization.hostNotificationRequired === true,
+          nextCommand: {
+            operation: "wait.task",
+            argv: ["wait", "--task", result.task.id],
+            requirements: []
+          },
+          checkpoint: result.bind.state.checkpoint,
+          lastEvent: result.bind.state.lastEvent
+        };
+        if (options.json) printJsonEnvelope(successEnvelope("delegate", data), output, view);
+        else {
+          output.log(`Bound ${result.task.id} to ${result.ownerThread}; write ${result.authorization.status}.`);
+        }
+        return 0;
+      }
+      if (!adapter) {
+        const runtime = dependencies.hostRuntimeResolver?.() || resolveCodexRuntime();
+        if (!isCodexHostOperator(runtime)) {
+          throw new SynodError(ERROR_CODES.HOST_ADAPTER_REQUIRED, "Host delegation requires an injected host adapter.");
+        }
+        const handoff = await startHostDelegationHandoff({
+          id: options.id,
+          directory: options.cwd,
+          actor: options.actor,
+          read: options.read,
+          write: options.write,
+          readTree: options.readTree,
+          writeTree: options.writeTree,
+          evidence: options.evidence,
+          ...(options.reservationTtlSeconds === undefined ? {} : { reservationTtlSeconds: options.reservationTtlSeconds }),
+          ...(options.wait ? { wait: true } : {})
+        }, {
+          ...hostDependencies,
+          hostRuntimeResolver: () => runtime
+        });
+        const data = {
+          action: "start",
+          task: handoff.task,
+          reservation: handoff.reservation,
+          reservationFence: handoff.reservationFence,
+          readOnlyContract: handoff.readOnlyContract,
+          hostSpawnRequired: true,
+          nextCommand: handoff.nextCommand,
+          probe: handoff.probe
+        };
+        if (options.json) printJsonEnvelope(successEnvelope("delegate", data), output, view);
+        else {
+          output.log(`Reserved ${handoff.task.id}; host spawn required. Next: synod delegate complete ${handoff.task.id} --owner-thread <owner-thread>.`);
+        }
+        return 1;
+      }
       const result = await startHostDelegation({
         id: options.id,
         directory: options.cwd,
@@ -474,7 +558,7 @@ export async function run(
         ...(options.ttlSeconds === undefined ? {} : { ttlSeconds: options.ttlSeconds }),
         ...(options.heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds: options.heartbeatIntervalSeconds }),
         ...(options.wait ? { wait: { timeoutMs: options.timeoutMs, pollIntervalMs: options.pollIntervalMs } } : {})
-      }, dependencies as unknown as import("./host-delegation.js").HostDelegationDependencies);
+      }, hostDependencies);
       const data = {
         action: "start",
         task: result.task,
@@ -505,11 +589,18 @@ export async function run(
         taskIds: options.taskIds,
         threadIds: options.threadIds
       });
+      const resolvedHostAdapter = dependencies.hostWaitAdapter
+        || resolveHostDelegationAdapter({
+          ...(dependencies.hostDelegationAdapter ? { hostDelegationAdapter: dependencies.hostDelegationAdapter } : {}),
+          ...(dependencies.hostDelegationAdapterFactory
+            ? { hostDelegationAdapterFactory: dependencies.hostDelegationAdapterFactory }
+            : {}),
+          ...(dependencies.hostAdapterEnv ? { env: dependencies.hostAdapterEnv } : {})
+        }, dependencies.hostAdapterEnv ?? process.env, { allowUnsupportedChannel: true });
       const report = await waitForThreads({ ...options, threadIds: selection.threadIds }, {
         ...(dependencies.waitClientFactory ? { clientFactory: dependencies.waitClientFactory } : {}),
         ...(dependencies.waitAdapterFactory ? { adapterFactory: dependencies.waitAdapterFactory } : {}),
-        ...(dependencies.hostWaitAdapter ? { hostAdapter: dependencies.hostWaitAdapter } : {}),
-        ...(dependencies.hostDelegationAdapter ? { hostAdapter: dependencies.hostDelegationAdapter } : {}),
+        ...(resolvedHostAdapter ? { hostAdapter: resolvedHostAdapter } : {}),
         ...(dependencies.waitRuntimeResolver ? { runtimeResolver: dependencies.waitRuntimeResolver } : {})
       });
       if (options.json) {

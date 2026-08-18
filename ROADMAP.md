@@ -1,6 +1,6 @@
 # Synod Roadmap
 
-Last updated: 2026-08-16
+Last updated: 2026-08-17
 Current public release: `v0.9.5`
 Current source release: `v0.9.5`
 Last verified public release at this update: `v0.9.5`
@@ -68,6 +68,9 @@ recoverability, concurrency control, and then economics/adaptive orchestration.
    revisions, and incomplete recovery material.
 6. Treat usage as measured token activity. Monetary estimates remain optional,
    dated, and explicitly configured.
+7. The operator of Synod is the supervising agent. A human asks a harness to
+   complete work; the agent runs the loop. The human must not need to learn
+   leases, fences, or wait authority.
 
 ## Pre-v0.7 foundation — TypeScript 7 source migration
 
@@ -260,22 +263,162 @@ Release gate: the exact signed tag and immutable latest GitHub Release, npm
 consumer install, and public CLI parity are recorded in the root closeout and
 the byte-identical versioned archive.
 
+## Path to v1.0
+
+`v0.9.5` is the public ledger and fail-closed protocol. `v1.0` is not another
+protocol increment. It is the moment a human can ask Codex to complete work
+with Synod, the supervising agent can run the loop without reconstructing
+fences from chat, and a second independent project can do the same on a
+published package.
+
+The operator is the agent. The human opens a harness and requests work. The
+agent owns `task add`, host-owned `delegate start`, `wait --task`,
+`proposal submit`, acceptance, verification, and `DONE`. A human who has to
+learn what a bind is means the increment failed.
+
+Exact CLI spelling below remains provisional until each increment is
+implemented and published. Later increments remain unavailable to a
+public/pinned runtime until their release is published and the project is
+explicitly upgraded.
+
+### Freeze before any post-0.9.5 increment
+
+- Do not add dormant contracts. Schema-1 `JobHandle`/`JobEvent` stay
+  validation-only.
+- Do not add an execution plane, a mutating MCP server, or persisted jobs.
+- Do not add another version-truth, closeout, or compatibility hotfix series
+  unless a live Codex line change forces a fail-closed doctor gate.
+- Do not add a second harness. Codex is the first adapter.
+- Do not split `src/orchestration.ts` unless it blocks the SYN-100 handshake.
+- Decision D-006 remains in force until a live host adapter owns both spawn
+  identity and the bind fence. Until then, standalone `delegate start` stays
+  fail-closed or returns an incomplete host handoff.
+
+If Codex cannot inject an adapter that owns spawn and wait, do not label
+`v1.0`. Publish the reachable increment as a ledger plus honest incomplete
+handoff and wait for the harness. A `v1.0` where the supervisor still copies
+thread IDs by hand is `v0.9.5` with a different number.
+
+### Sequence
+
+```text
+v0.10  agent-completable golden path     only product increment
+v0.11  agent-recoverable interruption    the agent continues without a human
+v0.12  independent proof                 evidence, not surface
+v1.0   product closeout                  docs, security, Codex window
+```
+
+Each of `v0.10`, `v0.11`, and `v0.12` is published and used as the
+version-pinned control plane before the next increment starts. `v1.0` is
+tagged only after `v0.12` passes. Protocol defects found during `v0.12`
+return to a `v0.11.x` patch; they do not open a feature series.
+
+If time is short, implement in this order: SYN-100, SYN-101, SYN-102,
+SYN-110, SYN-111, SYN-121. The rest is hygiene.
+
+## v0.10 — Agent-completable golden path
+
+Goal: stop using the supervisor as a bus between Synod and Codex. One
+delegation verb, a blindly executable next action, and an in-context contract
+that fits in the advisor skill.
+
+Status: planned.
+
+The executable golden path is:
+
+```text
+task add → delegate start → wait --task → proposal submit
+        → ACCEPTED → VERIFIED → DONE
+```
+
+Lease generation, heartbeat timestamps, baseline hashes, and reservation
+tokens remain in JSON. The agent must not type or reconstruct them.
+
+| ID | Outcome | Depends on | Acceptance gate |
+|---|---|---|---|
+| SYN-100 | Live Codex `HostDelegationAdapter` so host-owned `delegate start` can reserve, spawn, bind, and authorize | `v0.9.5` | On Codex CLI and Desktop, `delegate start <task>` performs reserve → host spawn → bind → write authorization. The owner identity is opaque and host-returned. Synod does not create the Codex process. Without an adapter, the standalone CLI still fails closed or returns an incomplete host handoff. |
+| SYN-101 | Blind next-action contract | SYN-100 | `task next --json --view summary`, plus `delegate`, `wait`, and recover receipts, return the next complete command: argv and exact fence. The agent does not rebuild token, generation, `reserved-at`, or baseline hash from chat. Stale fences fail closed. Typed actions cover accept, verify, recover, cancel, and expire. |
+| SYN-102 | One-page agent contract | SYN-101 | The advisor skill and the managed `AGENTS.md` block are the only in-context policy. README, PRODUCT, STATE notes, this roadmap, and closeout archives are not loaded by default. The skill names the golden path and points at `task next`. A fresh supervisor session completes a task without citing `STATE.md`. Target: policy under about 2,000 tokens. |
+| SYN-103 | Host-complete wait when an adapter is present | SYN-100 | With an adapter, `wait --task` or `delegate start --wait` observes the owner thread. `hostWaitRequired` appears only when the host did not inject wait. The agent calls the platform wait primitive only for the exact IDs Synod returns. |
+
+Release gate: a fresh supervisor with no parent history completes one atomic
+task in this repository using only the skill and `task next`. Zero fences are
+typed from chat. The supervisor does not implement unless the existing
+minimal-integration exception applies and is recorded.
+
+## v0.11 — Agent-recoverable interruption
+
+Goal: worker death, empty delivery, and a new root session are typed agent
+paths, not supervisor judgment.
+
+Status: planned.
+
+| ID | Outcome | Depends on | Acceptance gate |
+|---|---|---|---|
+| SYN-110 | Recovery as a fenced next action | `v0.10` | Worker stop, lease expiry, or in-scope no-delta yields a typed `resume`, `reassign`, or `supersede` action with the ended generation's exact fence. The agent applies it. Recovery does not accept, verify, or discard the sealed proposal. |
+| SYN-111 | Fresh-session handoff without prose memory | SYN-110 | A different root session runs `handoff` and `task next` and continues. Rotation prepare/verify stays opt-in. `STATE.md` is not an input. A recovery bundle remains optional, not required on the happy path. |
+| SYN-112 | In-scope no-delta is evidence | SYN-110 | If the worker produces no in-scope delta, `proposal submit` fails closed or `task next` returns recover/correct. Empty delivery cannot be resolved by an undocumented supervisor implementation. |
+
+Release gate: kill the worker while the task is `ACTIVE`, start a new root
+session, recover, and finish. The sealed proposal remains intact. Acceptance
+does not advance across the crash.
+
+## v0.12 — Independent proof
+
+Goal: satisfy the existing `v1.0` readiness criteria with published artifacts.
+No new command surface unless a drill finds a hole; those holes return to
+`v0.11.x`.
+
+Status: planned.
+
+| ID | Outcome | Depends on | Acceptance gate |
+|---|---|---|---|
+| SYN-120 | Pilot A: this repository on the published `v0.11.x` package | `v0.11` | A real Synod feature that is not closeout or version-truth documentation is delivered with `@ivand890/synod@0.11.x` pinned. The drill includes interruption plus restore of a reviewed dirty checkpoint. The reconstructed fingerprint matches exactly. |
+| SYN-121 | Pilot B: an independent repository | SYN-120 | A different repository and domain, preferably a different person. The human only requests the work and does not explain leases. The agent reaches `DONE`. If the human had to know what a bind is, the pilot fails. |
+| SYN-122 | Loop-cost evidence | SYN-120 | Canonical `usage` and coordination reports cover the pilot interval. Compare them to the historical 0.9.x dogfood snapshot (329 supervisor waits, hundreds of millions of tokens). Do not promise savings. If coordination cost does not drop clearly, do not tag `v1.0`; return to `v0.10`/`v0.11`. |
+| SYN-123 | Adversarial gap-fill | `v0.11` | Audit the existing suite and add only missing fail-closed cases: concurrent writers, stale leases, corrupted bundles, hash-chain breaks, unsafe paths, and partial transactions. Do not add a new test framework. |
+
+Release gate: both pilots run on published packages, the recovery drill is
+green, adversarial cases fail closed, and usage reports stay stable on the
+supported Codex line.
+
+## v1.0 — Product closeout
+
+Goal: label the proven loop, not add protocol. Documentation, security review,
+and the Codex compatibility window. A protocol defect found here is a
+`v0.12.x` patch.
+
+Status: planned. Tag `v1.0.0` only after `v0.12` is green.
+
+| ID | Outcome | Depends on | Acceptance gate |
+|---|---|---|---|
+| SYN-130 | Rewrite PRODUCT and README for the agent operator | `v0.12` | Docs state that the human opens a harness and asks for work, the agent runs Synod, and the CLI is not a human operator tool. `DONE` remains local delivery, acceptance, and verification only; it is not commit, push, deploy, or external approval. |
+| SYN-131 | Security review | `v0.12` | Review leases, recovery bundles including optional local docs, write scopes, uninstall preservation, and the no-telemetry default. |
+| SYN-132 | Codex window policy | `v0.12` | Document how a later Codex minor line (`0.149` or equivalent) is adopted: doctor fails closed, then an explicit runtime upgrade. Do not treat "every `0.148.x` variant" as a permanent product promise. |
+| SYN-133 | Tag `v1.0.0` | SYN-120–SYN-132 | The readiness criteria below are all demonstrated on the exact tag commit, including cross-platform CI, migrations, uninstall preservation, and installed-package smoke. |
+
 ## v1.0 readiness criteria
 
 Synod reaches a 1.0 candidate only after all of the following are demonstrated:
 
-- Two independent, production-shaped pilots complete interruption and recovery
-  drills using released package artifacts.
+- SYN-100 through SYN-103 are published and a fresh supervisor can complete
+  the golden path from the skill and `task next` without typing a fence.
+- SYN-110 through SYN-112 are published and a killed worker can be recovered
+  from a new root session without advancing acceptance.
+- Two independent, production-shaped pilots (SYN-120, SYN-121) complete
+  interruption and recovery drills using released package artifacts.
 - A reviewed dirty checkpoint is recoverable in a clean checkout and its
   reconstructed fingerprint matches exactly.
 - Concurrent-writer, stale-lease, corrupted-bundle, hash-chain, unsafe-path,
   and partial-transaction adversarial tests fail closed.
 - Usage and coordination reports remain stable across supported Codex versions,
-  model reroutes, archived descendants, and counter resets.
+  model reroutes, archived descendants, and counter resets, and SYN-122 shows
+  a clear drop in coordination cost versus the 0.9.x dogfood snapshot.
 - Lifecycle migrations, uninstall preservation, installed-package behavior,
   security review, and cross-platform CI are green on the exact release commit.
 - Public documentation distinguishes local completion, Git integration,
-  external approval, deployment, and operational verification.
+  external approval, deployment, and operational verification, and describes
+  the human-asks-agent operator model.
 
 ## Explicit non-goals
 
@@ -285,6 +428,14 @@ Synod reaches a 1.0 candidate only after all of the following are demonstrated:
 - Treating raw token totals as invoices or promising savings without a measured
   baseline.
 - Accepting user-owned Markdown as canonical orchestration state.
+- A second harness adapter (Claude, Cursor, or others). That is a post-1.0
+  adapter over the same ledger.
+- Persisting `JobEvent` records, activating a job runner, or adding an
+  execution plane.
+- Automatic phase rotation.
+- A mutating MCP server.
+- Human-facing CLI sugar, additional model profiles, or further closeout
+  ceremony as a path to `v1.0`.
 
 ## Delivered foundation
 
@@ -324,6 +475,15 @@ Synod reaches a 1.0 candidate only after all of the following are demonstrated:
   exact tag and post-publication package, release, registry-installed package,
   and CLI evidence are verified in the two-phase closeout; the local tarball
   smoke remains source-preparation evidence.
+- `v0.9.4`: pre-proposal correction accounting, independent proposal Git-lane
+  provenance, injected `HostDelegationAdapter`, bounded status selectors,
+  opt-in local-docs recovery, Node `>=22`, and numeric Codex `0.148.x`
+  support. The exact tag, npm/GitHub publication, and public consumer
+  evidence are verified in the versioned closeout archive.
+- `v0.9.5`: project-local bootstrap hotfix so `--task`, `--active-only`, and
+  `--changed-since-checkpoint` work through the initialized runtime. The
+  exact tag, npm/GitHub publication, and public consumer evidence are
+  verified in the versioned closeout archive.
 
 The worktrees/leases and economics originally associated with `v0.6` were not
 discarded. They are deliberately sequenced after recoverable phase boundaries

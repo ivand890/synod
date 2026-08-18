@@ -602,6 +602,82 @@ export function legalTaskTransitions(
   return allowed;
 }
 
+function guidanceArgv(operation: string, taskId: string, args: Record<string, unknown> = {}): string[] {
+  if (operation === "delegate.start") return ["delegate", "start", taskId];
+  if (operation === "delegate.complete") return ["delegate", "complete", taskId];
+  if (operation === "wait.task") return ["wait", "--task", taskId];
+  if (operation === "proposal.submit") return ["proposal", "submit", taskId];
+  if (operation === "task.correct") return ["task", "correct", taskId, "--revision", String(args.revision ?? "")];
+  if (operation === "task.transition") {
+    return ["task", "transition", taskId, String(args.to ?? ""), "--revision", String(args.revision ?? "")];
+  }
+  if (operation === "lease.recover") {
+    return [
+      "lease", "recover", taskId,
+      "--lease-id", String(args.leaseId ?? ""),
+      "--generation", String(args.generation ?? ""),
+      "--revision", String(args.revision ?? ""),
+      "--expected-heartbeat-at", String(args.expectedHeartbeatAt ?? "")
+    ];
+  }
+  if (operation === "lease.cancel") {
+    return [
+      "lease", "cancel", taskId,
+      "--reservation-token", String(args.reservationToken ?? ""),
+      "--lease-id", String(args.leaseId ?? ""),
+      "--generation", String(args.generation ?? ""),
+      "--revision", String(args.revision ?? ""),
+      "--expected-reserved-at", String(args.expectedReservedAt ?? ""),
+      "--baseline-hash", String(args.baselineHash ?? "")
+    ];
+  }
+  if (operation === "lease.expire" && args.reservationToken) {
+    return [
+      "lease", "expire", taskId,
+      "--reservation-token", String(args.reservationToken ?? ""),
+      "--lease-id", String(args.leaseId ?? ""),
+      "--generation", String(args.generation ?? ""),
+      "--revision", String(args.revision ?? ""),
+      "--expected-reserved-at", String(args.expectedReservedAt ?? ""),
+      "--baseline-hash", String(args.baselineHash ?? "")
+    ];
+  }
+  if (operation === "lease.expire") {
+    return [
+      "lease", "expire", taskId,
+      "--lease-id", String(args.leaseId ?? ""),
+      "--generation", String(args.generation ?? ""),
+      "--revision", String(args.revision ?? ""),
+      "--expected-heartbeat-at", String(args.expectedHeartbeatAt ?? "")
+    ];
+  }
+  return [];
+}
+
+function guidanceAction(
+  operation: string,
+  args: Record<string, unknown>,
+  requirements: string[],
+  fence?: Record<string, unknown>
+) {
+  return {
+    operation,
+    arguments: args,
+    requirements,
+    argv: guidanceArgv(operation, String(args.taskId ?? ""), args),
+    ...(fence ? { fence } : {})
+  };
+}
+
+function preferredTransition(state: TaskState): TaskState | undefined {
+  if (state === "READY") return "ACTIVE";
+  if (state === "ACTIVE") return "REVIEW";
+  if (state === "REVIEW") return "ACCEPTED";
+  if (state === "ACCEPTED") return "VERIFIED";
+  if (state === "VERIFIED") return "DONE";
+  return undefined;
+}
+
 export async function nextTaskGuidance(
   { directory = "." }: { directory?: string } = {},
   { clock = () => Date.now() }: { clock?: () => number } = {}
@@ -624,112 +700,107 @@ export async function nextTaskGuidance(
         ? []
         : nominalTransitions.filter(to => !(task.state === "ACTIVE" && to === "REVIEW" && !task.lease));
       const incompleteDependencies = task.dependsOn.filter(taskId => canonical.state.tasks[taskId]?.state !== "DONE");
-      const transitionActions = legalTransitions.map(to => ({
-        ...(leaseActivationReady && to === "ACTIVE"
-          ? {
-              operation: "lease.reserve",
-              arguments: {
-                taskId: task.id,
-                write: [],
-                writeTree: [],
-                read: [],
-                readTree: []
-              },
-              requirements: ["write-scope"]
-            }
-          : {
-              operation: task.state === "ACTIVE" && to === "REVIEW" ? "proposal.submit" : "task.transition",
-              arguments: task.state === "ACTIVE" && to === "REVIEW"
-                ? { taskId: task.id, evidence: [] }
-                : {
-                    taskId: task.id,
-                    to,
-                    revision: task.state === "ACTIVE" && to === "REVIEW" ? task.revision + 1 : task.revision,
-                    evidence: [],
-                    ...(to === "BLOCKED" || to === "SUPERSEDED" ? { reason: null } : {})
-                  },
-              requirements: [
-                ...(to === "ACTIVE" && !task.lease ? ["active-writer-lease"] : []),
-                ...((task.state === "ACTIVE" && to === "REVIEW")
-                  || (task.state === "REVIEW" && to === "ACCEPTED")
-                  || (task.state === "ACCEPTED" && to === "VERIFIED")
-                  || (to === "ACTIVE" && correctionReady) ? ["evidence"] : []),
-                ...(["BLOCKED", "SUPERSEDED"].includes(to) ? ["reason"] : [])
-              ]
-            })
-      }));
+      const preferred = preferredTransition(task.state);
+      const orderedTransitions = preferred
+        ? [...legalTransitions].sort((left, right) => Number(right === preferred) - Number(left === preferred))
+        : legalTransitions;
+      const transitionActions = orderedTransitions.map(to => {
+        if (leaseActivationReady && to === "ACTIVE") {
+          return guidanceAction("delegate.start", {
+            taskId: task.id,
+            write: [],
+            writeTree: [],
+            read: [],
+            readTree: []
+          }, ["write-scope"]);
+        }
+        if (task.state === "ACTIVE" && to === "REVIEW") {
+          return guidanceAction("proposal.submit", { taskId: task.id, evidence: [] }, ["evidence"]);
+        }
+        return guidanceAction("task.transition", {
+          taskId: task.id,
+          to,
+          revision: task.revision,
+          evidence: [],
+          ...(to === "BLOCKED" || to === "SUPERSEDED" ? { reason: null } : {})
+        }, [
+          ...(to === "ACTIVE" && !task.lease ? ["active-writer-lease"] : []),
+          ...((task.state === "REVIEW" && to === "ACCEPTED")
+            || (task.state === "ACCEPTED" && to === "VERIFIED")
+            || (to === "ACTIVE" && correctionReady) ? ["evidence"] : []),
+          ...(["BLOCKED", "SUPERSEDED"].includes(to) ? ["reason"] : [])
+        ]);
+      });
+      const reservationFenceArgs = task.leaseReservation
+        ? {
+            taskId: task.id,
+            reservationToken: task.leaseReservation.token,
+            leaseId: task.leaseReservation.id,
+            generation: task.leaseReservation.generation,
+            revision: task.leaseReservation.taskRevision,
+            expectedReservedAt: task.leaseReservation.reservedAt,
+            baselineHash: task.leaseReservation.baseline.snapshotContentHash
+          }
+        : undefined;
+      const reservationFenceOnly = reservationFenceArgs
+        ? (({ taskId: _taskId, ...fence }) => fence)(reservationFenceArgs)
+        : undefined;
       const bindRequirements = ["owner-thread", ...(correctionReady ? ["evidence"] : [])];
-      const baseActions = expiredReservation && task.leaseReservation
-        ? [{
-            operation: "lease.expire",
-            arguments: {
-              taskId: task.id,
-              reservationToken: task.leaseReservation.token,
-              leaseId: task.leaseReservation.id,
-              generation: task.leaseReservation.generation,
-              revision: task.leaseReservation.taskRevision,
-              expectedReservedAt: task.leaseReservation.reservedAt,
-              baselineHash: task.leaseReservation.baseline.snapshotContentHash,
-              reason: null
-            },
-            requirements: ["reason"]
-          }]
-        : task.leaseReservation
-        ? [{
-            operation: "lease.bind",
-            arguments: {
-              taskId: task.id,
-              reservationToken: task.leaseReservation.token,
-              leaseId: task.leaseReservation.id,
-              generation: task.leaseReservation.generation,
-              revision: task.leaseReservation.taskRevision,
-              expectedReservedAt: task.leaseReservation.reservedAt,
-              baselineHash: task.leaseReservation.baseline.snapshotContentHash,
-              ownerThread: null,
-              evidence: []
-            },
-            requirements: bindRequirements
-          }]
+      const baseActions = expiredReservation && reservationFenceArgs && reservationFenceOnly
+        ? [guidanceAction("lease.expire", { ...reservationFenceArgs, reason: null }, ["reason"], reservationFenceOnly)]
+        : reservationFenceArgs && reservationFenceOnly
+        ? [
+            guidanceAction("delegate.complete", { taskId: task.id }, bindRequirements, reservationFenceOnly),
+            guidanceAction("lease.cancel", { ...reservationFenceArgs, reason: null }, ["reason"], reservationFenceOnly)
+          ]
         : expiredLease && task.lease
-          ? [{
-              operation: "lease.expire",
-              arguments: {
-                taskId: task.id,
-                leaseId: task.lease.id,
-                generation: task.lease.generation,
-                revision: task.revision,
-                expectedHeartbeatAt: task.lease.heartbeatAt,
-                reason: null
-              },
-              requirements: ["reason"]
-            }]
+          ? [guidanceAction("lease.expire", {
+              taskId: task.id,
+              leaseId: task.lease.id,
+              generation: task.lease.generation,
+              revision: task.revision,
+              expectedHeartbeatAt: task.lease.heartbeatAt,
+              reason: null
+            }, ["reason"], {
+              leaseId: task.lease.id,
+              generation: task.lease.generation,
+              revision: task.revision,
+              expectedHeartbeatAt: task.lease.heartbeatAt
+            })]
           : task.recovery?.status === "PENDING"
-            ? [{
-                operation: "lease.recover",
-                arguments: {
-                  taskId: task.id,
-                  leaseId: task.recovery.endedLease.id,
-                  generation: task.recovery.endedLease.generation,
-                  revision: task.revision,
-                  expectedHeartbeatAt: task.recovery.endedLease.heartbeatAt,
-                  decision: null,
-                  reason: null
-                },
-                requirements: ["decision", "reason"]
-              }]
+            ? [guidanceAction("lease.recover", {
+                taskId: task.id,
+                leaseId: task.recovery.endedLease.id,
+                generation: task.recovery.endedLease.generation,
+                revision: task.revision,
+                expectedHeartbeatAt: task.recovery.endedLease.heartbeatAt,
+                decision: null,
+                reason: null
+              }, ["decision", "reason"], {
+                leaseId: task.recovery.endedLease.id,
+                generation: task.recovery.endedLease.generation,
+                revision: task.revision,
+                expectedHeartbeatAt: task.recovery.endedLease.heartbeatAt
+              })]
             : transitionActions;
+      const waitAction = task.state === "ACTIVE"
+        && Boolean(task.lease)
+        && !expiredLease
+        && task.recovery?.status !== "PENDING"
+        ? guidanceAction("wait.task", { taskId: task.id }, [])
+        : undefined;
       const correctionAction = task.state === "ACTIVE"
         && Boolean(task.lease)
         && !expiredLease
         && task.correctionPolicy.used < task.correctionPolicy.limit
         && task.budget?.thresholdStatus !== "decision-required"
-        ? {
-            operation: "task.correct",
-            arguments: { taskId: task.id, revision: task.revision, reason: null, evidence: [] },
-            requirements: ["revision", "reason", "evidence"]
-          }
+        ? guidanceAction("task.correct", { taskId: task.id, revision: task.revision, reason: null, evidence: [] }, ["revision", "reason", "evidence"])
         : undefined;
-      const actions = correctionAction ? [correctionAction, ...baseActions] : baseActions;
+      const actions = [
+        ...(waitAction ? [waitAction] : []),
+        ...(correctionAction ? [correctionAction] : []),
+        ...baseActions
+      ];
       const proposalPathStates = task.proposal?.pathStates;
       return {
         id: task.id,

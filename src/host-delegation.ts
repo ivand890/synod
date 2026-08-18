@@ -1,10 +1,14 @@
+import path from "node:path";
+import process from "node:process";
 import { setInterval, clearInterval } from "node:timers";
+import { resolveCodexRuntime, type ResolvedCodexRuntime } from "./codex-runtime.js";
 import { ERROR_CODES, SynodError, asSynodError, withErrorDetails } from "./errors.js";
 import {
   bindTaskLease,
   cancelTaskLeaseReservation,
   expireTaskLeaseReservation,
   heartbeatTaskLease,
+  readOrchestration,
   reserveTaskLease,
   type LeaseIdentityOptions,
   type LeaseReservationIdentityOptions,
@@ -85,6 +89,7 @@ export interface HostDelegationAuthorizeRequest {
 export interface HostAuthorizationReceipt {
   status: "authorized" | "accepted" | "failed" | "rejected" | "denied";
   receipt?: unknown;
+  hostNotificationRequired?: boolean;
   [key: string]: unknown;
 }
 
@@ -125,9 +130,39 @@ export interface HostDelegationDependencies extends OrchestrationDependencies {
   wait?: typeof waitForThreads;
   hostAdapter?: HostWaitAdapter;
   hostAdapterFactory?: () => HostWaitAdapter;
+  hostDelegationAdapter?: HostDelegationAdapter;
+  hostDelegationAdapterFactory?: () => HostDelegationAdapter;
+  hostRuntimeResolver?: () => ResolvedCodexRuntime;
+  env?: NodeJS.ProcessEnv;
+  read?: typeof readOrchestration;
   cleanupTimeoutMs?: number;
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
+}
+
+export interface HostNextCommand {
+  operation: string;
+  argv: string[];
+  requirements: string[];
+  fence?: HostDelegationReservationFence | HostDelegationLeaseFence;
+}
+
+export interface CodexHostAdapterProbe {
+  found: false;
+  surface: ResolvedCodexRuntime["surface"];
+  reason: "host-only-not-found";
+  constructedAppServer: false;
+}
+
+export interface HostDelegationHandoffResult {
+  directory: string;
+  task: ReservationResult["task"];
+  reservation: TaskLeaseReservation;
+  reservationFence: HostDelegationReservationFence;
+  readOnlyContract: HostDelegationReadOnlyContract;
+  hostSpawnRequired: true;
+  nextCommand: HostNextCommand;
+  probe: CodexHostAdapterProbe;
 }
 
 type ReservationResult = Awaited<ReturnType<typeof reserveTaskLease>>;
@@ -733,6 +768,215 @@ export async function waitForHostDelegation(
     options.signal?.removeEventListener("abort", abortForward);
     if (timer !== undefined && !stopped) unschedule(timer);
   }
+}
+
+export function isCodexHostOperator(
+  runtime: Pick<ResolvedCodexRuntime, "surface" | "resolved" | "executableSource">
+): boolean {
+  if (runtime.surface === "desktop") return true;
+  return runtime.resolved === true
+    && (runtime.executableSource === "cli-process" || runtime.executableSource === "desktop-process");
+}
+
+/** Host-only 0.148 probe. Never constructs a child App Server. */
+export function probeCodexHostAdapter(
+  runtime: Pick<ResolvedCodexRuntime, "surface"> = resolveCodexRuntime()
+): CodexHostAdapterProbe {
+  return {
+    found: false,
+    surface: runtime.surface,
+    reason: "host-only-not-found",
+    constructedAppServer: false
+  };
+}
+
+export function resolveHostDelegationAdapter(
+  dependencies: Pick<HostDelegationDependencies, "hostDelegationAdapter" | "hostDelegationAdapterFactory" | "env"> & {
+    adapter?: HostDelegationAdapter;
+    adapterFactory?: () => HostDelegationAdapter;
+  } = {},
+  env: NodeJS.ProcessEnv = dependencies.env ?? process.env,
+  options: { allowUnsupportedChannel?: boolean } = {}
+): HostDelegationAdapter | undefined {
+  const injected = dependencies.adapterFactory?.()
+    || dependencies.adapter
+    || dependencies.hostDelegationAdapterFactory?.()
+    || dependencies.hostDelegationAdapter;
+  if (injected) {
+    if (typeof injected.spawn !== "function" || typeof injected.authorize !== "function") {
+      throw new SynodError(
+        ERROR_CODES.HOST_ADAPTER_INVALID,
+        "The injected host adapter must expose spawn and authorize methods."
+      );
+    }
+    return injected;
+  }
+  if (Object.hasOwn(env, "SYNOD_HOST_ADAPTER") && !options.allowUnsupportedChannel) {
+    throw new SynodError(
+      ERROR_CODES.HOST_ADAPTER_INVALID,
+      "SYNOD_HOST_ADAPTER is set but no supported host adapter channel is available.",
+      { details: { channel: env.SYNOD_HOST_ADAPTER ?? null, constructedAppServer: false } }
+    );
+  }
+  return undefined;
+}
+
+function evidenceReferences(value: unknown[] | undefined): string[] {
+  return [...new Set((value || []).flatMap(item => {
+    if (typeof item !== "string") return [];
+    const reference = item.trim();
+    return reference ? [reference] : [];
+  }))];
+}
+
+export function delegateCompleteCommand(
+  taskId: string,
+  fence: HostDelegationReservationFence,
+  evidence: readonly string[] = []
+): HostNextCommand {
+  return {
+    operation: "delegate.complete",
+    argv: ["delegate", "complete", taskId, ...evidence.flatMap(reference => ["--evidence", reference])],
+    requirements: ["owner-thread"],
+    fence
+  };
+}
+
+function readOnlyContractFor(
+  taskId: string,
+  reservation: TaskLeaseReservation
+): HostDelegationReadOnlyContract {
+  return {
+    taskId,
+    taskRevision: reservation.taskRevision,
+    scopes: reservation.scopes,
+    writeAuthorized: false,
+    instruction: "analysis may begin; writes, worktrees, and implementation commands wait for bind authorization"
+  };
+}
+
+/** Reserve and return an incomplete host spawn handoff. Does not spawn or bind. */
+export async function startHostDelegationHandoff(
+  options: HostDelegationOptions = {},
+  dependencies: HostDelegationDependencies = {}
+): Promise<HostDelegationHandoffResult> {
+  if (options.wait) {
+    throw new SynodError(
+      ERROR_CODES.HOST_ADAPTER_REQUIRED,
+      "Delegate --wait requires an injected host adapter."
+    );
+  }
+  const id = taskIdentifier(options);
+  const reserve = dependencies.reserve || reserveTaskLease;
+  const reserved = await reserve({
+    id,
+    directory: options.directory || ".",
+    read: options.read || [],
+    write: options.write || [],
+    readTree: options.readTree || [],
+    writeTree: options.writeTree || [],
+    ...(options.reservationTtlSeconds === undefined ? {} : { reservationTtlSeconds: options.reservationTtlSeconds }),
+    ...(options.actor === undefined ? {} : { actor: options.actor })
+  }, dependencies);
+  const reservation = reserved.reservation;
+  const reservedFence = reservationFence(reservation);
+  const runtime = dependencies.hostRuntimeResolver?.() || resolveCodexRuntime();
+  return {
+    directory: options.directory || ".",
+    task: reserved.task,
+    reservation,
+    reservationFence: reservedFence,
+    readOnlyContract: readOnlyContractFor(id, reservation),
+    hostSpawnRequired: true,
+    nextCommand: delegateCompleteCommand(id, reservedFence, evidenceReferences(options.evidence)),
+    probe: probeCodexHostAdapter(runtime)
+  };
+}
+
+/** Bind the stored reservation to a host-returned owner. Authorizes only when an adapter is present. */
+export async function completeHostDelegation(
+  options: {
+    directory?: string;
+    id?: string;
+    taskId?: string;
+    ownerThread: string;
+    actor?: string;
+    evidence?: unknown[];
+    adapter?: HostDelegationAdapter;
+    ttlSeconds?: number;
+    heartbeatIntervalSeconds?: number;
+  },
+  dependencies: HostDelegationDependencies = {}
+): Promise<HostDelegationResult> {
+  const id = taskIdentifier(options);
+  const ownerThread = String(options.ownerThread || "").trim();
+  if (!ownerThread) {
+    throw new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Host delegation complete requires an opaque owner thread.");
+  }
+  const targetDirectory = options.directory || ".";
+  const read = dependencies.read || readOrchestration;
+  const canonical = await read(path.resolve(targetDirectory));
+  const task = canonical.state.tasks[id];
+  if (!task) {
+    throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${id} does not exist.`, { details: { taskId: id } });
+  }
+  const reservation = task.leaseReservation;
+  if (!reservation || reservation.status !== "RESERVED") {
+    throw new SynodError(ERROR_CODES.LEASE_STALE, "Host delegation complete requires an active reservation.", {
+      details: { taskId: id, reservation: reservation ?? null }
+    });
+  }
+  const reservedFence = reservationFence(reservation);
+  const bind = dependencies.bind || bindTaskLease;
+  const bound = await bind({
+    directory: targetDirectory,
+    id,
+    ...reservedFence,
+    ownerThread,
+    ...(options.ttlSeconds === undefined ? {} : { ttlSeconds: options.ttlSeconds }),
+    ...(options.heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds: options.heartbeatIntervalSeconds }),
+    evidence: options.evidence || [],
+    ...(options.actor === undefined ? {} : { actor: options.actor })
+  }, dependencies);
+  let authorization: HostAuthorizationReceipt;
+  if (options.adapter) {
+    try {
+      const value = await options.adapter.authorize({
+        taskId: id,
+        directory: targetDirectory,
+        ownerThread,
+        writeAuthorized: true,
+        reservation,
+        lease: bound.lease,
+        leaseFence: leaseFence(bound.lease)
+      });
+      authorization = authorizationReceipt(value);
+      if (authorization.status === "failed" || authorization.status === "rejected" || authorization.status === "denied") {
+        throw authorizationFailure(authorization, { task: bound.task, lease: bound.lease, ownerThread });
+      }
+    } catch (error) {
+      if (error instanceof SynodError && error.code === ERROR_CODES.HOST_AUTHORIZATION_FAILED) throw error;
+      throw withErrorDetails(
+        authorizationFailure(error, { task: bound.task, lease: bound.lease, ownerThread }),
+        { cause: conciseError(error) }
+      );
+    }
+  } else {
+    authorization = { status: "accepted", hostNotificationRequired: true };
+  }
+  return {
+    directory: targetDirectory,
+    task: bound.task,
+    reservation,
+    reservationFence: reservedFence,
+    spawn: ownerThread,
+    ownerThread,
+    lease: bound.lease,
+    leaseFence: leaseFence(bound.lease),
+    authorization,
+    bind: bound,
+    cleanup: { status: "not-required" }
+  };
 }
 
 export const delegateWithHostAdapter = startHostDelegation;

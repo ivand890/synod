@@ -338,27 +338,43 @@ function nextOperation(data: Record<string, unknown>): unknown {
   const taskId = typeof task?.id === "string" ? task.id : undefined;
   const reservation = isRecord(data.reservation) ? data.reservation : undefined;
   if (action === "reserve" && reservation) {
+    const fence = reservationFence(reservation);
     return {
-      operation: "lease.bind",
+      operation: "delegate.complete",
       ...(taskId ? { taskId } : {}),
-      fence: reservationFence(reservation),
+      argv: taskId ? ["delegate", "complete", taskId] : [],
+      fence,
+      requirements: ["owner-thread"],
       alternatives: ["lease.cancel", "lease.expire"]
     };
   }
   const lease = isRecord(data.lease) ? data.lease : undefined;
   if (lease && lease.status === "ACTIVE") {
+    const fence = leaseFence(lease);
     return {
-      operation: "lease.heartbeat",
+      operation: taskId ? "wait.task" : "lease.heartbeat",
       ...(taskId ? { taskId } : {}),
-      fence: leaseFence(lease),
-      alternatives: ["lease.release", "lease.expire", "lease.revoke"]
+      argv: taskId ? ["wait", "--task", taskId] : [],
+      fence,
+      alternatives: ["lease.heartbeat", "lease.release", "lease.expire", "lease.revoke"]
     };
   }
   if (lease && task && isRecord(task.recovery) && task.recovery.status === "PENDING") {
+    const fence = leaseFence(lease);
     return {
       operation: "lease.recover",
       ...(taskId ? { taskId } : {}),
-      fence: leaseFence(lease),
+      argv: taskId
+        ? [
+            "lease", "recover", taskId,
+            "--lease-id", String(fence.leaseId ?? ""),
+            "--generation", String(fence.generation ?? ""),
+            "--revision", String(fence.revision ?? ""),
+            "--expected-heartbeat-at", String(fence.expectedHeartbeatAt ?? "")
+          ]
+        : [],
+      fence,
+      requirements: ["decision", "reason"],
       alternatives: ["resume", "reassign", "supersede"]
     };
   }
@@ -442,6 +458,7 @@ function proposalNextOperation(value: Record<string, unknown>): unknown {
       revision,
       evidence: []
     },
+    argv: ["task", "transition", taskId, "ACCEPTED", "--revision", String(revision)],
     requirements: ["evidence"]
   };
 }

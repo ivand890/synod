@@ -5,103 +5,40 @@ description: Run or resume Synod's persistent, cost-efficient advisor loop for c
 
 # Synod Advisor
 
-Advance the project to its next verified checkpoint. Keep the primary agent in the supervisory loop and move routine implementation to cost-efficient workers while treating Git and runtime evidence as authoritative.
+The operator is the supervising agent. A human asks for work; you run Synod.
 
-Use `__SYNOD_COMMAND__` for normal Synod commands. This version-pinned bootstrap restores and delegates to the project-local runtime without requiring `synod` in `PATH`. To upgrade the runtime to a different version, explicitly select the desired target with `pnpm dlx @ivand890/synod@<target-version> upgrade [directory]`; the invoking bootstrap version is the upgrade target.
+Use `__SYNOD_COMMAND__` for normal commands. This version-pinned bootstrap restores the project-local runtime. To upgrade, use `pnpm dlx @ivand890/synod@<target-version> upgrade [directory]`.
 
-## Load durable state
+## Session start
 
-1. Read `AGENTS.md` and all files under `docs/synod/`.
-2. Inspect the current branch, `HEAD`, working-tree changes, and applicable build or test commands.
-3. Compare observed state with `docs/synod/STATE.md`. Mark contradictions as drift and correct the checkpoint before relying on it.
-4. If `GOAL.md` still contains an undefined objective or completion criteria, establish them with the user before implementation.
+1. Run `__SYNOD_COMMAND__ status`. Reconcile or checkpoint any reported branch, `HEAD`, or working-tree drift before continuing.
+2. Do not load README, PRODUCT, ROADMAP, STATE notes, or closeout archives by default. Canonical state is `.synod/state.json`. `docs/synod/STATUS.md` is the generated human view if needed.
 
-## Keep the primary agent in the advisor role
+## Golden path
 
-Keep the primary agent responsible for the goal, architecture, plan, atomic task contracts, supervision, acceptance decisions, integration, and final verification. Do not use the supervising model as the routine implementation worker.
+```text
+task add → delegate start → wait --task → proposal submit
+        → ACCEPTED → VERIFIED → DONE
+```
 
-Delegate implementation whenever the work can be expressed as an atomic contract. Let the supervisor implement only when:
+On every step run `__SYNOD_COMMAND__ task next --json --view summary` and execute the returned `argv`. Do not reconstruct reservation tokens, generations, reserved-at timestamps, or baseline hashes from chat. Stale fences fail closed.
 
-- no suitable worker is available;
-- a tiny integration repair would cost more to delegate than to perform;
-- the task cannot be isolated after a genuine decomposition attempt.
+- READY: `delegate start` with the narrowest `--write` / `--read` scopes.
+- If `hostSpawnRequired` is true: call `spawn_agent` with the returned read-only contract, then `delegate complete --owner-thread <id>`.
+- On Desktop without an injected adapter, that incomplete host handoff is expected. Do not start a child App Server.
+- After bind: `wait --task <id>`. If `hostWaitRequired` is true, call `wait_agent` only for the exact `hostWaitThreadIds`. Keep `hostFallbackRequired` / `hostFallbackThreadIds` as compatibility aliases.
+- Submit with `proposal submit --evidence`. Acceptance and verification are separate transitions for the same revision. Only the supervisor marks `ACCEPTED`, `VERIFIED`, and `DONE`.
 
-Record the reason for every supervisor implementation exception in `STATE.md` or `DECISIONS.md`.
+## Advisor role
 
-Prefer these project agents:
+Keep architecture, contracts, review, and verification. Delegate routine implementation to `synod_implementer` with the selected profile, a complete atomic contract, and a fresh no-history fork. Omit explicit `model` and `reasoning_effort` spawn overrides. A full-history fork inherits the parent agent type. Do not use the supervising model as the routine implementation worker except when delegation would cost more than the change; record that exception. If spawn model resolution fails, run `__SYNOD_COMMAND__ doctor` and upgrade the profile.
 
-- `synod_implementer` for atomic implementation with the selected profile's cost-efficient worker. Use this worker by default.
-- `synod_explorer` for read-heavy mapping and evidence gathering.
-- `synod_reviewer` for correctness, security, regressions, and test gaps.
-- `synod_verifier` for an independent attempt to refute completion.
-- `synod_mechanical` for clear, repetitive, high-volume read-only checks.
+Use at most three concurrent subagents and one active writer per scope.
 
-When spawning a configured project agent, select its custom agent type by name, use a fresh fork without full parent history, and include the complete atomic contract in the message. Omit explicit `model` and `reasoning_effort` spawn overrides: the selected `.codex/agents/<name>.toml` file takes precedence, then `[agents].default_subagent_model` and `[agents].default_subagent_reasoning_effort`, then the parent settings. A full-history fork inherits the parent agent type and must not be combined with a different custom agent type.
+## Review
 
-Do not infer that a custom agent's configured model is unavailable from the spawn tool's list of explicit per-call overrides. A model selected inside `.codex/agents/<name>.toml` can be valid even when it is absent from that narrower list. The global `[agents].default_subagent_model` is validated earlier through the spawn path, so an `Unknown model ... for spawn_agent` error naming the global default can prevent a different custom-agent model from being applied. First run `__SYNOD_COMMAND__ doctor`, which probes `model/list`. If the installed profile predates the spawn-safe fallback, upgrade it and start a new Codex task so project config is loaded from disk; changing profiles inside the failing task does not rewrite that task's already-loaded configuration. If resolution is still uncertain, spawn one trivial read-only child using the target configured custom-agent type and a fresh fork without full parent history. Omit explicit `model` and `reasoning_effort`, then inspect the child's persisted `turn_context` before substituting another model.
+Inspect the actual diff. Record delivery, acceptance, and verification separately. Obey the correction limit; at exhaustion split, supersede, or record an approved override. Recovery is a typed next action and does not accept or discard the proposal.
 
-Escalate implementation to the configured higher-capability profile only after the task proves insufficiently specified, the worker returns a justified capability blocker, or two focused correction rounds fail. If a named model is unavailable, run `__SYNOD_COMMAND__ doctor`, select a compatible profile, apply it with `__SYNOD_COMMAND__ upgrade [directory] --profile <id>` so the generated `.codex` configuration and agents are updated, and then record the substitution in `STATE.md`.
+## Risk and checkpoint
 
-## Delegate with a contract
-
-Before any implementation, give the worker a stable task ID from `PLAN.md` and include:
-
-- objective and non-goals;
-- dependencies and allowed paths;
-- permission boundary;
-- acceptance criteria;
-- exact verification commands;
-- required evidence and output format;
-- instruction not to expand scope or declare the parent goal complete.
-
-If the task has a canonical token budget, run `__SYNOD_COMMAND__ budget report <task-id>` before granting execution authority. Reporting is read-only. Record usage only at an intentional checkpoint with `budget observe`; a recorded hard crossing requires one decision bound to that exact observation. A bounded `continue` adds allowance without resetting raw usage. `split`, `supersede`, and `rotate` preserve history and require their corresponding structural action before more execution begins.
-
-Run `__SYNOD_COMMAND__ rotation suggest` during preflight. It is read-only: an unconfigured goal receives deterministic recommended thresholds plus a structured explicit set action, while a configured goal reuses `rotation report` and returns the legal next typed action. Use `rotation prepare` only after a configured threshold actually crosses; it records a recommendation and emits the exact handoff boundary without changing tasks, Git, or Codex threads. Carry its event ID into a fresh root session started from that handoff, then run `rotation verify --recommendation <event-id> --session <id>` there to bind the new phase. Do not reuse an old or descendant session, and do not treat missing context evidence as a threshold crossing.
-
-Use `__SYNOD_COMMAND__ usage --since-event <start> --until-event <end> --price-file <path>` only when a reviewed local price file and a complete closed interval are available and monetary projection is useful. A task-scoped report also requires an explicit root or descendant identity: `usage --task <task-id> --session <session-id>`. The file must name exact models and a valid date window. Synod does not discover prices or contact a pricing service; incomplete usage fails closed, while an unpriced model returns a partial report without a grand total.
-
-Use at most three concurrent subagents. Maintain one active writer per declared scope. Before spawning a writer, run `__SYNOD_COMMAND__ lease reserve <task-id>` with the narrowest repeatable `--write`, `--write-tree`, `--read`, and `--read-tree` scopes. Put the returned reservation handle in the initial child contract together with this hard boundary: analysis and read-only inspection may begin, but writes, worktrees, and implementation commands must wait for the supervisor's bind confirmation. After Codex returns the worker thread ID, run `lease bind <task-id>` with the complete returned reservation token, lease ID, generation, task revision, reservation timestamp, baseline hash, and `--owner-thread <thread-id>`. Only after a successful bind may the supervisor send explicit write authorization to the worker; bind atomically moves the task to `ACTIVE`, but its activation receipt does not claim that notification was observed.
-
-If spawning fails, run `lease cancel` with the complete reservation fence and a reason. If spawning never returns an owner ID, wait for the bounded reservation TTL and use the reservation form of `lease expire`; an unbound cleanup never creates abandoned-worker recovery. Synod's CLI cannot invoke Codex `spawn_agent`, so an atomic `delegate start` remains deferred until a typed integration can perform both sides of the handshake. Keep `lease acquire` for callers that already possess the worker identity. After bind or acquire, preserve the returned lease ID, generation, task revision, heartbeat timestamp, and owner together as the exact fence; use current returned values for heartbeat, release, worktree, revocation, and recovery commands instead of reconstructing them from chat.
-
-For parallel implementation, use disjoint leases or an explicit detached task worktree. Create it outside the control checkout with `__SYNOD_COMMAND__ worktree create`, let only the leased worker edit it, then inspect `worktree status`, seal the proposal, transactionally integrate it, and move the exact revision to `REVIEW`. `worktree cleanup` is non-force and must run only after the detached checkout is clean; the proposal and registry remain durable.
-
-After sending that post-bind authorization, use one `__SYNOD_COMMAND__ wait --task <task-id>` call to coordinate canonical child completion. Repeat `--task` to resolve several bound owners together and add `--thread <id>` for noncanonical reviewers or explorers. Inspect `waitAuthority` separately from transport `mode`, plus `fallbackPollCount`, timeout/abort, approval/user-input, warnings, and cleanup diagnostics. Task selection is `waitAuthority: canonical`; that labels canonical state selection and never proves runtime completion. CLI/App Server observation is `waitAuthority: appServer`; `notLoaded` is incomplete and returns positive `hostWaitRequired`/`hostWaitThreadIds` (with legacy `hostFallbackRequired` aliases) for direct platform `wait_agent`. When Desktop is detected without an injected adapter, Synod selects `waitAuthority: host` before creating any child App Server and returns an explicit incomplete host handoff; the CLI never invokes the host primitive.
-
-When `hostWaitRequired` is true, call direct platform `wait_agent` for exactly the returned `hostWaitThreadIds` (and no other IDs); retain `hostFallbackRequired`/`hostFallbackThreadIds` as compatibility aliases.
-
-## Review in a closed loop
-
-Treat implementation output as a proposal, never as acceptance.
-
-Use `__SYNOD_COMMAND__ task next --json --view summary` for the routine deterministic canonical task/action view instead of reconstructing revisions, dependencies, budget, recovery, lease, or proposal constraints from chat. Add `--view full` when the omitted history or contract detail is needed. Submit active delivery with `__SYNOD_COMMAND__ proposal submit <task-id> --evidence <ref> --json --view summary`; its summary returns a typed exact-revision acceptance action (`task.transition` to `ACCEPTED`, with evidence required), not a lease fence. Proposal submission releases the writer lease while reusing the existing `ACTIVE` to `REVIEW` mutation. It does not own Codex spawn or replace reserve/bind.
-
-1. Let the configured implementer complete the atomic task and return changed paths, diff summary, tests, and uncertainties.
-2. Have the supervisor inspect the actual diff against the contract and check for unrelated changes.
-3. Have the supervisor run or reproduce the relevant deterministic verification instead of trusting the worker's claim.
-4. If incomplete, send only the missing delta to the same worker.
-5. Obey the task's canonical correction limit. At exhaustion, explicitly split or supersede it, or record an approved bounded override; do not start another ordinary round.
-6. Let the supervisor accept and integrate only after the implementation and evidence satisfy the contract.
-7. Move tasks through `PLANNED`, `READY`, `ACTIVE`, `REVIEW`, `ACCEPTED`, `VERIFIED`, and `DONE`. Only the supervisor changes acceptance states.
-
-After integration, use `synod_verifier` when an independent pass materially reduces risk. The supervisor adjudicates its `PASS`, `FAIL`, or `INCONCLUSIVE` result and performs the final deterministic checks directly.
-
-If a worker stops or its lease expires, preserve its exact scoped delta through `lease revoke` or `lease expire`, then record one explicit `lease recover` decision: resume the same owner, reassign a replacement owner, or supersede the proposal. Use the ended generation's exact fence. Recovery does not accept, verify, or discard the proposal.
-
-## Respect risk boundaries
-
-Proceed automatically with read-only inspection, contracted workspace edits, and local deterministic checks. Keep the worker inside its write scope. Pause for user confirmation before consequential external actions such as publishing, deploying, spending money, mutating production data, adding a production dependency, or performing destructive work.
-
-Do not retry an ambiguous external mutation until its actual state has been inspected.
-
-## Checkpoint durable memory
-
-Update `docs/synod/` after phase transitions and before stopping, pausing, compacting, or handing off:
-
-- `GOAL.md`: change only when scope or completion criteria change.
-- `PLAN.md`: update task state, dependencies, agent assignment, and evidence links.
-- `STATE.md`: record branch, exact `HEAD`, dirty paths, verified facts, accepted delegations, blockers, and one next executable action.
-- `DECISIONS.md`: append durable decisions and their rationale.
-- `WORKLOG.md`: append only material events and concise verification evidence.
-
-Never claim a test, deploy, or behavior applies to a different revision than the one actually verified. Do not rely on active subagents surviving between sessions.
+Pause for user confirmation before publish, deploy, spend, production mutation, or a new production dependency. Run `__SYNOD_COMMAND__ checkpoint` only after intentionally accepting the current Git/worktree state.

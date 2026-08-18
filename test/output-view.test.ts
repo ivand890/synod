@@ -176,7 +176,8 @@ test("summary lease mutation keeps the exact next-operation fence", () => {
     }
   }) as Record<string, unknown>;
   const next = reservation.nextOperation as Record<string, unknown>;
-  assert.equal(next.operation, "lease.bind");
+  assert.equal(next.operation, "delegate.complete");
+  assert.deepEqual(next.argv, ["delegate", "complete", "T-RESERVE"]);
   assert.deepEqual(next.fence, {
     reservationToken: "token-1",
     leaseId: "lease-1",
@@ -199,6 +200,8 @@ test("summary lease mutation keeps the exact next-operation fence", () => {
       status: "ACTIVE"
     }
   }) as Record<string, unknown>;
+  assert.equal((active.nextOperation as Record<string, unknown>).operation, "wait.task");
+  assert.deepEqual((active.nextOperation as Record<string, unknown>).argv, ["wait", "--task", "T-ACTIVE"]);
   assert.deepEqual((active.nextOperation as Record<string, unknown>).fence, {
     leaseId: "lease-2",
     generation: 2,
@@ -242,6 +245,7 @@ test("summary proposal submission exposes the exact acceptance action without a 
   assert.deepEqual(summary.nextOperation, {
     operation: "task.transition",
     arguments: { taskId: "T-PROPOSAL", to: "ACCEPTED", revision: 3, evidence: [] },
+    argv: ["task", "transition", "T-PROPOSAL", "ACCEPTED", "--revision", "3"],
     requirements: ["evidence"]
   });
   assert.equal(Object.hasOwn(summary.nextOperation as Record<string, unknown>, "fence"), false);
@@ -312,19 +316,18 @@ test("summary proposal output bounds Git path-lane detail while full output reta
 
 test("summary task-next preserves guidance gates and exact typed actions", () => {
   const action = {
-    operation: "lease.bind",
-    arguments: {
-      taskId: "T-GUIDANCE",
+    operation: "delegate.complete",
+    arguments: { taskId: "T-GUIDANCE" },
+    argv: ["delegate", "complete", "T-GUIDANCE"],
+    requirements: ["owner-thread", "evidence"],
+    fence: {
       reservationToken: "reservation-token",
       leaseId: "lease-guidance",
       generation: 2,
       revision: 4,
       expectedReservedAt: "2026-08-14T00:00:00.000Z",
-      baselineHash: "sha256:baseline",
-      ownerThread: null,
-      evidence: []
-    },
-    requirements: ["owner-thread", "evidence"]
+      baselineHash: "sha256:baseline"
+    }
   };
   const envelope = {
     ok: true as const,
