@@ -444,6 +444,36 @@ test("CLI delegate start fails closed when SYNOD_HOST_ADAPTER is set", async () 
   assert.equal(envelope.error.code, ERROR_CODES.HOST_ADAPTER_INVALID);
 });
 
+test("wait still hands off on Desktop when SYNOD_HOST_ADAPTER is unsupported", async () => {
+  const { messages, output } = capturedOutput();
+  let created = false;
+  const status = await run(["wait", "--thread", "thread:one", "--json"], output, {
+    hostAdapterEnv: { SYNOD_HOST_ADAPTER: "unix:/tmp/missing.sock" },
+    waitClientFactory: () => {
+      created = true;
+      return {
+        async start() {},
+        async request() { return {}; },
+        async close() {}
+      };
+    },
+    waitRuntimeResolver: () => ({
+      surface: "desktop",
+      executable: "/tmp/codex-desktop",
+      executableSource: "desktop-process",
+      resolved: true
+    })
+  });
+  const envelope = JSON.parse(takeMessage(messages));
+  assert.equal(status, 1);
+  assert.equal(created, false);
+  assert.equal(envelope.ok, true);
+  assert.equal(envelope.data.mode, "handoff");
+  assert.equal(envelope.data.waitAuthority, "host");
+  assert.equal(envelope.data.hostWaitRequired, true);
+  assert.deepEqual(envelope.data.hostWaitThreadIds, ["thread:one"]);
+});
+
 test("delegate timeout and poll options require explicit waiting", () => {
   for (const args of [
     ["start", "T-001", "--timeout-seconds", "10"],

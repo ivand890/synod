@@ -466,6 +466,10 @@ test("resolver uses an injected adapter and fails closed for SYNOD_HOST_ADAPTER"
     () => resolveHostDelegationAdapter({}, { SYNOD_HOST_ADAPTER: "unix:/tmp/synod-host.sock" }),
     error => error instanceof Error && (error as Error & { code?: string }).code === ERROR_CODES.HOST_ADAPTER_INVALID
   );
+  assert.equal(
+    resolveHostDelegationAdapter({}, { SYNOD_HOST_ADAPTER: "unix:/tmp/synod-host.sock" }, { allowUnsupportedChannel: true }),
+    undefined
+  );
 });
 
 test("Codex host-only probe never constructs an App Server", () => {
@@ -482,7 +486,8 @@ test("Codex host-only probe never constructs an App Server", () => {
 test("Codex handoff reserves and complete binds the stored fence", async () => {
   const handoff = await startHostDelegationHandoff({
     id: "T-HOST",
-    write: ["src/host-delegation.ts"]
+    write: ["src/host-delegation.ts"],
+    evidence: ["correction:round-1"]
   }, {
     ...dependencies(),
     hostRuntimeResolver: () => ({
@@ -495,6 +500,9 @@ test("Codex handoff reserves and complete binds the stored fence", async () => {
   assert.equal(handoff.hostSpawnRequired, true);
   assert.equal(handoff.readOnlyContract.writeAuthorized, false);
   assert.equal(handoff.nextCommand.operation, "delegate.complete");
+  assert.deepEqual(handoff.nextCommand.argv, [
+    "delegate", "complete", "T-HOST", "--evidence", "correction:round-1"
+  ]);
   assert.deepEqual(handoff.nextCommand.requirements, ["owner-thread"]);
   assert.equal(handoff.probe.constructedAppServer, false);
   assert.equal(handoff.reservationFence.reservationToken, reservation.token);

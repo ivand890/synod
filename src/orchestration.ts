@@ -742,34 +742,16 @@ export async function nextTaskGuidance(
             baselineHash: task.leaseReservation.baseline.snapshotContentHash
           }
         : undefined;
+      const reservationFenceOnly = reservationFenceArgs
+        ? (({ taskId: _taskId, ...fence }) => fence)(reservationFenceArgs)
+        : undefined;
       const bindRequirements = ["owner-thread", ...(correctionReady ? ["evidence"] : [])];
-      const baseActions = expiredReservation && reservationFenceArgs
-        ? [guidanceAction("lease.expire", { ...reservationFenceArgs, reason: null }, ["reason"], {
-            reservationToken: reservationFenceArgs.reservationToken,
-            leaseId: reservationFenceArgs.leaseId,
-            generation: reservationFenceArgs.generation,
-            revision: reservationFenceArgs.revision,
-            expectedReservedAt: reservationFenceArgs.expectedReservedAt,
-            baselineHash: reservationFenceArgs.baselineHash
-          })]
-        : reservationFenceArgs
+      const baseActions = expiredReservation && reservationFenceArgs && reservationFenceOnly
+        ? [guidanceAction("lease.expire", { ...reservationFenceArgs, reason: null }, ["reason"], reservationFenceOnly)]
+        : reservationFenceArgs && reservationFenceOnly
         ? [
-            guidanceAction("delegate.complete", { taskId: task.id }, bindRequirements, {
-              reservationToken: reservationFenceArgs.reservationToken,
-              leaseId: reservationFenceArgs.leaseId,
-              generation: reservationFenceArgs.generation,
-              revision: reservationFenceArgs.revision,
-              expectedReservedAt: reservationFenceArgs.expectedReservedAt,
-              baselineHash: reservationFenceArgs.baselineHash
-            }),
-            guidanceAction("lease.cancel", { ...reservationFenceArgs, reason: null }, ["reason"], {
-              reservationToken: reservationFenceArgs.reservationToken,
-              leaseId: reservationFenceArgs.leaseId,
-              generation: reservationFenceArgs.generation,
-              revision: reservationFenceArgs.revision,
-              expectedReservedAt: reservationFenceArgs.expectedReservedAt,
-              baselineHash: reservationFenceArgs.baselineHash
-            })
+            guidanceAction("delegate.complete", { taskId: task.id }, bindRequirements, reservationFenceOnly),
+            guidanceAction("lease.cancel", { ...reservationFenceArgs, reason: null }, ["reason"], reservationFenceOnly)
           ]
         : expiredLease && task.lease
           ? [guidanceAction("lease.expire", {

@@ -148,9 +148,9 @@ export interface HostNextCommand {
 }
 
 export interface CodexHostAdapterProbe {
-  found: boolean;
+  found: false;
   surface: ResolvedCodexRuntime["surface"];
-  reason: "injected" | "host-only-not-found";
+  reason: "host-only-not-found";
   constructedAppServer: false;
 }
 
@@ -795,7 +795,8 @@ export function resolveHostDelegationAdapter(
     adapter?: HostDelegationAdapter;
     adapterFactory?: () => HostDelegationAdapter;
   } = {},
-  env: NodeJS.ProcessEnv = dependencies.env ?? process.env
+  env: NodeJS.ProcessEnv = dependencies.env ?? process.env,
+  options: { allowUnsupportedChannel?: boolean } = {}
 ): HostDelegationAdapter | undefined {
   const injected = dependencies.adapterFactory?.()
     || dependencies.adapter
@@ -810,7 +811,7 @@ export function resolveHostDelegationAdapter(
     }
     return injected;
   }
-  if (Object.hasOwn(env, "SYNOD_HOST_ADAPTER")) {
+  if (Object.hasOwn(env, "SYNOD_HOST_ADAPTER") && !options.allowUnsupportedChannel) {
     throw new SynodError(
       ERROR_CODES.HOST_ADAPTER_INVALID,
       "SYNOD_HOST_ADAPTER is set but no supported host adapter channel is available.",
@@ -820,13 +821,22 @@ export function resolveHostDelegationAdapter(
   return undefined;
 }
 
+function evidenceReferences(value: unknown[] | undefined): string[] {
+  return [...new Set((value || []).flatMap(item => {
+    if (typeof item !== "string") return [];
+    const reference = item.trim();
+    return reference ? [reference] : [];
+  }))];
+}
+
 export function delegateCompleteCommand(
   taskId: string,
-  fence: HostDelegationReservationFence
+  fence: HostDelegationReservationFence,
+  evidence: readonly string[] = []
 ): HostNextCommand {
   return {
     operation: "delegate.complete",
-    argv: ["delegate", "complete", taskId],
+    argv: ["delegate", "complete", taskId, ...evidence.flatMap(reference => ["--evidence", reference])],
     requirements: ["owner-thread"],
     fence
   };
@@ -878,7 +888,7 @@ export async function startHostDelegationHandoff(
     reservationFence: reservedFence,
     readOnlyContract: readOnlyContractFor(id, reservation),
     hostSpawnRequired: true,
-    nextCommand: delegateCompleteCommand(id, reservedFence),
+    nextCommand: delegateCompleteCommand(id, reservedFence, evidenceReferences(options.evidence)),
     probe: probeCodexHostAdapter(runtime)
   };
 }

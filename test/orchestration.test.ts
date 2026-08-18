@@ -147,13 +147,7 @@ test("task-next guidance reserves no-lease activation and fences correction evid
     assert.ok(task);
     assert.equal(task.state, entry.state);
     assert.ok(task.legalTransitions.includes("ACTIVE"));
-    const expectedOperation = entry.state === "READY"
-      ? "delegate.start"
-      : entry.state === "REVIEW"
-        ? "task.transition"
-        : entry.state === "ACCEPTED"
-          ? "task.transition"
-          : "task.transition";
+    const expectedOperation = entry.state === "READY" ? "delegate.start" : "task.transition";
     assert.equal(task.actions[0]?.operation, expectedOperation);
     if (entry.state === "READY") {
       assert.deepEqual(task.actions[0]?.arguments, {

@@ -10,7 +10,7 @@ Use the project skill `$synod-advisor` for multi-phase, delegated, or cross-sess
 - Keep the primary advisor responsible for architecture, planning, review, and verification. Delegate routine implementation to `synod_implementer` with the selected profile. Do not use the supervising model as the default implementation worker.
 - Golden path: `task add` → `delegate start` → `wait --task` → `proposal submit` → `ACCEPTED` → `VERIFIED` → `DONE`.
 - Run `__SYNOD_COMMAND__ task next --json --view summary` and execute the returned `argv`. Do not reconstruct fences from chat.
-- If `hostSpawnRequired` is true, call `spawn_agent` then `delegate complete --owner-thread <id>`. On Desktop without an injected adapter, do not start a child App Server.
+- If `hostSpawnRequired` is true, call `spawn_agent` with the returned `readOnlyContract`, then `delegate complete --owner-thread <id>`. On Desktop without an injected adapter, do not start a child App Server.
 - If `hostWaitRequired` is true, call `wait_agent` only for the exact `hostWaitThreadIds`. Keep `hostFallbackRequired`/`hostFallbackThreadIds` as compatibility aliases.
 - Submit delivery with `__SYNOD_COMMAND__ proposal submit <task-id> --evidence <ref> --json --view summary`. The proposal summary returns a typed exact-revision acceptance action. Acceptance and verification are separate.
 - Run `__SYNOD_COMMAND__ checkpoint` only after intentionally accepting the current Git/worktree state.

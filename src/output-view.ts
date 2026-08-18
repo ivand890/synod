@@ -342,7 +342,7 @@ function nextOperation(data: Record<string, unknown>): unknown {
     return {
       operation: "delegate.complete",
       ...(taskId ? { taskId } : {}),
-      argv: taskId ? ["delegate", "complete", taskId] : ["delegate", "complete"],
+      argv: taskId ? ["delegate", "complete", taskId] : [],
       fence,
       requirements: ["owner-thread"],
       alternatives: ["lease.cancel", "lease.expire"]

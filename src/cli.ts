@@ -596,7 +596,7 @@ export async function run(
             ? { hostDelegationAdapterFactory: dependencies.hostDelegationAdapterFactory }
             : {}),
           ...(dependencies.hostAdapterEnv ? { env: dependencies.hostAdapterEnv } : {})
-        });
+        }, dependencies.hostAdapterEnv ?? process.env, { allowUnsupportedChannel: true });
       const report = await waitForThreads({ ...options, threadIds: selection.threadIds }, {
         ...(dependencies.waitClientFactory ? { clientFactory: dependencies.waitClientFactory } : {}),
         ...(dependencies.waitAdapterFactory ? { adapterFactory: dependencies.waitAdapterFactory } : {}),

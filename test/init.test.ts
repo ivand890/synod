@@ -41,6 +41,7 @@ test("initializes a fresh project with durable state, agents, and skill", async 
   assert.ok(agents.includes(`pnpm dlx @ivand890/synod@${packageVersion} status`));
   assert.ok(agents.includes("pnpm dlx @ivand890/synod@<target-version> upgrade [directory]"));
   assert.match(agents, /Golden path: `task add` → `delegate start` → `wait --task`/);
+  assert.match(agents, /spawn_agent` with the returned `readOnlyContract/);
   assert.match(agents, /execute the returned `argv`/);
   assert.match(agents, /Do not load README, PRODUCT, ROADMAP, STATE notes/);
   assert.match(agents, /proposal summary returns a typed exact-revision acceptance action/);
