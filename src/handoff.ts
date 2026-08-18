@@ -3,6 +3,7 @@ import { formatCheckpointDelta } from "./checkpoint.js";
 import type { CheckpointDelta } from "./checkpoint.js";
 import {
   legalTaskTransitions,
+  nextTaskGuidance,
   orchestrationStatusWithArtifacts,
   reportProjectRotation
 } from "./orchestration.js";
@@ -89,6 +90,10 @@ export interface HandoffResult {
     worktrees: Awaited<ReturnType<typeof orchestrationStatusWithArtifacts>>["artifacts"]["worktrees"];
   };
   rotation: RotationReport | null;
+  guidance: {
+    recommendedTaskId: string | null;
+    nextCommand: Record<string, unknown> | null;
+  };
 }
 
 function gateEvidence(task: OrchestrationTask, evidenceIds: readonly string[]): TaskEvidence[] {
@@ -219,6 +224,9 @@ export async function generateHandoff(
     || rotation.handoff.event.hash !== status.lastEvent.hash)) {
     throw new SynodError(ERROR_CODES.ROTATION_STALE, "Canonical state changed while the rotation-aware handoff was being generated.");
   }
+  const guidance = await nextTaskGuidance({ directory: status.targetDirectory });
+  const recommended = guidance.tasks.find(task => task.id === guidance.recommendedTaskId);
+  const nextCommand = recommended?.actions[0] ? redactGuidanceAction(recommended.actions[0]) : null;
   return {
     targetDirectory: status.targetDirectory,
     lastEvent: status.lastEvent,
@@ -234,8 +242,23 @@ export async function generateHandoff(
     artifacts: status.artifacts,
     recoveryBundle: verification
       ? verifiedBundleMatches(verification, status.checkpoint, status.lastEvent)
-      : { status: "not-supplied" }
+      : { status: "not-supplied" },
+    guidance: {
+      recommendedTaskId: guidance.recommendedTaskId,
+      nextCommand
+    }
   };
+}
+
+function redactGuidanceAction(action: Record<string, unknown>): Record<string, unknown> {
+  const redacted = structuredClone(action);
+  if (isRecord(redacted.fence)) delete redacted.fence.reservationToken;
+  if (isRecord(redacted.arguments)) delete redacted.arguments.reservationToken;
+  return redacted;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function checkpointLabel(checkpoint: GitCheckpoint): string {
@@ -255,6 +278,10 @@ export function formatHandoff(result: HandoffResult): string {
   lines.push(`Drift: ${result.checkpoint.drift.detected ? "detected" : "none"}`);
   lines.push(...formatCheckpointDelta(result.checkpoint.delta));
   lines.push(`Focus tasks: ${result.focusTaskIds.length > 0 ? result.focusTaskIds.join(", ") : "none"}`);
+  const nextArgv = result.guidance.nextCommand && Array.isArray(result.guidance.nextCommand.argv)
+    ? result.guidance.nextCommand.argv.map(String).join(" ")
+    : "none";
+  lines.push(`Next command: ${nextArgv}`);
   lines.push(`Durable artifacts: ${result.artifacts.proposals.verifiedBundles} task proposal bundle(s); ${result.artifacts.worktrees.records} worktree record(s), ${result.artifacts.worktrees.sealedProposals} worktree proposal(s)`);
   if (result.rotation) lines.push("", formatRotationReport(result.rotation), "");
   else lines.push("Phase rotation: not configured");

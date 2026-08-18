@@ -322,7 +322,8 @@ Goal: stop using the supervisor as a bus between Synod and Codex. One
 delegation verb, a blindly executable next action, and an in-context contract
 that fits in the advisor skill.
 
-Status: planned.
+Status: merged in source on `main` (PR #38). Not published. SYN-100–103 remain
+open in the project ledger.
 
 The executable golden path is:
 
@@ -351,7 +352,7 @@ minimal-integration exception applies and is recorded.
 Goal: worker death, empty delivery, and a new root session are typed agent
 paths, not supervisor judgment.
 
-Status: planned.
+Status: in source (depends on merged 0.10; control plane remains 0.9.5).
 
 | ID | Outcome | Depends on | Acceptance gate |
 |---|---|---|---|

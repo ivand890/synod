@@ -121,12 +121,12 @@ test("task-aware selection resolves exact active lease owners read-only and dedu
     "T-API": {
       state: "ACTIVE",
       revision: 2,
-      lease: { id: "lease:api", generation: 3, ownerThread: "thread:shared", status: "ACTIVE", expiresAt: "2030-01-01T00:00:00.000Z" }
+      lease: { id: "lease:api", generation: 3, ownerThread: "thread:shared", status: "ACTIVE", expiresAt: "2030-01-01T00:00:00.000Z", heartbeatAt: "2029-12-31T00:00:00.000Z" }
     },
     "T-UI": {
       state: "ACTIVE",
       revision: 1,
-      lease: { id: "lease:ui", generation: 1, ownerThread: "thread:ui", status: "ACTIVE", expiresAt: "2030-01-01T00:00:00.000Z" }
+      lease: { id: "lease:ui", generation: 1, ownerThread: "thread:ui", status: "ACTIVE", expiresAt: "2030-01-01T00:00:00.000Z", heartbeatAt: "2029-12-31T00:00:00.000Z" }
     }
   } } };
   const before = structuredClone(canonical);
@@ -147,8 +147,8 @@ test("task-aware selection resolves exact active lease owners read-only and dedu
   assert.equal(selection.waitAuthority, "canonical");
   assert.deepEqual(selection.requestedTaskIds, ["T-API", "T-UI"]);
   assert.deepEqual(selection.tasks, [
-    { taskId: "T-API", state: "ACTIVE", revision: 2, leaseId: "lease:api", generation: 3, ownerThread: "thread:shared" },
-    { taskId: "T-UI", state: "ACTIVE", revision: 1, leaseId: "lease:ui", generation: 1, ownerThread: "thread:ui" }
+    { taskId: "T-API", state: "ACTIVE", revision: 2, leaseId: "lease:api", generation: 3, ownerThread: "thread:shared", expectedHeartbeatAt: "2029-12-31T00:00:00.000Z" },
+    { taskId: "T-UI", state: "ACTIVE", revision: 1, leaseId: "lease:ui", generation: 1, ownerThread: "thread:ui", expectedHeartbeatAt: "2029-12-31T00:00:00.000Z" }
   ]);
   assert.deepEqual(selection.threadIds, ["thread:shared", "thread:ui", "thread:reader"]);
 });

@@ -1,12 +1,14 @@
 # Synod
 
+## TL;DR — for humans only
+
+Open Codex in this repo. Send these three messages:
+
+1. `Install synod in this project with pnpm dlx @ivand890/synod init --profile synod-5.6.`
+2. `Restart Codex.`
+3. `Using synod, implement <what you want>.`
+
 Synod installs a persistent, reviewed advisor loop for Codex projects. The selected model profile assigns supervision, atomic implementation, exploration, review, verification, and mechanical work while keeping the primary agent responsible for integration and final evidence.
-
-## Interactive cycle map
-
-[![Synod orchestration loop](docs/synod/assets/synod-cycle-loop.gif)](https://htmlpreview.github.io/?https://github.com/ivand890/synod/blob/main/docs/synod/synod-cycle.html)
-
-[Open the interactive trace](https://htmlpreview.github.io/?https://github.com/ivand890/synod/blob/main/docs/synod/synod-cycle.html).
 
 The public `v0.9.5` release is verified at signed tag commit
 `494f1ebd85b1c51dde522e7a7ec6e334dadc4e30`; its matching GitHub Release is
@@ -42,8 +44,7 @@ The v0.9.5 source surfaces include:
 - `delegate start` through an injected `HostDelegationAdapter`. The standalone
   CLI has no host adapter, fails closed or reports an incomplete handoff, and
   never claims execution ownership.
-- The explicit `--include-local-docs` recovery-bundle path and reproducible
-  Chrome + ffmpeg release-closeout recipe.
+- The explicit `--include-local-docs` recovery-bundle path.
 
 These commands are available in the public v0.9.5 release. The public/pinned
 `v0.9.5` `doctor` support expression is
@@ -444,14 +445,6 @@ attestation, provenance, and a separate public CLI check.
 Verification parses external JSON fail-closed, requires canonical serialization, rejects unknown fields and unsafe or colliding paths, and checks the exact object inventory, sizes, hashes, and symlink boundaries without writing. Dirty submodules and Git intent-to-add entries are deliberately unsupported by bundle schema 1; dirty submodules return `SYNOD_RECOVERY_SUBMODULE_UNSUPPORTED`, while intent-to-add material is rejected as an invalid or incomplete schema-1 bundle.
 
 Restore requires a destination checkout at the bundle's exact base `HEAD` with no relevant staged, unstaged, or untracked changes. It derives the expected normalized checkpoint fingerprint before mutation, writes required content-addressed blobs without changing commits or refs, constructs a private temporary index, and journals the exact prior index bytes and every affected filesystem path inside the destination Git directory. It holds Git's standard `index.lock` across final index installation so another Git writer cannot be overwritten. The operation commits only after a fresh capture exactly matches the bundled fingerprint. Any ordinary failure restores the prior index and worktree; a killed process leaves the durable journal, and the next restore invocation safely rolls it back before retrying. If a journaled path, index, or index lock changed outside Synod, rollback fails closed with `SYNOD_RECOVERY_ROLLBACK_FAILED` and preserves the journal instead of overwriting concurrent content.
-
-To regenerate the checked-in cycle asset with the same document, use the dependency-free Chrome + ffmpeg recipe. This reproducible release-closeout surface is part of v0.9.5 and is available from a runtime pinned to that release:
-
-```bash
-scripts/capture-synod-cycle-gif.sh
-```
-
-Set `CHROME_BIN` and/or `FFMPEG_BIN` when discovery is nonstandard. The script captures the 13 normal and 20 correction states at 1120×622, 3 fps, validates the rendered DOM sentinel and PNG content for every requested scenario/step, then validates all 33 GIF graphic-control frames (approximately 11 seconds). Unknown steps, wrong scenarios, blank/repeated frames, or failed validation leave the checked-in asset untouched. It uses temporary frame/output directories and atomically replaces the asset only after byte-level validation.
 
 ## Token usage and canonical intervals
 

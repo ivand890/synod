@@ -643,7 +643,8 @@ test("wait accepts repeatable mixed task and thread selectors", async () => {
           revision: 2,
           leaseId: "lease:api",
           generation: 3,
-          ownerThread: "thread:writer"
+          ownerThread: "thread:writer",
+          expectedHeartbeatAt: "2026-08-18T00:00:00.000Z"
         }],
         threadIds: ["thread:writer", "thread:reader"]
       };
@@ -665,7 +666,8 @@ test("wait accepts repeatable mixed task and thread selectors", async () => {
     revision: 2,
     leaseId: "lease:api",
     generation: 3,
-    ownerThread: "thread:writer"
+    ownerThread: "thread:writer",
+    expectedHeartbeatAt: "2026-08-18T00:00:00.000Z"
   }]);
   assert.deepEqual(envelope.data.threadIds, ["thread:writer", "thread:reader"]);
 });
@@ -1238,6 +1240,8 @@ test("lease reservation commands expose the pre-spawn and post-bind authorizatio
     assert.equal(summaryBound.data.activation.supervisorNotification.status, "required-not-observed");
     assert.equal(JSON.stringify(summaryBound).includes(summaryReserved.data.reservation.token), false);
 
+    await mkdir(path.join(directory, "src"), { recursive: true });
+    await writeFile(path.join(directory, "src/reserved.ts"), "reserved\n", "utf8");
     const reviewCode = await run([
       "task", "transition", "T-RESERVE", "REVIEW",
       "--revision", "1",
@@ -1424,6 +1428,104 @@ test("wait command returns an explicit Desktop host handoff without creating a c
   assert.equal(envelope.data.userInputNeeded, false);
   assert.equal(envelope.data.hostWaitRequired, true);
   assert.deepEqual(envelope.data.hostWaitThreadIds, ["thread:one"]);
+  assert.equal(Object.hasOwn(envelope.data, "nextCommand"), false);
+});
+
+test("wait returns a revoke next command when an observed owner stops", async () => {
+  const { messages, output } = capturedOutput();
+  const status = await run(["wait", "--task", "T-WAIT", "--json"], output, {
+    waitSelectionResolver: async () => ({
+      waitAuthority: "canonical" as const,
+      requestedTaskIds: ["T-WAIT"],
+      requestedThreadIds: [],
+      tasks: [{
+        taskId: "T-WAIT",
+        state: "ACTIVE",
+        revision: 1,
+        leaseId: "lease-dead",
+        generation: 2,
+        ownerThread: "thread:dead",
+        expectedHeartbeatAt: "2026-08-18T00:00:00.000Z"
+      }],
+      threadIds: ["thread:dead"]
+    }),
+    waitRuntimeResolver: () => ({
+      surface: "cli",
+      executable: "codex",
+      executableSource: "PATH",
+      resolved: true
+    }),
+    waitAdapterFactory: () => ({
+      async start() {},
+      capabilities: () => ({ notification: false, cursor: false }),
+      async read() {
+        return { statuses: [{ threadId: "thread:dead", status: { type: "systemError" as const } }] };
+      },
+      async close() {}
+    })
+  });
+  const envelope = JSON.parse(takeMessage(messages));
+  assert.equal(status, 1);
+  assert.equal(envelope.data.nextCommand.operation, "lease.revoke");
+  assert.deepEqual(envelope.data.nextCommand.argv, [
+    "lease", "revoke", "T-WAIT",
+    "--lease-id", "lease-dead",
+    "--generation", "2",
+    "--revision", "1",
+    "--expected-heartbeat-at", "2026-08-18T00:00:00.000Z",
+    "--reason", "worker-stopped"
+  ]);
+});
+
+test("wait does not advertise revoke on timeout or notLoaded observation", async () => {
+  const cases = [
+    {
+      args: ["wait", "--task", "T-WAIT", "--timeout-seconds", "1", "--poll-interval-ms", "100", "--json"],
+      statuses: [{ threadId: "thread:live", status: { type: "active" as const, activeFlags: [] } }]
+    },
+    {
+      args: ["wait", "--task", "T-WAIT", "--json"],
+      statuses: [{ threadId: "thread:live", status: { type: "notLoaded" as const } }]
+    }
+  ];
+  for (const item of cases) {
+    const { messages, output } = capturedOutput();
+    const status = await run(item.args, output, {
+      waitSelectionResolver: async () => ({
+        waitAuthority: "canonical" as const,
+        requestedTaskIds: ["T-WAIT"],
+        requestedThreadIds: [],
+        tasks: [{
+          taskId: "T-WAIT",
+          state: "ACTIVE",
+          revision: 1,
+          leaseId: "lease-live",
+          generation: 2,
+          ownerThread: "thread:live",
+          expectedHeartbeatAt: "2026-08-18T00:00:00.000Z"
+        }],
+        threadIds: ["thread:live"]
+      }),
+      waitRuntimeResolver: () => ({
+        surface: "cli",
+        executable: "codex",
+        executableSource: "PATH",
+        resolved: true
+      }),
+      waitAdapterFactory: () => ({
+        async start() {},
+        capabilities: () => ({ notification: false, cursor: false }),
+        async read() {
+          return { statuses: item.statuses };
+        },
+        async close() {}
+      })
+    });
+    assert.equal(status, 1);
+    const envelope = JSON.parse(takeMessage(messages));
+    assert.ok(envelope.data);
+    assert.equal(Object.hasOwn(envelope.data, "nextCommand"), false, JSON.stringify(item.statuses));
+  }
 });
 
 test("wait uses the same host adapter resolver and does not request a host handoff", async () => {
