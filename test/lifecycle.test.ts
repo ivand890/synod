@@ -33,6 +33,7 @@ async function initializeGitHead(directory: string): Promise<void> {
   await execFileAsync("git", ["-C", directory, "init", "--quiet"]);
   await execFileAsync("git", ["-C", directory, "config", "user.name", "Synod Tests"]);
   await execFileAsync("git", ["-C", directory, "config", "user.email", "synod-tests@example.invalid"]);
+  await execFileAsync("git", ["-C", directory, "config", "commit.gpgsign", "false"]);
   await execFileAsync("git", ["-C", directory, "add", "."]);
   await execFileAsync("git", ["-C", directory, "commit", "--quiet", "-m", "fixture"]);
 }
@@ -669,7 +670,10 @@ test("upgrade preserves the schema-1 event prefix and fences migrated in-flight 
   await transitionTask({ directory, id: "T-MIGRATE-REVIEW", to: "READY", revision: 0 });
   await acquireTaskLease({ directory, id: "T-MIGRATE-REVIEW", ownerThread: "legacy-review-thread", write: ["src/review.ts"] });
   await transitionTask({ directory, id: "T-MIGRATE-REVIEW", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/review.ts"), "legacy review\n");
   await transitionTask({ directory, id: "T-MIGRATE-REVIEW", to: "REVIEW", revision: 1, evidence: ["legacy review delivery"] });
+  await unlink(path.join(directory, "src/review.ts"));
 
   const stripCore = (source: Record<string, unknown>) => {
     const core = structuredClone(source) as Record<string, any>;
@@ -800,6 +804,7 @@ test("upgrade preserves the schema-1 event prefix and fences migrated in-flight 
   });
   assert.equal(acquiredReview.task.preLease, undefined);
   assert.equal(acquiredReview.lease.generation, 1);
+  await writeFile(path.join(directory, "src/review.ts"), "migrated review\n");
   const resumedReview = await transitionTask({
     directory,
     id: "T-MIGRATE-REVIEW",

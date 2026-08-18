@@ -12,7 +12,8 @@ Use `__SYNOD_COMMAND__` for normal commands. This version-pinned bootstrap resto
 ## Session start
 
 1. Run `__SYNOD_COMMAND__ status`. Reconcile or checkpoint any reported branch, `HEAD`, or working-tree drift before continuing.
-2. Do not load README, PRODUCT, ROADMAP, STATE notes, or closeout archives by default. Canonical state is `.synod/state.json`. `docs/synod/STATUS.md` is the generated human view if needed.
+2. In a fresh root session run `__SYNOD_COMMAND__ handoff --json --view summary`, then run `__SYNOD_COMMAND__ task next --json --view summary` and execute the returned `argv`. Do not load `STATE.md`.
+3. Do not load README, PRODUCT, ROADMAP, STATE notes, or closeout archives by default. Canonical state is `.synod/state.json`. `docs/synod/STATUS.md` is the generated human view if needed.
 
 ## Golden path
 
@@ -27,7 +28,8 @@ On every step run `__SYNOD_COMMAND__ task next --json --view summary` and execut
 - If `hostSpawnRequired` is true: call `spawn_agent` with the returned read-only contract, then `delegate complete --owner-thread <id>`.
 - On Desktop without an injected adapter, that incomplete host handoff is expected. Do not start a child App Server.
 - After bind: `wait --task <id>`. If `hostWaitRequired` is true, call `wait_agent` only for the exact `hostWaitThreadIds`. Keep `hostFallbackRequired` / `hostFallbackThreadIds` as compatibility aliases.
-- Submit with `proposal submit --evidence`. Acceptance and verification are separate transitions for the same revision. Only the supervisor marks `ACCEPTED`, `VERIFIED`, and `DONE`.
+- Submit with `proposal submit --evidence` only when there is an in-scope owned delta. Empty delivery fails closed: `task.correct` or recover. Do not implement the worker's task yourself.
+- If wait reports a dead owner while the lease is live, run the returned `lease.revoke` argv, then one typed `resume` / `reassign` / `supersede` recover action. Recovery does not accept or discard the sealed proposal.
 
 ## Advisor role
 

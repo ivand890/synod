@@ -183,7 +183,7 @@ function compactTask(value: unknown): unknown {
 
 function compactTaskSelection(value: unknown): unknown {
   if (!isRecord(value)) return value;
-  return pick(value, ["taskId", "state", "revision", "leaseId", "generation", "ownerThread"]);
+  return pick(value, ["taskId", "state", "revision", "leaseId", "generation", "ownerThread", "expectedHeartbeatAt"]);
 }
 
 function compactSelection(value: unknown): unknown {
@@ -363,6 +363,7 @@ function nextOperation(data: Record<string, unknown>): unknown {
     const fence = leaseFence(lease);
     return {
       operation: "lease.recover",
+      decision: "resume",
       ...(taskId ? { taskId } : {}),
       argv: taskId
         ? [
@@ -370,12 +371,13 @@ function nextOperation(data: Record<string, unknown>): unknown {
             "--lease-id", String(fence.leaseId ?? ""),
             "--generation", String(fence.generation ?? ""),
             "--revision", String(fence.revision ?? ""),
-            "--expected-heartbeat-at", String(fence.expectedHeartbeatAt ?? "")
+            "--expected-heartbeat-at", String(fence.expectedHeartbeatAt ?? ""),
+            "--decision", "resume"
           ]
         : [],
       fence,
-      requirements: ["decision", "reason"],
-      alternatives: ["resume", "reassign", "supersede"]
+      requirements: ["reason"],
+      alternatives: ["reassign", "supersede"]
     };
   }
   return null;
@@ -517,7 +519,7 @@ export function projectSummary(command: string | null, data: unknown): unknown {
   if (command === "task" && isRecord(data) && data.action === "next") return compactTaskNext(data);
   if (command === "handoff") {
     if (!isRecord(data)) return data;
-    const result = pick(data, ["targetDirectory", "lastEvent", "focusTaskIds", "recoveryBundle"]);
+    const result = pick(data, ["targetDirectory", "lastEvent", "focusTaskIds", "recoveryBundle", "guidance"]);
     result.checkpoint = isRecord(data.checkpoint)
       ? {
           acknowledged: compactCheckpoint(data.checkpoint.acknowledged),

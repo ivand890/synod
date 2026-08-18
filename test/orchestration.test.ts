@@ -45,6 +45,7 @@ import {
   renderStatusMarkdown,
   revokeTaskLease,
   splitTask,
+  submitTaskProposal,
   transitionTask,
   validateOrchestrationProposalArtifacts
 } from "../src/orchestration.js";
@@ -111,6 +112,25 @@ test("task-next guidance advertises fence resolution instead of rejected transit
   const expireArguments: unknown = expiredTask.actions[0]?.arguments;
   assert.ok(isRecord(expireArguments));
   assert.equal(expireArguments.leaseId, acquired.lease.id);
+  await expireTaskLease({
+    directory,
+    id: "T-EXPIRED",
+    leaseId: acquired.lease.id,
+    generation: acquired.lease.generation,
+    revision: 0,
+    expectedHeartbeatAt: acquired.lease.heartbeatAt,
+    reason: "clock expired"
+  }, { clock: () => "2026-08-13T10:01:00.000Z" });
+  const recoveredGuidance = await nextTaskGuidance({ directory }, { clock: () => Date.parse("2026-08-13T10:01:00.000Z") });
+  const pending = recoveredGuidance.tasks.find(task => task.id === "T-EXPIRED")!;
+  assert.deepEqual(pending.actions.map(action => [action.operation, action.arguments.decision]), [
+    ["lease.recover", "resume"],
+    ["lease.recover", "reassign"],
+    ["lease.recover", "supersede"]
+  ]);
+  assert.ok(pending.actions[0]?.argv?.includes("--decision"));
+  assert.deepEqual(pending.actions[0]?.requirements, ["reason"]);
+  assert.deepEqual(pending.actions[1]?.requirements, ["owner-thread", "reason"]);
 });
 
 test("task-next guidance reserves no-lease activation and fences correction evidence", async () => {
@@ -201,6 +221,7 @@ async function initializeGitHead(directory: string): Promise<void> {
   await git(directory, "init", "--quiet");
   await git(directory, "config", "user.name", "Synod Tests");
   await git(directory, "config", "user.email", "synod-tests@example.invalid");
+  await git(directory, "config", "commit.gpgsign", "false");
   await git(directory, "add", ".");
   await git(directory, "commit", "--quiet", "-m", "fixture");
 }
@@ -302,6 +323,8 @@ test("enforces the complete revision, acceptance, verification, and completion p
   await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
   await acquireDefaultLease(directory);
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/t-001.ts"), "T-001\n");
   await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["commit:abc123"] });
   await transitionTask({ directory, id: "T-001", to: "ACCEPTED", revision: 1, evidence: ["review:approved"] });
   await transitionTask({ directory, id: "T-001", to: "VERIFIED", revision: 1, evidence: ["test:pnpm-test:pass"] });
@@ -366,6 +389,7 @@ test("a correction round invalidates prior acceptance and advances the next deli
   await transitionTask({ directory, id: "T-001", to: "ACCEPTED", revision: 1, evidence: ["acceptance:r1"] });
   await acquireDefaultLease(directory);
   await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 1, evidence: ["correction:requested"] });
+  await writeFile(path.join(directory, "src/t-001.ts"), "second revision\n");
   const corrected = await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 2, evidence: ["delivery:r2"] });
 
   assert.equal(corrected.task.state, "REVIEW");
@@ -1919,6 +1943,8 @@ test("status selectors bound operational tasks and checkpoint closeout deltas", 
   await transitionTask({ directory, id: "T-DONE", to: "READY", revision: 0 });
   await acquireDefaultLease(directory, "T-DONE");
   await transitionTask({ directory, id: "T-DONE", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/t-done.ts"), "T-DONE\n");
   await transitionTask({ directory, id: "T-DONE", to: "REVIEW", revision: 1, evidence: ["delivery:done"] });
   await transitionTask({ directory, id: "T-DONE", to: "ACCEPTED", revision: 1, evidence: ["acceptance:done"] });
   await transitionTask({ directory, id: "T-DONE", to: "VERIFIED", revision: 1, evidence: ["verification:done"] });
@@ -2647,6 +2673,54 @@ test("tampered correction-history paths fail closed", async () => {
   } finally {
     await writeFile(statePath, originalState, "utf8");
   }
+});
+
+test("proposal submit fails closed when the worker produced no in-scope delta", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireTaskLease({
+    directory,
+    id: "T-001",
+    ownerThread: "test:T-001",
+    write: ["src/t-001.ts"]
+  });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+
+  const guidance = await nextTaskGuidance({ directory });
+  const task = guidance.tasks.find(item => item.id === "T-001");
+  assert.ok(task);
+  assert.equal(task.actions.some(action => action.operation === "proposal.submit"), false);
+  assert.equal(task.actions[0]?.operation, "wait.task");
+  assert.ok(task.actions.some(action => action.operation === "task.correct"));
+
+  await assert.rejects(
+    submitTaskProposal({ directory, id: "T-001", evidence: ["delivery:empty"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.PROPOSAL_INVALID
+  );
+  assert.equal((await readOrchestration(directory)).state.tasks["T-001"]?.state, "ACTIVE");
+  assert.equal((await readOrchestration(directory)).state.tasks["T-001"]?.proposal, undefined);
+
+  await recordTaskCorrection({
+    directory,
+    id: "T-001",
+    revision: 0,
+    reason: "empty delivery first",
+    evidence: ["review:empty-1"]
+  });
+  await recordTaskCorrection({
+    directory,
+    id: "T-001",
+    revision: 0,
+    reason: "empty delivery second",
+    evidence: ["review:empty-2"]
+  });
+  const exhausted = (await nextTaskGuidance({ directory })).tasks.find(item => item.id === "T-001");
+  assert.ok(exhausted);
+  assert.equal(exhausted.actions.some(action => action.operation === "proposal.submit"), false);
+  assert.equal(exhausted.actions.some(action => action.operation === "task.correct"), false);
+  assert.equal(exhausted.actions.some(action => action.operation === "lease.revoke"), true);
 });
 
 test("status fails closed when the generated Markdown view diverges from canonical state", async () => {

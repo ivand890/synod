@@ -64,6 +64,8 @@ async function add(directory: string, id: string, dependsOn: string[] = []): Pro
 async function activate(directory: string, id: string): Promise<void> {
   await transitionTask({ directory, id, to: "READY", revision: 0 });
   await acquireTaskLease({ directory, id, ownerThread: `test:${id}`, write: [`src/${id.toLowerCase()}.ts`] });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src", `${id.toLowerCase()}.ts`), `${id}\n`);
   await transitionTask({ directory, id, to: "ACTIVE", revision: 0 });
 }
 
@@ -72,6 +74,8 @@ async function reacquire(directory: string, id: string): Promise<void> {
 }
 
 async function review(directory: string, id: string, revision = 1): Promise<void> {
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src", `${id.toLowerCase()}.ts`), `${id} r${revision}\n`);
   await transitionTask({ directory, id, to: "REVIEW", revision, evidence: [`delivery:${id}:r${revision}`] });
 }
 
@@ -89,6 +93,10 @@ test("handoff exposes an unbound reservation without implying write authority", 
   const reserved = await reserveTaskLease({ directory, id: "T-RESERVED", write: ["src/reserved.ts"] });
 
   const handoff = await generateHandoff({ directory });
+  assert.equal(handoff.guidance.recommendedTaskId, "T-RESERVED");
+  assert.equal(handoff.guidance.nextCommand?.operation, "delegate.complete");
+  assert.ok(Array.isArray(handoff.guidance.nextCommand?.argv));
+  assert.match(formatHandoff(handoff), /Next command: delegate complete T-RESERVED/);
   const task = handoff.tasks.find(item => item.id === "T-RESERVED");
   assert.equal(task?.leaseReservation?.id, reserved.reservation.id);
   assert.equal(Object.hasOwn(task?.leaseReservation || {}, "token"), false);
@@ -96,6 +104,29 @@ test("handoff exposes an unbound reservation without implying write authority", 
   assert.equal(task?.lease, null);
   assert.match(formatHandoff(handoff), /Writer reservation: [0-9a-f-]+ generation 1; write authority false;/);
   assert.match(formatHandoff(handoff), /Writer lease: none/);
+});
+
+test("handoff redacts reservation tokens from expire argv", async () => {
+  const { directory } = await project();
+  await add(directory, "T-EXPIRED");
+  await transitionTask({ directory, id: "T-EXPIRED", to: "READY", revision: 0 });
+  const reserved = await reserveTaskLease({
+    directory,
+    id: "T-EXPIRED",
+    write: ["src/expired.ts"],
+    reservationTtlSeconds: 60
+  }, { clock: () => "2026-08-18T00:00:00.000Z" });
+
+  const handoff = await generateHandoff({ directory }, { clock: () => "2026-08-18T00:02:00.000Z" });
+  assert.equal(handoff.guidance.nextCommand?.operation, "lease.expire");
+  assert.ok(Array.isArray(handoff.guidance.nextCommand?.argv));
+  assert.equal(handoff.guidance.nextCommand?.argv.includes("--reservation-token"), false);
+  assert.equal(handoff.guidance.nextCommand?.argv.includes(reserved.reservation.token), false);
+  assert.equal(Object.hasOwn(handoff.guidance.nextCommand?.arguments || {}, "reservationToken"), false);
+  assert.equal(Object.hasOwn(handoff.guidance.nextCommand?.fence || {}, "reservationToken"), false);
+  assert.equal(JSON.stringify(handoff).includes(reserved.reservation.token), false);
+  assert.match(formatHandoff(handoff), /Next command: lease expire T-EXPIRED/);
+  assert.doesNotMatch(formatHandoff(handoff), new RegExp(reserved.reservation.token));
 });
 
 test("handoff derives focus, current evidence, blockers, gates, and legal transitions from canonical state", async () => {
@@ -152,6 +183,7 @@ test("handoff derives focus, current evidence, blockers, gates, and legal transi
     ORCHESTRATION_STATUS_PATH,
     CHECKPOINT_SNAPSHOT_PATH
   ];
+  await recordCheckpoint({ directory });
   const before = await Promise.all(canonicalPaths.map(relativePath => readFile(path.join(directory, relativePath))));
   const handoff = await generateHandoff({ directory });
   const byId = new Map(handoff.tasks.map(task => [task.id, task]));

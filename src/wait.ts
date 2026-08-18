@@ -144,6 +144,7 @@ export interface WaitTaskSelection {
   leaseId: string;
   generation: number;
   ownerThread: string;
+  expectedHeartbeatAt: string;
 }
 
 export interface WaitSelection {
@@ -177,6 +178,7 @@ interface WaitSelectableTask {
     ownerThread: string;
     status: string;
     expiresAt: string;
+    heartbeatAt?: string;
   };
   leaseReservation?: { id: string; generation: number };
   recovery?: {
@@ -332,7 +334,8 @@ export async function resolveWaitSelection({
         revision: task.revision,
         leaseId: lease.id,
         generation: lease.generation,
-        ownerThread: lease.ownerThread
+        ownerThread: lease.ownerThread,
+        expectedHeartbeatAt: lease.heartbeatAt || lease.expiresAt
       });
     }
   }

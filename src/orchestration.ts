@@ -617,6 +617,16 @@ function guidanceArgv(operation: string, taskId: string, args: Record<string, un
       "--lease-id", String(args.leaseId ?? ""),
       "--generation", String(args.generation ?? ""),
       "--revision", String(args.revision ?? ""),
+      "--expected-heartbeat-at", String(args.expectedHeartbeatAt ?? ""),
+      ...(args.decision ? ["--decision", String(args.decision)] : [])
+    ];
+  }
+  if (operation === "lease.revoke") {
+    return [
+      "lease", "revoke", taskId,
+      "--lease-id", String(args.leaseId ?? ""),
+      "--generation", String(args.generation ?? ""),
+      "--revision", String(args.revision ?? ""),
       "--expected-heartbeat-at", String(args.expectedHeartbeatAt ?? "")
     ];
   }
@@ -654,12 +664,20 @@ function guidanceArgv(operation: string, taskId: string, args: Record<string, un
   return [];
 }
 
+export interface TaskGuidanceAction {
+  operation: string;
+  arguments: Record<string, unknown>;
+  requirements: string[];
+  argv: string[];
+  fence?: Record<string, unknown>;
+}
+
 function guidanceAction(
   operation: string,
   args: Record<string, unknown>,
   requirements: string[],
   fence?: Record<string, unknown>
-) {
+): TaskGuidanceAction {
   return {
     operation,
     arguments: args,
@@ -667,6 +685,24 @@ function guidanceAction(
     argv: guidanceArgv(operation, String(args.taskId ?? ""), args),
     ...(fence ? { fence } : {})
   };
+}
+
+function recoverGuidanceActions(task: OrchestrationTask) {
+  const ended = task.recovery?.endedLease;
+  if (!ended) return [];
+  const fence = {
+    leaseId: ended.id,
+    generation: ended.generation,
+    revision: task.revision,
+    expectedHeartbeatAt: ended.heartbeatAt
+  };
+  return (["resume", "reassign", "supersede"] as const).map(decision => guidanceAction("lease.recover", {
+    taskId: task.id,
+    ...fence,
+    decision,
+    reason: null,
+    ...(decision === "reassign" ? { ownerThread: null } : {})
+  }, decision === "reassign" ? ["owner-thread", "reason"] : ["reason"], fence));
 }
 
 function preferredTransition(state: TaskState): TaskState | undefined {
@@ -700,24 +736,42 @@ export async function nextTaskGuidance(
         ? []
         : nominalTransitions.filter(to => !(task.state === "ACTIVE" && to === "REVIEW" && !task.lease));
       const incompleteDependencies = task.dependsOn.filter(taskId => canonical.state.tasks[taskId]?.state !== "DONE");
+      const noInScopeDelta = (() => {
+        if (task.state !== "ACTIVE" || !task.lease || expiredLease || !canonical.snapshot) return false;
+        try {
+          const baseline = leaseBaselineFor(task, task.lease, canonical.leaseBaselines);
+          const classified = classifyLeaseDelta(
+            canonical.state,
+            task,
+            task.lease,
+            task.lease.baseline.lastEvent.sequence,
+            baseline.snapshot,
+            canonical.snapshot
+          );
+          return [...new Set(classified.owned.flatMap(deltaPaths))].length === 0;
+        } catch {
+          return true;
+        }
+      })();
       const preferred = preferredTransition(task.state);
       const orderedTransitions = preferred
         ? [...legalTransitions].sort((left, right) => Number(right === preferred) - Number(left === preferred))
         : legalTransitions;
-      const transitionActions = orderedTransitions.map(to => {
+      const transitionActions = orderedTransitions.flatMap(to => {
         if (leaseActivationReady && to === "ACTIVE") {
-          return guidanceAction("delegate.start", {
+          return [guidanceAction("delegate.start", {
             taskId: task.id,
             write: [],
             writeTree: [],
             read: [],
             readTree: []
-          }, ["write-scope"]);
+          }, ["write-scope"])];
         }
         if (task.state === "ACTIVE" && to === "REVIEW") {
-          return guidanceAction("proposal.submit", { taskId: task.id, evidence: [] }, ["evidence"]);
+          if (noInScopeDelta) return [];
+          return [guidanceAction("proposal.submit", { taskId: task.id, evidence: [] }, ["evidence"])];
         }
-        return guidanceAction("task.transition", {
+        return [guidanceAction("task.transition", {
           taskId: task.id,
           to,
           revision: task.revision,
@@ -729,7 +783,7 @@ export async function nextTaskGuidance(
             || (task.state === "ACCEPTED" && to === "VERIFIED")
             || (to === "ACTIVE" && correctionReady) ? ["evidence"] : []),
           ...(["BLOCKED", "SUPERSEDED"].includes(to) ? ["reason"] : [])
-        ]);
+        ])];
       });
       const reservationFenceArgs = task.leaseReservation
         ? {
@@ -768,20 +822,7 @@ export async function nextTaskGuidance(
               expectedHeartbeatAt: task.lease.heartbeatAt
             })]
           : task.recovery?.status === "PENDING"
-            ? [guidanceAction("lease.recover", {
-                taskId: task.id,
-                leaseId: task.recovery.endedLease.id,
-                generation: task.recovery.endedLease.generation,
-                revision: task.revision,
-                expectedHeartbeatAt: task.recovery.endedLease.heartbeatAt,
-                decision: null,
-                reason: null
-              }, ["decision", "reason"], {
-                leaseId: task.recovery.endedLease.id,
-                generation: task.recovery.endedLease.generation,
-                revision: task.revision,
-                expectedHeartbeatAt: task.recovery.endedLease.heartbeatAt
-              })]
+            ? recoverGuidanceActions(task)
             : transitionActions;
       const waitAction = task.state === "ACTIVE"
         && Boolean(task.lease)
@@ -796,9 +837,28 @@ export async function nextTaskGuidance(
         && task.budget?.thresholdStatus !== "decision-required"
         ? guidanceAction("task.correct", { taskId: task.id, revision: task.revision, reason: null, evidence: [] }, ["revision", "reason", "evidence"])
         : undefined;
+      const emptyDeliveryRevoke = noInScopeDelta
+        && task.lease
+        && !expiredLease
+        && !correctionAction
+        ? guidanceAction("lease.revoke", {
+            taskId: task.id,
+            leaseId: task.lease.id,
+            generation: task.lease.generation,
+            revision: task.revision,
+            expectedHeartbeatAt: task.lease.heartbeatAt,
+            reason: null
+          }, ["reason"], {
+            leaseId: task.lease.id,
+            generation: task.lease.generation,
+            revision: task.revision,
+            expectedHeartbeatAt: task.lease.heartbeatAt
+          })
+        : undefined;
       const actions = [
         ...(waitAction ? [waitAction] : []),
         ...(correctionAction ? [correctionAction] : []),
+        ...(emptyDeliveryRevoke ? [emptyDeliveryRevoke] : []),
         ...baseActions
       ];
       const proposalPathStates = task.proposal?.pathStates;
@@ -4891,7 +4951,8 @@ async function sealTaskProposal(
   lease: TaskLease | EndedTaskLease,
   revision: number,
   context: MutationContext,
-  dependencies: OrchestrationDependencies
+  dependencies: OrchestrationDependencies,
+  options: { allowEmpty?: boolean } = {}
 ): Promise<{ proposal: TaskProposalReference; foreign: ClassifiedLeaseDelta["foreign"] }> {
   await validateLeaseScopeFilesystemPaths(targetDirectory, lease.scopes);
   const baseline = leaseBaselineFor(task, lease, context.leaseBaselines);
@@ -4906,6 +4967,11 @@ async function sealTaskProposal(
   rejectUnacceptableLeaseDrift(task, classified);
   const snapshot = proposalSnapshot(context.snapshot, classified.owned, baseline.capturedAt);
   const ownedPaths = [...new Set(classified.owned.flatMap(deltaPaths))].sort(compareCheckpointPaths);
+  if (ownedPaths.length === 0 && !options.allowEmpty) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_INVALID, `Task ${task.id} has no in-scope owned delta to seal.`, {
+      details: { taskId: task.id, leaseId: lease.id, generation: lease.generation }
+    });
+  }
   const pathStates = await captureProposalPathStates(targetDirectory, context.snapshot, classified.owned, dependencies.gitRunner || defaultGitRunner);
   const proposalPath = `.synod/proposals/${lease.id}/${lease.generation}`;
   const destination = await ensureProposalParent(targetDirectory, proposalPath);
@@ -6028,7 +6094,7 @@ export async function recoverTaskLease({
         });
       }
     }
-    const sealed = await sealTaskProposal(targetDirectory, state, task, ended, task.revision + 1, context, dependencies);
+    const sealed = await sealTaskProposal(targetDirectory, state, task, ended, task.revision + 1, context, dependencies, { allowEmpty: true });
     recovery.proposal = sealed.proposal;
 
     let nextLease: TaskLease | undefined;

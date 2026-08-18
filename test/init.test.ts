@@ -44,6 +44,7 @@ test("initializes a fresh project with durable state, agents, and skill", async 
   assert.match(agents, /spawn_agent` with the returned `readOnlyContract/);
   assert.match(agents, /execute the returned `argv`/);
   assert.match(agents, /Do not load README, PRODUCT, ROADMAP, STATE notes/);
+  assert.match(agents, /handoff --json --view summary/);
   assert.match(agents, /proposal summary returns a typed exact-revision acceptance action/);
   assert.doesNotMatch(agents, /receipt preserves the exact next-operation lease fence/);
 
@@ -220,7 +221,9 @@ test("keeps the primary agent supervisory and delegates routine implementation",
   assert.match(skill, /task next --json --view summary/);
   assert.match(skill, /execute the returned `argv`/);
   assert.match(skill, /Do not load README, PRODUCT, ROADMAP, STATE notes/);
-  assert.doesNotMatch(skill, /STATE\.md/);
+  assert.match(skill, /handoff --json --view summary/);
+  assert.match(skill, /lease.revoke/);
+  assert.match(skill, /Do not load `STATE\.md`/);
   assert.match(skill, /wait --task <id>/);
   assert.match(skill, /wait_agent` only for the exact `hostWaitThreadIds/);
   assert.match(skill, /hostFallbackRequired` \/ `hostFallbackThreadIds` as compatibility aliases/);

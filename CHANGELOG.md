@@ -17,12 +17,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- README now opens with a human-only TL;DR of three Codex prompts
+  (`@ivand890/synod` init, restart, then implement), and no longer links the
+  interactive cycle map.
 - READY now recommends `delegate.start` instead of `lease.reserve`. Active
   reservations recommend `delegate.complete`. Bound writers recommend
   `wait --task`. Review recommends accept at the exact revision.
 - Shrunk the advisor skill and managed `AGENTS.md` block to the golden path
   plus `task next`. They no longer require loading `docs/synod/` or citing
   `STATE.md`. Desktop remains host authority before any child App Server.
+- Recovery is a typed next action: wait-stop yields `lease.revoke` argv,
+  pending recovery emits resume/reassign/supersede with the ended fence, and
+  `proposal submit` fails closed when there is no in-scope owned delta.
+  `handoff --json --view summary` now carries the recommended `argv`.
 
 ## [0.9.5] - 2026-08-15
 

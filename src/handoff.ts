@@ -3,6 +3,7 @@ import { formatCheckpointDelta } from "./checkpoint.js";
 import type { CheckpointDelta } from "./checkpoint.js";
 import {
   legalTaskTransitions,
+  nextTaskGuidance,
   orchestrationStatusWithArtifacts,
   reportProjectRotation
 } from "./orchestration.js";
@@ -12,6 +13,7 @@ import type {
   OrchestrationLastEvent,
   OrchestrationTask,
   TaskEvidence,
+  TaskGuidanceAction,
   TaskState
 } from "./orchestration.js";
 import { verifyRecoveryBundle } from "./recovery.js";
@@ -89,6 +91,10 @@ export interface HandoffResult {
     worktrees: Awaited<ReturnType<typeof orchestrationStatusWithArtifacts>>["artifacts"]["worktrees"];
   };
   rotation: RotationReport | null;
+  guidance: {
+    recommendedTaskId: string | null;
+    nextCommand: TaskGuidanceAction | null;
+  };
 }
 
 function gateEvidence(task: OrchestrationTask, evidenceIds: readonly string[]): TaskEvidence[] {
@@ -219,6 +225,19 @@ export async function generateHandoff(
     || rotation.handoff.event.hash !== status.lastEvent.hash)) {
     throw new SynodError(ERROR_CODES.ROTATION_STALE, "Canonical state changed while the rotation-aware handoff was being generated.");
   }
+  const guidance = await nextTaskGuidance({ directory: status.targetDirectory }, {
+    clock: () => {
+      const value = (dependencies.clock || (() => Date.now()))();
+      return typeof value === "number" ? value : Date.parse(value instanceof Date ? value.toISOString() : value);
+    }
+  });
+  if (guidance.lastEvent.sequence !== status.lastEvent.sequence
+    || guidance.lastEvent.id !== status.lastEvent.id
+    || guidance.lastEvent.hash !== status.lastEvent.hash) {
+    throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, "Canonical state changed while the handoff was being generated.");
+  }
+  const recommended = guidance.tasks.find(task => task.id === guidance.recommendedTaskId);
+  const nextCommand = recommended?.actions[0] ? redactGuidanceAction(recommended.actions[0]) : null;
   return {
     targetDirectory: status.targetDirectory,
     lastEvent: status.lastEvent,
@@ -234,8 +253,35 @@ export async function generateHandoff(
     artifacts: status.artifacts,
     recoveryBundle: verification
       ? verifiedBundleMatches(verification, status.checkpoint, status.lastEvent)
-      : { status: "not-supplied" }
+      : { status: "not-supplied" },
+    guidance: {
+      recommendedTaskId: guidance.recommendedTaskId,
+      nextCommand
+    }
   };
+}
+
+function redactGuidanceAction(action: TaskGuidanceAction): TaskGuidanceAction {
+  const redacted = structuredClone(action);
+  const token = redacted.arguments.reservationToken;
+  if (isRecord(redacted.fence)) delete redacted.fence.reservationToken;
+  delete redacted.arguments.reservationToken;
+  const argv: string[] = [];
+  for (let index = 0; index < redacted.argv.length; index += 1) {
+    const item = redacted.argv[index];
+    if (item === "--reservation-token") {
+      index += 1;
+      continue;
+    }
+    if (typeof token === "string" && item === token) continue;
+    if (item !== undefined) argv.push(item);
+  }
+  redacted.argv = argv;
+  return redacted;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function checkpointLabel(checkpoint: GitCheckpoint): string {
@@ -255,6 +301,10 @@ export function formatHandoff(result: HandoffResult): string {
   lines.push(`Drift: ${result.checkpoint.drift.detected ? "detected" : "none"}`);
   lines.push(...formatCheckpointDelta(result.checkpoint.delta));
   lines.push(`Focus tasks: ${result.focusTaskIds.length > 0 ? result.focusTaskIds.join(", ") : "none"}`);
+  const nextArgv = result.guidance.nextCommand && Array.isArray(result.guidance.nextCommand.argv)
+    ? result.guidance.nextCommand.argv.map(String).join(" ")
+    : "none";
+  lines.push(`Next command: ${nextArgv}`);
   lines.push(`Durable artifacts: ${result.artifacts.proposals.verifiedBundles} task proposal bundle(s); ${result.artifacts.worktrees.records} worktree record(s), ${result.artifacts.worktrees.sealedProposals} worktree proposal(s)`);
   if (result.rotation) lines.push("", formatRotationReport(result.rotation), "");
   else lines.push("Phase rotation: not configured");

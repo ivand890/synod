@@ -257,6 +257,45 @@ function printJsonEnvelope(
   output.log(JSON.stringify(projectJsonEnvelope(envelope, view), null, 2));
 }
 
+function observedOwnerStopped(
+  report: { incomplete: boolean; timedOut: boolean; aborted: boolean; hostWaitRequired: boolean; statuses: Array<{ threadId: string; status: { type: string } }> },
+  ownerThread: string
+): string | undefined {
+  if (report.hostWaitRequired || report.timedOut || report.aborted) return undefined;
+  const status = report.statuses.find(item => item.threadId === ownerThread)?.status.type;
+  if (status === "systemError") return "worker-stopped";
+  return undefined;
+}
+
+function waitRecoveryNextCommand(
+  selection: WaitSelection,
+  report: { incomplete: boolean; timedOut: boolean; aborted: boolean; hostWaitRequired: boolean; statuses: Array<{ threadId: string; status: { type: string } }> }
+): Record<string, unknown> | undefined {
+  const selected = selection.tasks.find(task => observedOwnerStopped(report, task.ownerThread));
+  if (!selected) return undefined;
+  const reason = observedOwnerStopped(report, selected.ownerThread);
+  if (!reason) return undefined;
+  return {
+    operation: "lease.revoke",
+    argv: [
+      "lease", "revoke", selected.taskId,
+      "--lease-id", selected.leaseId,
+      "--generation", String(selected.generation),
+      "--revision", String(selected.revision),
+      "--expected-heartbeat-at", selected.expectedHeartbeatAt,
+      "--reason", reason
+    ],
+    fence: {
+      leaseId: selected.leaseId,
+      generation: selected.generation,
+      revision: selected.revision,
+      expectedHeartbeatAt: selected.expectedHeartbeatAt,
+      ownerThread: selected.ownerThread
+    },
+    requirements: []
+  };
+}
+
 function printLifecycleResult(command: string, result: LifecycleResult, output: CliOutput): void {
   const future = result.dryRun ? "Would " : "";
   for (const path of result.created || []) output.log(`${future}create ${path}`);
@@ -603,9 +642,14 @@ export async function run(
         ...(resolvedHostAdapter ? { hostAdapter: resolvedHostAdapter } : {}),
         ...(dependencies.waitRuntimeResolver ? { runtimeResolver: dependencies.waitRuntimeResolver } : {})
       });
+      const nextCommand = waitRecoveryNextCommand(selection, report);
       if (options.json) {
         const { warnings, diagnostics, ...data } = report;
-        printJsonEnvelope(successEnvelope("wait", { selection, ...data }, { warnings, diagnostics }), output, view);
+        printJsonEnvelope(successEnvelope("wait", {
+          selection,
+          ...data,
+          ...(nextCommand ? { nextCommand } : {})
+        }, { warnings, diagnostics }), output, view);
       } else {
         output.log(formatWaitReport(report, selection));
         printWarnings(report.warnings, output);
