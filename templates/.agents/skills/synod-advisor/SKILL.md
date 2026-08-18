@@ -12,7 +12,7 @@ Use `__SYNOD_COMMAND__` for normal commands. This version-pinned bootstrap resto
 ## Session start
 
 1. Run `__SYNOD_COMMAND__ status`. Reconcile or checkpoint any reported branch, `HEAD`, or working-tree drift before continuing.
-2. In a fresh root session run `__SYNOD_COMMAND__ handoff --json --view summary`, then execute the returned `argv` from `task next`. Do not load `STATE.md`.
+2. In a fresh root session run `__SYNOD_COMMAND__ handoff --json --view summary`, then run `__SYNOD_COMMAND__ task next --json --view summary` and execute the returned `argv`. Do not load `STATE.md`.
 3. Do not load README, PRODUCT, ROADMAP, STATE notes, or closeout archives by default. Canonical state is `.synod/state.json`. `docs/synod/STATUS.md` is the generated human view if needed.
 
 ## Golden path

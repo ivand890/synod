@@ -664,12 +664,20 @@ function guidanceArgv(operation: string, taskId: string, args: Record<string, un
   return [];
 }
 
+export interface TaskGuidanceAction {
+  operation: string;
+  arguments: Record<string, unknown>;
+  requirements: string[];
+  argv: string[];
+  fence?: Record<string, unknown>;
+}
+
 function guidanceAction(
   operation: string,
   args: Record<string, unknown>,
   requirements: string[],
   fence?: Record<string, unknown>
-) {
+): TaskGuidanceAction {
   return {
     operation,
     arguments: args,

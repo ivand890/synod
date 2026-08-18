@@ -13,6 +13,7 @@ import type {
   OrchestrationLastEvent,
   OrchestrationTask,
   TaskEvidence,
+  TaskGuidanceAction,
   TaskState
 } from "./orchestration.js";
 import { verifyRecoveryBundle } from "./recovery.js";
@@ -92,7 +93,7 @@ export interface HandoffResult {
   rotation: RotationReport | null;
   guidance: {
     recommendedTaskId: string | null;
-    nextCommand: Record<string, unknown> | null;
+    nextCommand: TaskGuidanceAction | null;
   };
 }
 
@@ -224,7 +225,17 @@ export async function generateHandoff(
     || rotation.handoff.event.hash !== status.lastEvent.hash)) {
     throw new SynodError(ERROR_CODES.ROTATION_STALE, "Canonical state changed while the rotation-aware handoff was being generated.");
   }
-  const guidance = await nextTaskGuidance({ directory: status.targetDirectory });
+  const guidance = await nextTaskGuidance({ directory: status.targetDirectory }, {
+    clock: () => {
+      const value = (dependencies.clock || (() => Date.now()))();
+      return typeof value === "number" ? value : Date.parse(value instanceof Date ? value.toISOString() : value);
+    }
+  });
+  if (guidance.lastEvent.sequence !== status.lastEvent.sequence
+    || guidance.lastEvent.id !== status.lastEvent.id
+    || guidance.lastEvent.hash !== status.lastEvent.hash) {
+    throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, "Canonical state changed while the handoff was being generated.");
+  }
   const recommended = guidance.tasks.find(task => task.id === guidance.recommendedTaskId);
   const nextCommand = recommended?.actions[0] ? redactGuidanceAction(recommended.actions[0]) : null;
   return {
@@ -250,10 +261,22 @@ export async function generateHandoff(
   };
 }
 
-function redactGuidanceAction(action: Record<string, unknown>): Record<string, unknown> {
+function redactGuidanceAction(action: TaskGuidanceAction): TaskGuidanceAction {
   const redacted = structuredClone(action);
+  const token = redacted.arguments.reservationToken;
   if (isRecord(redacted.fence)) delete redacted.fence.reservationToken;
-  if (isRecord(redacted.arguments)) delete redacted.arguments.reservationToken;
+  delete redacted.arguments.reservationToken;
+  const argv: string[] = [];
+  for (let index = 0; index < redacted.argv.length; index += 1) {
+    const item = redacted.argv[index];
+    if (item === "--reservation-token") {
+      index += 1;
+      continue;
+    }
+    if (typeof token === "string" && item === token) continue;
+    if (item !== undefined) argv.push(item);
+  }
+  redacted.argv = argv;
   return redacted;
 }
 
