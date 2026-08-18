@@ -2,13 +2,13 @@
 
 Synod publishes `@ivand890/synod` and its matching GitHub Release from GitHub Actions. npm uses trusted publishing; no npm publish token is stored in GitHub.
 
-The public `v0.9.5` source is anchored by signed tag commit
-`494f1ebd85b1c51dde522e7a7ec6e334dadc4e30` and its externally immutable GitHub
+The public `v0.11.0` source is anchored by signed tag commit
+`a120f958f7bd86bf4efeebbf1dd8f88019da1ab8` and its externally immutable GitHub
 Release (`isImmutable: true`). Post-publication evidence is recorded in the
-versioned `release-closeouts/v0.9.5.json`. The prior `v0.9.4` evidence is
-recorded in versioned `release-closeouts/v0.9.4.json`, bound to signed tag
-commit `f116a38acffb86c752f6e5c3f8013407ecfea267`. The root
-`RELEASE-CLOSEOUT.json` records the same closed and verified public `v0.9.5`
+versioned `release-closeouts/v0.11.0.json`. The prior `v0.9.5` evidence is
+recorded in versioned `release-closeouts/v0.9.5.json`, bound to signed tag
+commit `494f1ebd85b1c51dde522e7a7ec6e334dadc4e30`. The root
+`RELEASE-CLOSEOUT.json` records the same closed and verified public `v0.11.0`
 evidence. Do not rerun historical tag or publication commands.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
 workflow; the tag workflow validates only the strict prepared/pending source
