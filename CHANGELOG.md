@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-18
+
+0.10 (PR #38) was merged to `main` and never published as `0.10.0`. This
+release is the first public package that includes that increment plus 0.11
+recovery (PR #39).
+
 ### Added
 
 - Added Codex host-operator `delegate start` handoff and `delegate complete
@@ -296,7 +302,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.9.5...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/ivand890/synod/compare/v0.9.5...v0.11.0
 [0.9.5]: https://github.com/ivand890/synod/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/ivand890/synod/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/ivand890/synod/compare/v0.9.2...v0.9.3

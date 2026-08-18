@@ -1,8 +1,8 @@
 # Synod Roadmap
 
-Last updated: 2026-08-17
+Last updated: 2026-08-18
 Current public release: `v0.9.5`
-Current source release: `v0.9.5`
+Current source release: `v0.11.0`
 Last verified public release at this update: `v0.9.5`
 
 This roadmap converts the advisor loop's remaining operational risks into
@@ -10,13 +10,11 @@ versioned, testable increments. Entries at or below the last verified public
 release are delivered. Later increments remain unavailable to a public/pinned
 runtime until their release is published and the project is explicitly
 upgraded. Exact CLI spelling remains provisional until an increment is
-implemented and released. Source preparation and post-publication npm,
-GitHub, registry-installed package, and public CLI evidence for `v0.9.5` are
-captured in the versioned `release-closeouts/v0.9.5.json`; the prior `v0.9.4`
-evidence remains recorded in the versioned `release-closeouts/v0.9.4.json`.
-The signed tag and GitHub Release `isImmutable: true` provide the external
-release anchors; the root `RELEASE-CLOSEOUT.json` records the same closed and
-verified `v0.9.5` evidence.
+implemented and released. The last verified public release remains `v0.9.5` in
+`release-closeouts/v0.9.5.json`; the prior `v0.9.4` evidence remains in
+`release-closeouts/v0.9.4.json`. The signed tag and GitHub Release
+`isImmutable: true` provide the external release anchors. The root
+`RELEASE-CLOSEOUT.json` is the prepared/pending `v0.11.0` source record.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
 workflow; the tag workflow validates only the strict prepared/pending source
 record before publication.
@@ -322,8 +320,9 @@ Goal: stop using the supervisor as a bus between Synod and Codex. One
 delegation verb, a blindly executable next action, and an in-context contract
 that fits in the advisor skill.
 
-Status: merged in source on `main` (PR #38). Not published. SYN-100–103 remain
-open in the project ledger.
+Status: merged in source on `main` (PR #38). Included in the `v0.11.0` source
+preparation. Not a public package of its own. SYN-100–103 remain open in the
+project ledger.
 
 The executable golden path is:
 
@@ -352,7 +351,8 @@ minimal-integration exception applies and is recorded.
 Goal: worker death, empty delivery, and a new root session are typed agent
 paths, not supervisor judgment.
 
-Status: in source (depends on merged 0.10; control plane remains 0.9.5).
+Status: source prepared as `v0.11.0`. Not published. Control plane remains
+`v0.9.5`.
 
 | ID | Outcome | Depends on | Acceptance gate |
 |---|---|---|---|
