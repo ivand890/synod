@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-23
+
+### Added
+
+- Added a validated concurrency policy and CLI App Server runner with bounded
+  `maxConcurrentSubagents` enforcement, capacity reporting, child-loss
+  classification, richer read-only contracts, and repository-anchored loader
+  resolution for detached runners.
+- Added zero-write observer leases that do not conflict with writers or consume
+  concurrency slots, cannot submit proposals, and surface `activeReaders`.
+- Added typed reviewer and verifier approval lanes with role-aware,
+  fail-closed delegation and exact proposal/revision approval evidence.
+- Added bounded parallel delegation with deterministic capacity-limited batches,
+  exact scoped writer actions, and safe concurrent delivery.
+
 ## [0.11.0] - 2026-08-18
 
 0.10 (PR #38) was merged to `main` and never published as `0.10.0`. This
@@ -302,7 +317,8 @@ recovery (PR #39).
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/ivand890/synod/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/ivand890/synod/compare/v0.9.5...v0.11.0
 [0.9.5]: https://github.com/ivand890/synod/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/ivand890/synod/compare/v0.9.3...v0.9.4
