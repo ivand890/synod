@@ -265,6 +265,12 @@ export interface OrchestrationLastEvent {
   hash: string;
 }
 
+export interface ConcurrencyPolicy {
+  maxConcurrentSubagents: number;
+}
+
+export const CONCURRENCY_POLICY_DEFAULTS = { maxConcurrentSubagents: 3 } as const;
+
 export interface OrchestrationStateCore {
   schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
   templateVersion: string;
@@ -276,6 +282,7 @@ export interface OrchestrationStateCore {
   tasks: Record<string, OrchestrationTask>;
   evidenceCounter: number;
   rotation?: ProjectRotation;
+  concurrency?: ConcurrencyPolicy;
 }
 
 export interface OrchestrationState extends OrchestrationStateCore {
@@ -926,6 +933,7 @@ export async function nextTaskGuidance(
   return {
     recommendedTaskId: tasks.find(task => task.actions.length > 0)?.id || null,
     tasks,
+    concurrency: concurrencyStatus(canonical.state),
     lastEvent: canonical.state.lastEvent
   };
 }
@@ -1837,6 +1845,37 @@ function isNonNegativeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && typeof value === "number" && value >= 0;
 }
 
+export function isConcurrencyPolicy(value: unknown): value is ConcurrencyPolicy {
+  return isRecord(value)
+    && Object.keys(value).length === 1
+    && typeof value.maxConcurrentSubagents === "number"
+    && Number.isSafeInteger(value.maxConcurrentSubagents)
+    && value.maxConcurrentSubagents > 0;
+}
+
+export function concurrencyPolicy(state: Pick<OrchestrationStateCore, "concurrency">): ConcurrencyPolicy {
+  if (state.concurrency === undefined) {
+    return { maxConcurrentSubagents: CONCURRENCY_POLICY_DEFAULTS.maxConcurrentSubagents };
+  }
+  return structuredClone(state.concurrency);
+}
+
+export interface ConcurrencyStatus {
+  limit: number;
+  activeWriters: number;
+  availableSlots: number;
+}
+
+export function concurrencyStatus(state: OrchestrationStateCore): ConcurrencyStatus {
+  const policy = concurrencyPolicy(state);
+  const activeWriters = taskList(state).filter(task => task.lease || task.leaseReservation).length;
+  return {
+    limit: policy.maxConcurrentSubagents,
+    activeWriters,
+    availableSlots: Math.max(policy.maxConcurrentSubagents - activeWriters, 0)
+  };
+}
+
 function isCheckpointSnapshotReference(value: unknown): value is CheckpointSnapshotReference {
   return isRecord(value)
     && value.path === CHECKPOINT_SNAPSHOT_PATH
@@ -2191,7 +2230,8 @@ function isOrchestrationStateCoreShape(value: unknown): value is OrchestrationSt
     && isRecord(value.tasks)
     && Object.values(value.tasks).every(isOrchestrationTask)
     && isNonNegativeInteger(value.evidenceCounter)
-    && (value.rotation === undefined || isProjectRotation(value.rotation));
+    && (value.rotation === undefined || isProjectRotation(value.rotation))
+    && (value.concurrency === undefined || isConcurrencyPolicy(value.concurrency));
 }
 
 function isOrchestrationStateShape(value: unknown): value is OrchestrationState {
@@ -5298,6 +5338,28 @@ function reservationScopeConflicts(
   }
 }
 
+function concurrentWriterTaskIds(state: OrchestrationState, taskId?: string): string[] {
+  return taskList(state)
+    .filter(other => other.id !== taskId && (other.lease || other.leaseReservation))
+    .map(other => other.id)
+    .sort();
+}
+
+function assertConcurrencyCapacity(state: OrchestrationState, taskId: string): void {
+  const policy = concurrencyPolicy(state);
+  const conflictingTaskIds = concurrentWriterTaskIds(state, taskId);
+  if (conflictingTaskIds.length >= policy.maxConcurrentSubagents) {
+    throw new SynodError(ERROR_CODES.CONCURRENCY_EXCEEDED, `Task ${taskId} writer reservation exceeds the concurrent subagent limit.`, {
+      details: {
+        taskId,
+        limit: policy.maxConcurrentSubagents,
+        active: conflictingTaskIds.length,
+        conflictingTaskIds
+      }
+    });
+  }
+}
+
 function assertReservationBaselineUnchanged(
   task: OrchestrationTask,
   reservation: TaskLeaseReservation,
@@ -5375,6 +5437,7 @@ export async function reserveTaskLease({
         }
       });
     }
+    assertConcurrencyCapacity(state, taskId);
     reservationScopeConflicts(state, taskId, scopes);
     if (!context.acknowledgedSnapshot) {
       throw new SynodError(ERROR_CODES.CHECKPOINT_SNAPSHOT_INVALID, "A writer reservation requires an acknowledged checkpoint snapshot.", {

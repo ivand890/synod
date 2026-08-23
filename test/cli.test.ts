@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import type { AppServerDiagnostics, AppServerEvent } from "../src/app-server.js";
 import { WARNING_CODES, baseDiagnostics } from "../src/contracts.js";
 import { ERROR_CODES, asSynodError } from "../src/errors.js";
 import { run } from "../src/cli.js";
+import { createCliAppServerAdapter, findCliAppServerWaitClient, type CliAppServerClient } from "../src/cli-app-server-adapter.js";
+import { cliAppServerEndpointPaths } from "../src/cli-app-server-runner.js";
 import { parseDelegateArgs, parseLeaseArgs, parseProposalArgs, parseStatusArgs, parseTaskArgs, parseWorktreeArgs } from "../src/command-options.js";
 import { initProject } from "../src/lifecycle.js";
 import { packageName, packageVersion } from "../src/package.js";
@@ -42,6 +46,98 @@ function initializeGitHead(directory: string): void {
   ]) {
     const result = spawnSync("git", ["-C", directory, ...args], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
+  }
+}
+
+class CliPathAFakeClient implements CliAppServerClient {
+  readonly calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+  readonly threadId: string;
+  readonly listeners = new Set<(event: AppServerEvent) => void>();
+  started = 0;
+  closed = 0;
+
+  constructor(threadId: string) {
+    this.threadId = threadId;
+  }
+
+  async start(): Promise<void> {
+    this.started += 1;
+  }
+
+  async request(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+    this.calls.push({ method, params });
+    if (method === "thread/start") {
+      return {
+        approvalPolicy: "never",
+        approvalsReviewer: "user",
+        cwd: params.cwd,
+        model: "gpt-5.6-luna",
+        modelProvider: "openai",
+        reasoningEffort: "max",
+        sandbox: { type: "readOnly" },
+        thread: { id: this.threadId, status: { type: "idle" } }
+      };
+    }
+    if (method === "turn/start") {
+      queueMicrotask(() => {
+        const settings: AppServerEvent = {
+          type: "notification",
+          method: "thread/settings/updated",
+          params: {
+            threadId: this.threadId,
+            threadSettings: {
+              approvalPolicy: "never",
+              approvalsReviewer: "user",
+              collaborationMode: { mode: "default", settings: { model: "gpt-5.6-luna" } },
+              cwd: params.cwd,
+              model: "gpt-5.6-luna",
+              modelProvider: "openai",
+              effort: "max",
+              sandboxPolicy: params.sandboxPolicy
+            }
+          }
+        };
+        const completed: AppServerEvent = {
+          type: "notification",
+          method: "turn/completed",
+          params: { threadId: this.threadId, turn: { id: "turn-1", status: "completed" } }
+        };
+        for (const listener of this.listeners) {
+          listener(settings);
+          listener(completed);
+        }
+      });
+      return { turn: { id: "turn-1", items: [], status: "inProgress" } };
+    }
+    if (method === "thread/list") {
+      return {
+        data: [{ id: this.threadId, status: { type: "notLoaded" } }],
+        nextCursor: null
+      };
+    }
+    if (method === "thread/read") {
+      return { thread: { id: this.threadId, status: { type: "idle" } } };
+    }
+    throw new Error(`unexpected request: ${method}`);
+  }
+
+  subscribeEvents(listener: (event: AppServerEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  getDiagnostics(): AppServerDiagnostics {
+    return {
+      codexExecutable: "codex",
+      codexSurface: "cli",
+      appServer: {
+        capabilities: { initialize: true, threadList: true, modelList: false }
+      }
+    };
+  }
+
+  async close(): Promise<void> {
+    this.closed += 1;
   }
 }
 
@@ -367,6 +463,253 @@ test("delegate complete requires an owner thread and rejects unknown actions", (
     () => parseDelegateArgs(["begin", "T-001"]),
     error => error instanceof Error && (error as Error & { code?: string }).code === ERROR_CODES.UNEXPECTED_ARGUMENT
   );
+});
+
+test("CLI delegate start on PATH CLI binds the App Server thread UUID before a turn", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-delegate-cli-path-a-"));
+  const { messages, output } = capturedOutput();
+  const methods: string[] = [];
+  let observedProfile: string | undefined;
+  let observedThreadIds: string[] = [];
+  try {
+    await run(["init", directory], output);
+    initializeGitHead(directory);
+    await run(["checkpoint", directory], output);
+    await run([
+      "task", "add", "T-HOST",
+      "--objective", "Exercise CLI Path A identity before execute",
+      "--executor", "synod_implementer",
+      "--acceptance", "Owner UUID comes from thread/start",
+      "--verification", "pnpm test",
+      "--cwd", directory
+    ], output);
+    await run(["task", "transition", "T-HOST", "READY", "--revision", "0", "--cwd", directory], output);
+    messages.length = 0;
+    const startStatus = await run(
+      ["delegate", "start", "T-HOST", "--write", "AGENTS.md", "--cwd", directory, "--json"],
+      output,
+      {
+        hostRuntimeResolver: () => ({
+          surface: "cli",
+          executable: "codex",
+          executableSource: "PATH",
+          resolved: true
+        }),
+        cliAppServerAdapterFactory: options => {
+          observedProfile = options?.profile;
+          return {
+            async spawn() {
+              methods.push("spawn");
+              return { ownerId: "thread-from-appserver", threadId: "thread-from-appserver" };
+            },
+            async authorize() {
+              methods.push("authorize");
+              return { status: "authorized" };
+            }
+          };
+        }
+      }
+    );
+    const start = JSON.parse(takeMessage(messages));
+    assert.equal(startStatus, 0);
+    assert.equal(start.ok, true);
+    assert.equal(start.data.hostSpawnRequired, undefined);
+    assert.equal(start.data.ownerThread, "thread-from-appserver");
+    assert.equal(start.data.authorization.status, "authorized");
+    assert.equal(observedProfile, "portable");
+    assert.deepEqual(methods, ["spawn", "authorize"]);
+
+    messages.length = 0;
+    const waitStatus = await run(
+      ["wait", "--task", "T-HOST", "--cwd", directory, "--json"],
+      output,
+      {
+        waitRuntimeResolver: () => ({
+          surface: "cli",
+          executable: "codex",
+          executableSource: "PATH",
+          resolved: true
+        }),
+        waitAdapterFactory: () => ({
+          async start() {},
+          capabilities: () => ({ notification: false, cursor: false }),
+          async read(threadIds: string[]) {
+            observedThreadIds = [...threadIds];
+            return {
+              statuses: threadIds.map(threadId => ({ threadId, status: { type: "idle" as const } }))
+            };
+          },
+          async close() {}
+        })
+      }
+    );
+    const waited = JSON.parse(takeMessage(messages));
+    assert.equal(waitStatus, 0);
+    assert.equal(waited.ok, true);
+    assert.equal(waited.data.waitAuthority, "appServer");
+    assert.deepEqual(waited.data.threadIds, ["thread-from-appserver"]);
+    assert.deepEqual(observedThreadIds, ["thread-from-appserver"]);
+    assert.equal(waited.data.hostWaitRequired, false);
+    assert.equal(waited.data.hostFallbackRequired, false);
+    assert.equal(waited.data.hostSpawnRequired, undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("CLI Path A writer authorization fails closed before turn/start and retains the bound UUID", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-delegate-cli-wait-endpoint-"));
+  const { messages, output } = capturedOutput();
+  const ownerThread = "11111111-2222-4333-8444-555555555555";
+  const spawnClient = new CliPathAFakeClient(ownerThread);
+  const restartClient = new CliPathAFakeClient(ownerThread);
+  let created = 0;
+  let adapter: ReturnType<typeof createCliAppServerAdapter> | undefined;
+  try {
+    await run(["init", directory], output);
+    await mkdir(path.join(directory, "scope"));
+    initializeGitHead(directory);
+    await run(["checkpoint", directory], output);
+    await run([
+      "task", "add", "T-ENDPOINT",
+      "--objective", "Exercise exact cross-process wait authority",
+      "--executor", "synod_implementer",
+      "--acceptance", "Wait reads the exact owner UUID",
+      "--verification", "pnpm test",
+      "--cwd", directory
+    ], output);
+    await run(["task", "transition", "T-ENDPOINT", "READY", "--revision", "0", "--cwd", directory], output);
+
+    adapter = createCliAppServerAdapter({
+      runtime: { surface: "cli", executable: "codex" },
+      profile: "portable",
+      directory,
+      clientFactory: () => {
+        created += 1;
+        return created === 1 ? spawnClient : restartClient;
+      }
+    });
+    messages.length = 0;
+    const startStatus = await run(
+      ["delegate", "start", "T-ENDPOINT", "--write-tree", "scope", "--cwd", directory, "--json"],
+      output,
+      {
+        hostRuntimeResolver: () => ({
+          surface: "cli",
+          executable: "codex",
+          executableSource: "PATH",
+          resolved: true
+        }),
+        cliAppServerAdapterFactory: () => adapter!
+      }
+    );
+    const start = JSON.parse(takeMessage(messages));
+    assert.equal(startStatus, 1);
+    assert.equal(start.ok, false, JSON.stringify(start));
+    assert.equal(start.error.code, ERROR_CODES.HOST_AUTHORIZATION_FAILED);
+    assert.equal(start.error.details.ownerThread, ownerThread);
+    assert.equal(start.error.details.lease.ownerThread, ownerThread);
+    assert.equal(start.error.details.lease.status, "ACTIVE");
+    assert.equal(start.error.details.recovery.status, "lease-bound-awaiting-authorization");
+    assert.equal(start.error.details.authorization.status, "failed");
+    assert.equal(start.error.details.authorization.code, ERROR_CODES.APP_SERVER_UNSUPPORTED);
+    assert.equal(start.error.details.authorization.details.phase, "before-turn/start");
+    assert.equal(start.error.details.authorization.details.authority, "effective-writable-boundary");
+    assert.equal(start.error.details.cause.code, ERROR_CODES.APP_SERVER_UNSUPPORTED);
+    assert.deepEqual(spawnClient.calls.map(call => call.method), ["thread/start"]);
+    assert.equal(spawnClient.calls[0]?.params.model, "gpt-5.5");
+    assert.equal(spawnClient.calls.some(call => call.method === "turn/start"), false);
+    assert.equal(created, 1);
+    assert.equal(restartClient.calls.some(call => call.method === "thread/read"), false);
+    assert.equal(findCliAppServerWaitClient(directory, ownerThread), undefined);
+  } finally {
+    await adapter?.close?.();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("production delegate start retains the bound owner for the next same-shell wait", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-delegate-cli-production-boundary-"));
+  const fakeCodex = path.join(directory, "fake-codex.mjs");
+  const ownerThread = "22222222-3333-4444-8555-666666666666";
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+import readline from "node:readline";
+const ownerThread = ${JSON.stringify(ownerThread)};
+const reply = (id, result) => process.stdout.write(JSON.stringify({ id, result }) + "\\n");
+const thread = () => ({ id: ownerThread, cliVersion: "0.148.0", cwd: process.cwd(), status: { type: "idle" }, turns: [] });
+readline.createInterface({ input: process.stdin }).on("line", line => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.148.0", codexHome: "/tmp" });
+  else if (message.method === "thread/start") reply(message.id, { thread: { ...thread(), model: "gpt-5.6-luna", reasoningEffort: "max", sandbox: { type: "readOnly" } } });
+  else if (message.method === "thread/read") reply(message.id, { thread: thread() });
+});
+`, "utf8");
+  await chmod(fakeCodex, 0o755);
+  const { messages, output } = capturedOutput();
+  const runtime = {
+    surface: "cli" as const,
+    executable: fakeCodex,
+    executableSource: "test",
+    resolved: true
+  };
+  try {
+    await run(["init", directory], output);
+    await mkdir(path.join(directory, "scope"));
+    initializeGitHead(directory);
+    await run(["checkpoint", directory], output);
+    await run([
+      "task", "add", "T-PRODUCTION-BOUNDARY",
+      "--objective", "Retain exact owner after the pre-turn writer fence",
+      "--executor", "synod_implementer",
+      "--acceptance", "The exact owner remains observable after typed authorization failure",
+      "--verification", "pnpm test",
+      "--cwd", directory
+    ], output);
+    await run(["task", "transition", "T-PRODUCTION-BOUNDARY", "READY", "--revision", "0", "--cwd", directory], output);
+
+    messages.length = 0;
+    const startedAt = Date.now();
+    const startStatus = await run(
+      ["delegate", "start", "T-PRODUCTION-BOUNDARY", "--write-tree", "scope", "--cwd", directory, "--json"],
+      output,
+      {
+        hostRuntimeResolver: () => runtime,
+        cliAppServerAdapterFactory: () => createCliAppServerAdapter({ runtime, directory, profile: "portable" })
+      }
+    );
+    const start = JSON.parse(takeMessage(messages));
+    assert.ok(Date.now() - startedAt < 5_000, "typed pre-turn failure must return promptly");
+    assert.equal(startStatus, 1);
+    assert.equal(start.ok, false, JSON.stringify(start));
+    assert.equal(start.error.code, ERROR_CODES.HOST_AUTHORIZATION_FAILED);
+    assert.equal(start.error.details.ownerThread, ownerThread);
+    assert.equal(start.error.details.lease.ownerThread, ownerThread);
+    assert.equal(start.error.details.lease.status, "ACTIVE");
+    assert.equal(start.error.details.authorization.details.phase, "before-turn/start");
+    assert.equal(start.error.details.authorization.details.authority, "effective-writable-boundary");
+    assert.equal(start.error.details.authorization.details.retainedForObservation, true);
+
+    messages.length = 0;
+    const waitStatus = await run(
+      ["wait", "--task", "T-PRODUCTION-BOUNDARY", "--cwd", directory, "--json"],
+      output,
+      { waitRuntimeResolver: () => runtime }
+    );
+    const waited = JSON.parse(takeMessage(messages));
+    assert.equal(waitStatus, 0);
+    assert.equal(waited.ok, true, JSON.stringify(waited));
+    assert.equal(waited.data.waitAuthority, "appServer");
+    assert.deepEqual(waited.data.threadIds, [ownerThread]);
+    assert.equal(waited.data.hostWaitRequired, false);
+    assert.equal(waited.data.hostFallbackRequired, false);
+
+    for (let attempt = 0; attempt < 100 && findCliAppServerWaitClient(directory, ownerThread); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.equal(findCliAppServerWaitClient(directory, ownerThread), undefined, "wait cleanup must remove the retained owner endpoint");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("CLI delegate start on Desktop reserves a host spawn handoff", async () => {
@@ -1015,6 +1358,8 @@ test("status selectors bound task and checkpoint output in text and JSON", async
 test("lease commands expose durable owner, generation, and heartbeat state through JSON", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-lease-json-test-"));
   const { messages, output } = capturedOutput();
+  let ownerServer: ReturnType<typeof createServer> | undefined;
+  let ownerEndpoint: ReturnType<typeof cliAppServerEndpointPaths> | undefined;
 
   try {
     await run(["init", directory], output);
@@ -1068,6 +1413,30 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
     messages.length = 0;
     await mkdir(path.join(directory, "src/lease"), { recursive: true });
     await writeFile(path.join(directory, "src/lease/work.ts"), "abandoned\n");
+    ownerEndpoint = cliAppServerEndpointPaths(directory, "thread:cli");
+    await mkdir(path.dirname(ownerEndpoint.socketPath), { recursive: true, mode: 0o700 });
+    await writeFile(ownerEndpoint.metadataPath, JSON.stringify({
+      version: 1,
+      threadId: "thread:cli",
+      directory: path.resolve(directory),
+      token: "thread-cli-token",
+      expiresAt: Date.now() + 60_000,
+      socketPath: ownerEndpoint.socketPath
+    }), { encoding: "utf8", mode: 0o600 });
+    ownerServer = createServer(socket => {
+      socket.setEncoding("utf8");
+      socket.on("data", chunk => {
+        const request = JSON.parse(String(chunk));
+        assert.equal(request.method, "close");
+        socket.write(JSON.stringify({ ok: true }) + "\n");
+        socket.end();
+        ownerServer?.close();
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      ownerServer!.once("error", reject);
+      ownerServer!.listen(ownerEndpoint!.socketPath, resolve);
+    });
     const revokeCode = await run([
       "lease", "revoke", "T-LEASE",
       "--lease-id", heartbeat.data.lease.id,
@@ -1081,6 +1450,8 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
     const revoked = JSON.parse(takeMessage(messages));
     assert.equal(revokeCode, 0);
     assert.equal(revoked.data.task.recovery.status, "PENDING");
+    assert.deepEqual(revoked.data.ownerCleanup, { ownerThread: "thread:cli", status: "closed" });
+    assert.equal(findCliAppServerWaitClient(directory, "thread:cli"), undefined);
 
     const recoverCode = await run([
       "lease", "recover", "T-LEASE",
@@ -1101,7 +1472,15 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
     assert.equal(recovered.data.lease.generation, 2);
     assert.equal(recovered.data.task.recovery.status, "REASSIGNED");
     assert.match(recovered.data.task.recovery.proposal.bundleId, /^sha256:/);
+    assert.deepEqual(recovered.data.ownerCleanup, { ownerThread: "thread:cli", status: "not-found" });
   } finally {
+    if (ownerServer?.listening) {
+      await new Promise<void>(resolve => ownerServer!.close(() => resolve()));
+    }
+    if (ownerEndpoint) {
+      await rm(ownerEndpoint.metadataPath, { force: true });
+      await rm(ownerEndpoint.socketPath, { force: true });
+    }
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -1461,11 +1840,23 @@ test("wait returns a revoke next command when an observed owner stops", async ()
       async read() {
         return { statuses: [{ threadId: "thread:dead", status: { type: "systemError" as const } }] };
       },
+      getDiagnostics() {
+        return {
+          waitLoss: {
+            cause: "child-terminated",
+            authority: "appServer",
+            threadId: "thread:dead",
+            directEvidence: true
+          }
+        };
+      },
       async close() {}
     })
   });
   const envelope = JSON.parse(takeMessage(messages));
   assert.equal(status, 1);
+  assert.equal(envelope.data.childLoss, "child-dead-lease-live");
+  assert.equal(envelope.diagnostics.childLoss, "child-dead-lease-live");
   assert.equal(envelope.data.nextCommand.operation, "lease.revoke");
   assert.deepEqual(envelope.data.nextCommand.argv, [
     "lease", "revoke", "T-WAIT",

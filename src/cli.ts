@@ -9,6 +9,7 @@ import { checkProject, initProject, uninstallProject, upgradeProject } from "./l
 import type { LifecycleDependencies, LifecycleResult } from "./lifecycle.js";
 import { packageVersion } from "./package.js";
 import { listProfiles } from "./profiles.js";
+import { readManifest } from "./manifest.js";
 import { collectUsage, formatUsageReport } from "./usage.js";
 import {
   addTask,
@@ -48,7 +49,7 @@ import { isRecord } from "./validation.js";
 import { exportRecoveryBundle, verifyRecoveryBundle } from "./recovery.js";
 import { restoreRecoveryBundle } from "./restore.js";
 import { formatHandoff, generateHandoff } from "./handoff.js";
-import { formatWaitReport, resolveWaitSelection, waitForThreads } from "./wait.js";
+import { formatWaitReport, resolveWaitSelection, waitForThreads, type WaitChildLoss } from "./wait.js";
 import type { ThreadStatusAdapter, WaitClient, WaitRuntime, WaitSelection } from "./wait.js";
 import { cleanupTaskWorktree, createTaskWorktree, integrateTaskWorktreeProposal, sealTaskWorktreeProposal, taskWorktreeStatus } from "./worktrees.js";
 import type { TaskWorktreeDependencies } from "./worktrees.js";
@@ -61,10 +62,13 @@ import {
   completeHostDelegation,
   isCodexHostOperator,
   resolveHostDelegationAdapter,
+  selectHostDelegationAdapter,
   startHostDelegation,
   startHostDelegationHandoff
 } from "./host-delegation.js";
 import type { HostDelegationAdapter } from "./host-delegation.js";
+import { createCliAppServerAdapter, disposeCliAppServerOwner, findCliAppServerWaitClient } from "./cli-app-server-adapter.js";
+import type { CliAppServerAdapterOptions } from "./cli-app-server-adapter.js";
 
 const HELP = `Synod ${packageVersion}
 
@@ -219,6 +223,7 @@ export interface CliDependencies extends LifecycleDependencies, OrchestrationDep
   hostWaitAdapter?: import("./wait.js").HostWaitAdapter;
   hostDelegationAdapter?: HostDelegationAdapter;
   hostDelegationAdapterFactory?: () => HostDelegationAdapter;
+  cliAppServerAdapterFactory?: (options?: CliAppServerAdapterOptions) => HostDelegationAdapter;
   hostRuntimeResolver?: () => import("./codex-runtime.js").ResolvedCodexRuntime;
   hostAdapterEnv?: NodeJS.ProcessEnv;
   waitRuntimeResolver?: () => WaitRuntime;
@@ -269,7 +274,14 @@ function observedOwnerStopped(
 
 function waitRecoveryNextCommand(
   selection: WaitSelection,
-  report: { incomplete: boolean; timedOut: boolean; aborted: boolean; hostWaitRequired: boolean; statuses: Array<{ threadId: string; status: { type: string } }> }
+  report: {
+    incomplete: boolean;
+    timedOut: boolean;
+    aborted: boolean;
+    hostWaitRequired: boolean;
+    childLoss?: WaitChildLoss;
+    statuses: Array<{ threadId: string; status: { type: string } }>;
+  }
 ): Record<string, unknown> | undefined {
   const selected = selection.tasks.find(task => observedOwnerStopped(report, task.ownerThread));
   if (!selected) return undefined;
@@ -292,8 +304,28 @@ function waitRecoveryNextCommand(
       expectedHeartbeatAt: selected.expectedHeartbeatAt,
       ownerThread: selected.ownerThread
     },
+    childLoss: report.childLoss,
     requirements: []
   };
+}
+
+function canonicalOwnerThreadForDisposal(result: unknown, action: string, decision: unknown): string | undefined {
+  if (!isRecord(result)) return undefined;
+  if (action === "revoke") {
+    const lease = isRecord(result.lease) ? result.lease : undefined;
+    return typeof lease?.ownerThread === "string" && lease.ownerThread.trim() ? lease.ownerThread : undefined;
+  }
+  if (action !== "recover" || decision === "resume") return undefined;
+  const task = isRecord(result.task) ? result.task : undefined;
+  const recovery = isRecord(result.recovery)
+    ? result.recovery
+    : task && isRecord(task.recovery)
+      ? task.recovery
+      : undefined;
+  const recordedDecision = recovery && isRecord(recovery.decision) ? recovery.decision : undefined;
+  return typeof recordedDecision?.priorOwnerThread === "string" && recordedDecision.priorOwnerThread.trim()
+    ? recordedDecision.priorOwnerThread
+    : undefined;
 }
 
 function printLifecycleResult(command: string, result: LifecycleResult, output: CliOutput): void {
@@ -507,7 +539,7 @@ export async function run(
     if (command === "delegate") {
       const options = parseDelegateArgs(args.slice(1));
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      const adapter = resolveHostDelegationAdapter({
+      const injectedAdapter = resolveHostDelegationAdapter({
         ...(dependencies.hostDelegationAdapter ? { hostDelegationAdapter: dependencies.hostDelegationAdapter } : {}),
         ...(dependencies.hostDelegationAdapterFactory
           ? { hostDelegationAdapterFactory: dependencies.hostDelegationAdapterFactory }
@@ -522,7 +554,7 @@ export async function run(
           actor: options.actor,
           ownerThread: options.ownerThread,
           evidence: options.evidence,
-          ...(adapter ? { adapter } : {}),
+          ...(injectedAdapter ? { adapter: injectedAdapter } : {}),
           ...(options.ttlSeconds === undefined ? {} : { ttlSeconds: options.ttlSeconds }),
           ...(options.heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds: options.heartbeatIntervalSeconds })
         }, hostDependencies);
@@ -547,8 +579,33 @@ export async function run(
         }
         return 0;
       }
-      if (!adapter) {
-        const runtime = dependencies.hostRuntimeResolver?.() || resolveCodexRuntime();
+      const runtime = dependencies.hostRuntimeResolver?.() || resolveCodexRuntime();
+      let installedProfile: string | undefined;
+      if (!injectedAdapter && runtime.surface === "cli") {
+        const manifest = await readManifest(options.cwd || ".");
+        installedProfile = manifest?.schemaVersion === 1 ? undefined : manifest?.profile;
+      }
+      const selected = selectHostDelegationAdapter({
+        ...(injectedAdapter ? { adapter: injectedAdapter } : {}),
+        runtime,
+        createCliAdapter: () => dependencies.cliAppServerAdapterFactory?.({
+          runtime,
+          ...(installedProfile === undefined ? {} : { profile: installedProfile }),
+          ...(options.cwd === undefined ? {} : { directory: options.cwd })
+        })
+          ?? createCliAppServerAdapter({
+            runtime,
+            ...(installedProfile === undefined ? {} : { profile: installedProfile }),
+            ...(options.cwd === undefined ? {} : { directory: options.cwd })
+          })
+      });
+      if (selected.path === "cli-app-server" && options.wait) {
+        throw new SynodError(
+          ERROR_CODES.HOST_ADAPTER_INVALID,
+          "CLI App Server Path A does not treat App Server events as wait --task."
+        );
+      }
+      if (selected.path === "handoff") {
         if (!isCodexHostOperator(runtime)) {
           throw new SynodError(ERROR_CODES.HOST_ADAPTER_REQUIRED, "Host delegation requires an injected host adapter.");
         }
@@ -583,6 +640,7 @@ export async function run(
         }
         return 1;
       }
+      const adapter = selected.adapter;
       const result = await startHostDelegation({
         id: options.id,
         directory: options.cwd,
@@ -605,6 +663,9 @@ export async function run(
         ownerThread: result.ownerThread,
         lease: result.lease,
         authorization: result.authorization,
+        ...(isRecord(result.authorization) && result.authorization.proposalRequired === true
+          ? { nextCommand: result.authorization.nextCommand }
+          : {}),
         ...(result.wait ? { wait: result.wait } : {}),
         ...(result.liveness ? { liveness: result.liveness } : {}),
         checkpoint: result.bind.state.checkpoint,
@@ -614,10 +675,10 @@ export async function run(
         const diagnostics = result.wait?.diagnostics || {};
         printJsonEnvelope(successEnvelope("delegate", data, { diagnostics } ), output, view);
       } else {
-        output.log(`Delegated ${result.task.id} to ${result.ownerThread}; write authorized ${result.authorization.status}.`);
+        output.log(`Delegated ${result.task.id} to ${result.ownerThread}; write authorized ${result.authorization.status}${result.authorization.proposalRequired === true ? "; canonical proposal still required." : "."}`);
         if (result.wait) output.log(formatWaitReport(result.wait));
       }
-      return result.wait?.incomplete ? 1 : 0;
+      return result.wait?.incomplete || result.authorization.proposalRequired === true ? 1 : 0;
     }
 
     if (command === "wait") {
@@ -636,12 +697,29 @@ export async function run(
             : {}),
           ...(dependencies.hostAdapterEnv ? { env: dependencies.hostAdapterEnv } : {})
         }, dependencies.hostAdapterEnv ?? process.env, { allowUnsupportedChannel: true });
-      const report = await waitForThreads({ ...options, threadIds: selection.threadIds }, {
-        ...(dependencies.waitClientFactory ? { clientFactory: dependencies.waitClientFactory } : {}),
-        ...(dependencies.waitAdapterFactory ? { adapterFactory: dependencies.waitAdapterFactory } : {}),
-        ...(resolvedHostAdapter ? { hostAdapter: resolvedHostAdapter } : {}),
-        ...(dependencies.waitRuntimeResolver ? { runtimeResolver: dependencies.waitRuntimeResolver } : {})
-      });
+      // A CLI Path A delegate keeps its owning App Server behind a private,
+      // exact-thread local endpoint. Connect only for a single task/thread
+      // wait when no injected authority supersedes that session.
+      const retainedWaitClient = !resolvedHostAdapter
+        && !dependencies.waitAdapterFactory
+        && !dependencies.waitClientFactory
+        && selection.threadIds.length === 1
+        ? findCliAppServerWaitClient(options.cwd, selection.threadIds[0]!)
+        : undefined;
+      const waitClientFactory = dependencies.waitClientFactory
+        || (retainedWaitClient ? () => retainedWaitClient : undefined);
+      let report: Awaited<ReturnType<typeof waitForThreads>>;
+      try {
+        report = await waitForThreads({ ...options, threadIds: selection.threadIds }, {
+          ...(waitClientFactory ? { clientFactory: waitClientFactory } : {}),
+          ...(dependencies.waitAdapterFactory ? { adapterFactory: dependencies.waitAdapterFactory } : {}),
+          ...(resolvedHostAdapter ? { hostAdapter: resolvedHostAdapter } : {}),
+          ...(dependencies.waitRuntimeResolver ? { runtimeResolver: dependencies.waitRuntimeResolver } : {})
+        });
+      } catch (error) {
+        await retainedWaitClient?.close();
+        throw error;
+      }
       const nextCommand = waitRecoveryNextCommand(selection, report);
       if (options.json) {
         const { warnings, diagnostics, ...data } = report;
@@ -832,10 +910,15 @@ export async function run(
               : options.action === "revoke"
                 ? await revokeTaskLease(options, dependencies)
                 : await recoverTaskLease(options, dependencies);
+      const ownerThread = canonicalOwnerThreadForDisposal(result, options.action, "decision" in options ? options.decision : undefined);
+      const ownerCleanup = ownerThread
+        ? await disposeCliAppServerOwner(options.directory, ownerThread)
+        : undefined;
       const data = {
         action: options.action,
         task: result.task,
         ...("lease" in result ? { lease: result.lease } : { reservation: result.reservation }),
+        ...(ownerCleanup ? { ownerCleanup: { ownerThread, ...ownerCleanup } } : {}),
         ...("writeAuthorized" in result ? { writeAuthorized: result.writeAuthorized } : {}),
         ...(options.action === "bind" && "lease" in result ? {
           activation: {

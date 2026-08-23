@@ -20,6 +20,7 @@ import { initProject } from "../src/lifecycle.js";
 import { verifyRecoveryBundle } from "../src/recovery.js";
 import { restoreRecoveryBundle } from "../src/restore.js";
 import {
+  CONCURRENCY_POLICY_DEFAULTS,
   ORCHESTRATION_EVENTS_PATH,
   ORCHESTRATION_STATE_PATH,
   ORCHESTRATION_STATUS_PATH,
@@ -28,10 +29,12 @@ import {
   addTask,
   bindTaskLease,
   cancelTaskLeaseReservation,
+  concurrencyPolicy,
   formatOrchestrationStatus,
   expireTaskLease,
   expireTaskLeaseReservation,
   heartbeatTaskLease,
+  isConcurrencyPolicy,
   nextTaskGuidance,
   orchestrationStatus,
   orchestrationStatusWithArtifacts,
@@ -47,7 +50,8 @@ import {
   splitTask,
   submitTaskProposal,
   transitionTask,
-  validateOrchestrationProposalArtifacts
+  validateOrchestrationProposalArtifacts,
+  validateOrchestrationState
 } from "../src/orchestration.js";
 import type { AddTaskOptions, OrchestrationTask } from "../src/orchestration.js";
 import { isRecord } from "../src/validation.js";
@@ -1320,6 +1324,82 @@ test("overlapping reservations serialize to one winner and scoped drift prevents
     error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_SCOPE_DRIFT
   );
   assert.ok((await readOrchestration(directory)).state.tasks[winner.value.task.id]?.leaseReservation);
+});
+
+test("concurrency policy validation accepts absent state and rejects malformed policies fail-closed", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  const { state } = await readOrchestration(directory);
+  assert.equal(state.concurrency, undefined);
+  assert.deepEqual(concurrencyPolicy(state), CONCURRENCY_POLICY_DEFAULTS);
+  assert.equal(isConcurrencyPolicy({ maxConcurrentSubagents: CONCURRENCY_POLICY_DEFAULTS.maxConcurrentSubagents }), true);
+
+  const configured = structuredClone(state);
+  configured.concurrency = { maxConcurrentSubagents: 5 };
+  assert.deepEqual(validateOrchestrationState(configured).concurrency, { maxConcurrentSubagents: 5 });
+
+  for (const malformed of [
+    "3",
+    null,
+    [],
+    {},
+    { maxConcurrentSubagents: 0 },
+    { maxConcurrentSubagents: -1 },
+    { maxConcurrentSubagents: 1.5 },
+    { maxConcurrentSubagents: Number.MAX_SAFE_INTEGER + 1 },
+    { maxConcurrentSubagents: 3, extra: true }
+  ]) {
+    const forged = structuredClone(state);
+    forged.concurrency = malformed as never;
+    assert.throws(
+      () => validateOrchestrationState(forged),
+      error => error instanceof SynodError && error.code === ERROR_CODES.ORCHESTRATION_STATE_INVALID
+    );
+  }
+});
+
+test("reservations enforce the concurrent subagent limit and task-next reports remaining slots", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  for (const id of ["T-A", "T-B", "T-C", "T-D"]) {
+    await addDefaultTask(directory, { id, objective: `Reserve ${id}` });
+    await transitionTask({ directory, id, to: "READY", revision: 0 });
+  }
+
+  const first = await reserveTaskLease({ directory, id: "T-A", write: ["src/a.ts"] });
+  const second = await reserveTaskLease({ directory, id: "T-B", write: ["src/b.ts"] });
+  assert.equal(first.reservation.status, "RESERVED");
+  assert.equal(second.reservation.status, "RESERVED");
+  let guidance = await nextTaskGuidance({ directory });
+  assert.deepEqual(guidance.concurrency, { limit: CONCURRENCY_POLICY_DEFAULTS.maxConcurrentSubagents, activeWriters: 2, availableSlots: 1 });
+
+  await reserveTaskLease({ directory, id: "T-C", write: ["src/c.ts"] });
+  guidance = await nextTaskGuidance({ directory });
+  assert.deepEqual(guidance.concurrency, { limit: 3, activeWriters: 3, availableSlots: 0 });
+
+  await assert.rejects(
+    reserveTaskLease({ directory, id: "T-D", write: ["src/d.ts"] }),
+    error => {
+      assert.ok(error instanceof SynodError);
+      assert.equal(error.code, ERROR_CODES.CONCURRENCY_EXCEEDED);
+      assert.deepEqual(error.details, {
+        taskId: "T-D",
+        limit: 3,
+        active: 3,
+        conflictingTaskIds: ["T-A", "T-B", "T-C"]
+      });
+      return true;
+    }
+  );
+
+  await cancelTaskLeaseReservation({
+    directory,
+    id: "T-A",
+    ...reservationFence(first.reservation),
+    reason: "freeing a slot"
+  });
+  guidance = await nextTaskGuidance({ directory });
+  assert.deepEqual(guidance.concurrency, { limit: 3, activeWriters: 2, availableSlots: 1 });
 });
 
 test("binding a correction reservation applies the released correction transition effects", async () => {

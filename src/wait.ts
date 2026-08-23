@@ -41,11 +41,31 @@ export interface HostWaitRequest {
   signal?: AbortSignal;
 }
 
+/** The evidence-based cause for an incomplete or lost runtime observation. */
+export const WAIT_LOSS_CAUSES = Object.freeze([
+  "endpoint-expired",
+  "endpoint-unreachable",
+  "endpoint-owner-exited",
+  "child-terminated",
+  "wait-timeout",
+  "authority-lost"
+] as const);
+
+export type WaitLossCause = typeof WAIT_LOSS_CAUSES[number];
+
+export interface WaitLossEvidence {
+  cause: WaitLossCause;
+  authority: "appServer" | "host";
+  threadId?: string;
+  directEvidence: boolean;
+}
+
 export interface HostWaitResult {
   statuses: ObservedThreadStatus[];
   mode?: Exclude<WaitMode, "handoff">;
   wakeCount?: number;
   fallbackPollCount?: number;
+  lossCause?: WaitLossCause;
   warnings?: Warning[];
   diagnostics?: Record<string, unknown>;
 }
@@ -63,6 +83,72 @@ function normalizeWarnings(value: unknown): Warning[] {
       ...(Object.hasOwn(item, "details") ? { details: item.details } : {})
     }];
   });
+}
+
+const WAIT_LOSS_CAUSE_SET: ReadonlySet<string> = new Set(WAIT_LOSS_CAUSES);
+
+function parseWaitLossCause(value: unknown): WaitLossCause | undefined {
+  return typeof value === "string" && WAIT_LOSS_CAUSE_SET.has(value)
+    ? value as WaitLossCause
+    : undefined;
+}
+
+function parseWaitLossEvidence(value: unknown): WaitLossEvidence | undefined {
+  if (!isRecord(value)) return undefined;
+  const cause = parseWaitLossCause(value.cause)
+    || parseWaitLossCause(value.lossCause)
+    || parseWaitLossCause(value.waitLossCause);
+  if (!cause) return undefined;
+  const authority = value.authority === "host" ? "host" : "appServer";
+  const threadId = typeof value.threadId === "string" && value.threadId.trim()
+    ? value.threadId.trim()
+    : undefined;
+  return {
+    cause,
+    authority,
+    ...(threadId ? { threadId } : {}),
+    directEvidence: value.directEvidence === true
+  };
+}
+
+function waitLossEvidence(value: unknown): WaitLossEvidence | undefined {
+  if (!isRecord(value)) return undefined;
+  return parseWaitLossEvidence(value.waitLoss)
+    || parseWaitLossEvidence(value.lossEvidence)
+    || waitLossEvidence(value.appServer)
+    || parseWaitLossEvidence(value);
+}
+
+function directChildTermination(
+  statuses: ObservedThreadStatus[],
+  evidence: WaitLossEvidence | undefined
+): boolean {
+  if (!evidence || evidence.cause !== "child-terminated" || !evidence.directEvidence || !evidence.threadId) {
+    return false;
+  }
+  return statuses.some(item => item.threadId === evidence.threadId && item.status.type === "systemError");
+}
+
+function sanitizeStatuses(
+  statuses: ObservedThreadStatus[],
+  evidence: WaitLossEvidence | undefined
+): ObservedThreadStatus[] {
+  return statuses.map(item => {
+    if (item.status.type !== "systemError") return item;
+    return directChildTermination([item], evidence)
+      ? item
+      : { threadId: item.threadId, status: { type: "notLoaded" as const } };
+  });
+}
+
+function reportDiagnostics(
+  lossCause: WaitLossCause | undefined,
+  evidence: WaitLossEvidence | undefined
+): Record<string, unknown> {
+  return {
+    ...(lossCause ? { lossCause, waitLossCause: lossCause } : {}),
+    ...(evidence ? { waitLoss: evidence } : {})
+  };
 }
 
 /** Optional host-owned status observation surface used by an injected adapter. */
@@ -93,13 +179,22 @@ export interface WaitForThreadsOptions {
 /** The owner whose observation makes a wait result authoritative. */
 export type WaitAuthority = "host" | "appServer" | "canonical";
 
+export type WaitObservationAuthority = WaitAuthority | "unknown";
+
 /** The bounded transport used to observe (or hand off) a wait. */
 export type WaitMode = "notification" | "cursor" | "poll" | "handoff";
+
+/**
+ * A bounded wait can classify a terminal runtime observation without making
+ * canonical lease state changes. The lease-recovery command remains a
+ * supervisor decision, so this is evidence only.
+ */
+export type WaitChildLoss = "child-dead-lease-live" | "wait-never-woke";
 
 export interface WaitReport {
   /** Transport mode; this is deliberately separate from waitAuthority. */
   mode: WaitMode;
-  waitAuthority: WaitAuthority;
+  waitAuthority: WaitObservationAuthority;
   threadIds: string[];
   wakeCount: number;
   fallbackPollCount: number;
@@ -115,6 +210,8 @@ export interface WaitReport {
   hostFallbackRequired: boolean;
   hostFallbackThreadIds: string[];
   statuses: ObservedThreadStatus[];
+  childLoss?: WaitChildLoss;
+  lossCause?: WaitLossCause;
   warnings: Warning[];
   diagnostics: AppServerDiagnostics | Record<string, unknown>;
 }
@@ -283,6 +380,15 @@ function completion(statuses: ObservedThreadStatus[]): {
     userInputNeeded,
     incomplete: attentionNeeded || systemError || notLoaded || !terminal
   };
+}
+
+function childLossForStatuses(
+  statuses: ObservedThreadStatus[],
+  evidence?: WaitLossEvidence
+): WaitChildLoss | undefined {
+  return directChildTermination(statuses, evidence)
+    ? "child-dead-lease-live"
+    : undefined;
 }
 
 export async function resolveWaitSelection({
@@ -550,6 +656,7 @@ function normalizeHostWaitResult(value: unknown, threadIds: string[]): HostWaitR
     ? candidate.statuses.map(parseObservedStatus).filter((item): item is ObservedThreadStatus => Boolean(item))
     : [];
   const byId = new Map(statuses.map(item => [item.threadId, item.status]));
+  const evidence = waitLossEvidence(candidate);
   return {
     statuses: projectStatuses(threadIds, byId),
     ...(candidate.mode === "notification" || candidate.mode === "cursor" || candidate.mode === "poll"
@@ -563,6 +670,7 @@ function normalizeHostWaitResult(value: unknown, threadIds: string[]): HostWaitR
       && candidate.fallbackPollCount >= 0
       ? { fallbackPollCount: candidate.fallbackPollCount }
       : {}),
+    ...(evidence ? { lossCause: evidence.cause } : {}),
     ...(Array.isArray(candidate.warnings) ? { warnings: normalizeWarnings(candidate.warnings) } : {}),
     ...(isRecord(candidate.diagnostics) ? { diagnostics: candidate.diagnostics } : {})
   };
@@ -623,7 +731,14 @@ async function waitThroughHost(
           else if (outcome.outcome === "abort") aborted = true;
           else {
             const snapshot = normalizeHostWaitResult(outcome.value, ids);
-            const final = completion(snapshot.statuses);
+            const evidence = waitLossEvidence({
+              ...(isRecord(snapshot.diagnostics) ? snapshot.diagnostics : {}),
+              ...(snapshot.lossCause ? { lossCause: snapshot.lossCause } : {})
+            });
+            const statuses = sanitizeStatuses(snapshot.statuses, evidence);
+            const final = completion(statuses);
+            const childLoss = childLossForStatuses(statuses, evidence);
+            const lossCause = evidence?.cause;
             report = {
               mode: snapshot.mode || "poll",
               waitAuthority: "host",
@@ -640,10 +755,14 @@ async function waitThroughHost(
               hostWaitThreadIds: [],
               hostFallbackRequired: false,
               hostFallbackThreadIds: [],
-              statuses: snapshot.statuses,
+              statuses,
+              ...(childLoss ? { childLoss } : {}),
+              ...(lossCause ? { lossCause } : {}),
               warnings: snapshot.warnings || [],
               diagnostics: {
                 ...(snapshot.diagnostics || {}),
+                ...(childLoss ? { childLoss } : {}),
+                ...reportDiagnostics(lossCause, evidence),
                 waitAuthority: "host",
                 observation: "host-adapter"
               }
@@ -673,8 +792,13 @@ async function waitThroughHost(
         hostFallbackRequired: false,
         hostFallbackThreadIds: [],
         statuses,
+        ...(timedOut ? { lossCause: "wait-timeout" as const } : {}),
         warnings: [],
-        diagnostics: { waitAuthority: "host", observation: "host-adapter" }
+        diagnostics: {
+          waitAuthority: "host",
+          observation: "host-adapter",
+          ...(timedOut ? reportDiagnostics("wait-timeout", undefined) : {})
+        }
       };
     }
   } catch (error) {
@@ -877,14 +1001,30 @@ export async function waitForThreads({
       }
     }
 
-    const statuses = projectStatuses(ids, byId);
+    const rawStatuses = projectStatuses(ids, byId);
+    const observationDiagnostics = adapter.getDiagnostics?.() || {};
+    const evidence = waitLossEvidence(observationDiagnostics);
+    const statuses = sanitizeStatuses(rawStatuses, evidence);
     const final = completion(statuses);
+    const childLoss = childLossForStatuses(statuses, evidence);
+    const lossCause = evidence?.cause
+      || (timedOut ? "wait-timeout" as const : rawStatuses.some(item => item.status.type === "systemError") ? "authority-lost" as const : undefined);
+    const endpointLoss = evidence?.cause === "endpoint-expired"
+      || evidence?.cause === "endpoint-unreachable"
+      || evidence?.cause === "endpoint-owner-exited"
+      || evidence?.cause === "authority-lost";
+    const authorityLost = !hostAuthority && (
+      (endpointLoss && statuses.every(item => item.status.type === "notLoaded"))
+      || (!evidence && rawStatuses.some(item => item.status.type === "systemError"))
+      || (timedOut && !hasObservedSnapshot)
+    );
+    const observedAuthority: WaitObservationAuthority = authorityLost ? "unknown" : waitAuthority;
     const hostWaitThreadIds = !hostAuthority && hasObservedSnapshot && !aborted
       ? statuses.filter(item => item.status.type === "notLoaded").map(item => item.threadId)
       : [];
     report = {
       mode,
-      waitAuthority,
+      waitAuthority: observedAuthority,
       threadIds: ids,
       wakeCount,
       fallbackPollCount,
@@ -899,8 +1039,14 @@ export async function waitForThreads({
       hostFallbackRequired: hostWaitThreadIds.length > 0,
       hostFallbackThreadIds: [...hostWaitThreadIds],
       statuses,
+      ...(childLoss ? { childLoss } : {}),
+      ...(lossCause ? { lossCause } : {}),
       warnings: [],
-      diagnostics: {}
+      diagnostics: {
+        ...(childLoss ? { childLoss } : {}),
+        ...reportDiagnostics(lossCause, evidence),
+        ...(observedAuthority !== waitAuthority ? { waitAuthority: observedAuthority } : {})
+      }
     };
   } catch (error) {
     failure = asSynodError(error);
@@ -951,7 +1097,7 @@ export async function waitForThreads({
   return {
     ...report!,
     warnings,
-    diagnostics
+    diagnostics: { ...report!.diagnostics, ...diagnostics }
   };
 }
 
@@ -971,6 +1117,7 @@ export function formatWaitReport(report: WaitReport, selection?: WaitSelection):
   if (report.hostWaitRequired) {
     lines.push(`Host wait required: ${report.hostWaitThreadIds.join(", ")}`);
   }
+  if (report.childLoss) lines.push(`Child loss: ${report.childLoss}`);
   for (const item of report.statuses) {
     const flags = item.status.type === "active" && item.status.activeFlags.length > 0
       ? ` (${item.status.activeFlags.join(", ")})`

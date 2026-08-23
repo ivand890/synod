@@ -6,6 +6,12 @@ export interface ModelRequirement {
   planEffort?: string;
 }
 
+export interface ImplementerProfile {
+  profile: string;
+  model: string;
+  effort: string;
+}
+
 export type ProfileRole = "supervisor" | "implementer" | "explorer" | "reviewer" | "verifier" | "mechanical";
 
 export interface ModelProfile {
@@ -83,6 +89,36 @@ export function getProfile(id: string = DEFAULT_PROFILE): ModelProfile {
     });
   }
   return structuredClone(profile);
+}
+
+/**
+ * Resolve the worker configuration from the installed profile.  Callers that
+ * launch a worker must provide the profile explicitly; silently falling back
+ * to a built-in profile would let an installed profile select the wrong model.
+ */
+export function resolveImplementerProfile(profileId: unknown): ImplementerProfile {
+  if (typeof profileId !== "string" || profileId.length === 0 || profileId.trim() !== profileId) {
+    throw new SynodError(
+      ERROR_CODES.PROFILE_NOT_FOUND,
+      "An installed Synod profile is required to resolve the implementer.",
+      { details: { profile: profileId ?? null, role: "implementer", reason: "missing-or-invalid" } }
+    );
+  }
+  const profile = getProfile(profileId);
+  const implementer = profile.roles.implementer;
+  if (typeof implementer.model !== "string" || implementer.model.length === 0
+    || typeof implementer.effort !== "string" || implementer.effort.length === 0) {
+    throw new SynodError(
+      ERROR_CODES.PROFILE_NOT_FOUND,
+      `Synod profile ${profileId} does not provide a supported implementer configuration.`,
+      { details: { profile: profileId, role: "implementer", reason: "unsupported" } }
+    );
+  }
+  return {
+    profile: profile.id,
+    model: implementer.model,
+    effort: implementer.effort
+  };
 }
 
 function modelIdentity(model: ModelCapability): string {
