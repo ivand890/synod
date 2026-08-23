@@ -10,27 +10,42 @@ Open Codex in this repo. Send these three messages:
 
 Synod installs a persistent, reviewed advisor loop for Codex projects. The selected model profile assigns supervision, atomic implementation, exploration, review, verification, and mechanical work while keeping the primary agent responsible for integration and final evidence.
 
-The public `v0.11.0` release is verified at signed tag commit
-`a120f958f7bd86bf4efeebbf1dd8f88019da1ab8`; its matching GitHub Release is
+The public `v0.12.0` release is verified at signed tag commit
+`9ee278290b3f7928138aa827b544a5145d516a3b`; its matching GitHub Release is
 externally immutable. Post-publication evidence is recorded in the versioned
-[`release-closeouts/v0.11.0.json`](release-closeouts/v0.11.0.json). The prior
-`v0.9.5` evidence remains recorded in the versioned
-[`release-closeouts/v0.9.5.json`](release-closeouts/v0.9.5.json), and the root
+[`release-closeouts/v0.12.0.json`](release-closeouts/v0.12.0.json). The prior
+`v0.11.0` evidence remains recorded in the versioned
+[`release-closeouts/v0.11.0.json`](release-closeouts/v0.11.0.json), alongside
+the earlier `v0.9.5` evidence in
+[`release-closeouts/v0.9.5.json`](release-closeouts/v0.9.5.json). The root
 [`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) records the same verified
-public v0.11.0 evidence. The phase-2 live verifier runs on the protected
+public v0.12.0 evidence. The phase-2 live verifier runs on the protected
 closeout PR, not the tag workflow; the tag workflow validates only the strict
 prepared/pending source record before publication.
 
 ## Public release and source tree
 
-The public and pinned `@ivand890/synod@0.11.0` is the release described above.
-A project using `pnpm dlx @ivand890/synod@0.11.0`, or a project runtime pinned
-to `0.11.0`, exposes the released command surface. The source tree contains
-the same v0.11.0 surfaces and their regression tests; future source increments
+The public and pinned `@ivand890/synod@0.12.0` is the release described above.
+A project using `pnpm dlx @ivand890/synod@0.12.0`, or a project runtime pinned
+to `0.12.0`, exposes the released command surface. The source tree contains
+the same v0.12.0 surfaces and their regression tests; future source increments
 remain unavailable to a pinned runtime until a corresponding release is
 published and that project is explicitly upgraded.
 
-The v0.11.0 source surfaces include:
+The v0.12.0 source surfaces include:
+
+- A validated concurrency policy and CLI App Server runner with bounded
+  `maxConcurrentSubagents` enforcement, capacity reporting, child-loss
+  classification, richer read-only contracts, and repository-anchored loader
+  resolution for detached runners.
+- Zero-write observer leases that do not conflict with writers or consume
+  concurrency slots, cannot submit proposals, and surface `activeReaders`.
+- Typed reviewer and verifier approval lanes with role-aware, fail-closed
+  delegation and exact proposal/revision approval evidence.
+- Bounded parallel delegation with deterministic capacity-limited batches,
+  exact scoped writer actions, and safe concurrent delivery.
+
+The v0.11.0 source surfaces remain available in this release:
 
 - `synod task correct`, which records an evidence-backed correction while an
   active lease remains in force.
@@ -38,23 +53,26 @@ The v0.11.0 source surfaces include:
   `proposalAdded`, `gitTracked`, `staged`, and `committed` are separate facts,
   not one completion claim.
 - Bounded status selectors: `--task`, `--active-only`, and
-  `--changed-since-checkpoint`; the 0.9.5 hotfix, retained in 0.11.0, makes
+  `--changed-since-checkpoint`; the 0.9.5 hotfix, retained since v0.11.0, makes
   each selector available through the initialized project-local bootstrap
   while mixed selectors still fail closed.
-- `delegate start` through an injected `HostDelegationAdapter`. The standalone
-  CLI has no host adapter, fails closed or reports an incomplete handoff, and
-  never claims execution ownership.
+- `delegate start` on a supported Codex CLI without an injected adapter uses
+  Synod's owned CLI App Server Path A: it reserves, spawns, binds, and
+  authorizes the worker, retaining the exact owner for task-aware wait. An
+  injected `HostDelegationAdapter` remains supported. Desktop returns an
+  explicit host spawn/wait handoff and never starts a child App Server;
+  unsupported or non-Codex contexts fail closed.
 - The explicit `--include-local-docs` recovery-bundle path.
 
-These commands are available in the public v0.11.0 release. The public/pinned
-`v0.11.0` `doctor` support expression is
+These commands are available in the public v0.12.0 release. The public/pinned
+`v0.12.0` `doctor` support expression is
 `>=0.148.0-0 <0.149.0 (all 0.148.x variants)`.
 Every valid `0.148.x` semantic version is accepted, including prerelease,
 stable, patch, and build-metadata variants; `0.148.0-alpha.9` is known-good.
 Valid versions below `0.148` or at and above `0.149`, plus invalid semver, are
 unsupported.
 
-The v0.11.0 release requires Node.js `>=22`; Node 20 is unsupported. Its CI
+The v0.12.0 release requires Node.js `>=22`; Node 20 is unsupported. Its CI
 tests Node 22 and 24 on Ubuntu, plus Node 24 package smoke on macOS and
 Windows.
 
@@ -242,7 +260,7 @@ synod lease bind T-001 \
 
 The successful bind JSON adds an activation handoff derived from the existing `lease.bound` event: task and lease identity, `boundAt`, the exact event `{ sequence, id, hash }`, `writeAuthorized:true`, `supervisorNotification.status: "required-not-observed"`, and a typed `wait --task T-001` follow-up. The supervisor must send explicit write authorization to the worker only after bind succeeds, then run that task-aware wait; the receipt never claims that Codex notification, receipt, or execution was observed and never repeats the reservation token.
 
-If spawn fails, run `lease cancel` with the complete reservation fence and a reason. If no owner ID returns, wait for the reservation TTL and use the reservation form of `lease expire`. Neither pre-bind cleanup path creates an abandoned-worker recovery record because the reservation never authorized writes. The public/pinned `0.11.0` CLI cannot invoke Codex `spawn_agent` or claim execution ownership. The released CLI provides `delegate start` only through an injected `HostDelegationAdapter`; an unadapted standalone CLI fails closed or returns the explicit incomplete host handoff.
+If spawn fails, run `lease cancel` with the complete reservation fence and a reason. If no owner ID returns, wait for the reservation TTL and use the reservation form of `lease expire`. Neither pre-bind cleanup path creates an abandoned-worker recovery record because the reservation never authorized writes. On a supported Codex CLI without an injected adapter, `delegate start` uses Synod's owned CLI App Server Path A to reserve, spawn, bind, and authorize, then retains the exact owner for `wait --task`. An injected `HostDelegationAdapter` remains supported. Desktop returns an explicit host spawn/wait handoff without starting a child App Server; unsupported or non-Codex contexts fail closed.
 
 Callers that already know the worker identity may still use `lease acquire`. After bind or acquire, the JSON result contains the active lease ID, generation, task revision, owner, and `heartbeatAt`. Copy those exact values into heartbeat, release, worktree, revocation, or recovery commands; a stale value fails closed:
 
@@ -350,7 +368,7 @@ synod status --json
 
 `status` exits non-zero with `SYNOD_CHECKPOINT_DRIFT` when branch, `HEAD`, or relevant working-tree content differs. `status --explain` adds a read-only path delta in text or JSON that distinguishes committed, staged, unstaged, untracked, deleted, renamed, resolved, and binary paths since the acknowledged checkpoint. Synod-owned infrastructure and orchestration records are excluded so Synod does not create its own drift.
 
-The v0.11.0 release also includes bounded selectors; use them from a project
+The v0.12.0 release also includes the retained bounded selectors; use them from a project
 pinned to the released runtime:
 
 ```bash
@@ -435,7 +453,7 @@ Export requires an acknowledged Git `HEAD`; the live branch, `HEAD`, Git index, 
 
 A schema-1 bundle contains canonical `manifest.json` plus raw content-addressed objects under `objects/`. The manifest binds the bundle ID to source branch/`HEAD`, checkpoint and snapshot hashes, last event identity, path modes and types, object sizes and SHA-256 values, and whether untracked material was included. Its deterministic `createdAt` is the acknowledged snapshot capture time, so repeated exports of the same checkpoint with the same Synod version serialize identically. Bundles can contain source code, secrets, binary data, and symlink targets, so keep them local and protect them like the checkout itself.
 
-`docs/synod/GOAL.md`, `PLAN.md`, `STATE.md`, `DECISIONS.md`, and `WORKLOG.md` are ignored, human-owned supporting context—not Git, checkpoint, or release proof. They never enter a default bundle or alter a checkpoint fingerprint. `--include-untracked` keeps its existing meaning and does not include them. Use the separate, explicit `--include-local-docs` opt-in to add only those five bounded regular files as verified `supplemental.localDocs`; generated `STATUS.md` and every other ignored path are excluded. Restore leaves supplemental notes untouched unless `--include-local-docs` is supplied, rejects unsafe ancestors and conflicting destination content, and journals the write transactionally. These notes may contain prompts, credentials, tokens, or other secrets: inspect and redact them before export, transfer, or publication. The opt-in local-doc path is part of the public v0.11.0 recovery contract.
+`docs/synod/GOAL.md`, `PLAN.md`, `STATE.md`, `DECISIONS.md`, and `WORKLOG.md` are ignored, human-owned supporting context—not Git, checkpoint, or release proof. They never enter a default bundle or alter a checkpoint fingerprint. `--include-untracked` keeps its existing meaning and does not include them. Use the separate, explicit `--include-local-docs` opt-in to add only those five bounded regular files as verified `supplemental.localDocs`; generated `STATUS.md` and every other ignored path are excluded. Restore leaves supplemental notes untouched unless `--include-local-docs` is supplied, rejects unsafe ancestors and conflicting destination content, and journals the write transactionally. These notes may contain prompts, credentials, tokens, or other secrets: inspect and redact them before export, transfer, or publication. The opt-in local-doc path is part of the public v0.12.0 recovery contract, retained from v0.11.0.
 
 The `pnpm test:package` local tarball smoke is source-preparation evidence only;
 it cannot satisfy public verification. The public phase requires a clean
@@ -543,7 +561,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
   "data": {},
   "warnings": [],
   "diagnostics": {
-    "synodVersion": "0.11.0",
+    "synodVersion": "0.12.0",
     "nodeVersion": "24.12.0",
     "platform": "darwin",
     "codexVersion": "0.142.0"
@@ -585,7 +603,7 @@ CLI and Desktop may share `~/.codex` while running different Codex versions. Ins
 
 It then classifies that surface's Codex version independently from model availability:
 
-- Public/pinned `v0.11.0` support expression:
+- Public/pinned `v0.12.0` support expression:
   `>=0.148.0-0 <0.149.0 (all 0.148.x variants)`.
 - Known-good and exercised in CI: `0.148.0-alpha.9`.
 - Supported: every valid semantic version whose numeric major/minor
@@ -623,6 +641,6 @@ pnpm test:codex-compatibility # requires explicit SYNOD_EXPECTED_* environment v
 pnpm pack --pack-destination dist
 ```
 
-Source uses strict TypeScript 7 with explicit `.js` ESM specifiers and compiles into `dist`; published consumers execute JavaScript and do not need TypeScript. The v0.11.0 CI exercises the installed tarball on Node 22 and 24 on Ubuntu, plus Node 24 on macOS and Windows.
+Source uses strict TypeScript 7 with explicit `.js` ESM specifiers and compiles into `dist`; published consumers execute JavaScript and do not need TypeScript. The v0.12.0 CI exercises the installed tarball on Node 22 and 24 on Ubuntu, plus Node 24 on macOS and Windows.
 
 Every change lands through a pull request with required CI. Protected `vX.Y.Z` tags publish both npm and GitHub releases, with exact-commit and `latest` parity enforced before the workflow succeeds; see [RELEASING.md](RELEASING.md).

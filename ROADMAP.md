@@ -1,9 +1,9 @@
 # Synod Roadmap
 
-Last updated: 2026-08-18
-Current public release: `v0.11.0`
-Current source release: `v0.11.0`
-Last verified public release at this update: `v0.11.0`
+Last updated: 2026-08-23
+Current public release: `v0.12.0`
+Current source release: `v0.12.0`
+Last verified public release at this update: `v0.12.0`
 
 This roadmap converts the advisor loop's remaining operational risks into
 versioned, testable increments. Entries at or below the last verified public
@@ -11,12 +11,13 @@ release are delivered. Later increments remain unavailable to a public/pinned
 runtime until their release is published and the project is explicitly
 upgraded. Exact CLI spelling remains provisional until an increment is
 implemented and released. Source preparation and post-publication npm, GitHub, registry-installed
-package, and public CLI evidence for `v0.11.0` are captured in the versioned
-`release-closeouts/v0.11.0.json`; the prior `v0.9.5` evidence remains recorded
-in the versioned `release-closeouts/v0.9.5.json`.
+package, and public CLI evidence for `v0.12.0` are captured in the versioned
+`release-closeouts/v0.12.0.json`; the prior `v0.11.0` evidence remains recorded
+in `release-closeouts/v0.11.0.json`, and the earlier `v0.9.5` evidence remains
+recorded in `release-closeouts/v0.9.5.json`.
 The signed tag and GitHub Release `isImmutable: true` provide the external
 release anchors; the root `RELEASE-CLOSEOUT.json` records the same closed and
-verified `v0.11.0` evidence.
+verified `v0.12.0` evidence.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
 workflow; the tag workflow validates only the strict prepared/pending source
 record before publication.
@@ -304,14 +305,14 @@ thread IDs by hand is `v0.9.5` with a different number.
 ```text
 v0.10  agent-completable golden path     only product increment
 v0.11  agent-recoverable interruption    the agent continues without a human
-v0.12  independent proof                 evidence, not surface
+v0.12  independent proof                 evidence and shipped surfaces
 v1.0   product closeout                  docs, security, Codex window
 ```
 
 Each of `v0.10`, `v0.11`, and `v0.12` is published and used as the
 version-pinned control plane before the next increment starts. `v1.0` is
-tagged only after `v0.12` passes. Protocol defects found during `v0.12`
-return to a `v0.11.x` patch; they do not open a feature series.
+tagged only after `v0.12` passes. Protocol defects found after `v0.12`
+return to a `v0.12.x` patch; they do not open a feature series.
 
 If time is short, implement in this order: SYN-100, SYN-101, SYN-102,
 SYN-110, SYN-111, SYN-121. The rest is hygiene.
@@ -367,17 +368,24 @@ does not advance across the crash.
 ## v0.12 — Independent proof
 
 Goal: satisfy the existing `v1.0` readiness criteria with published artifacts.
-No new command surface unless a drill finds a hole; those holes return to
-`v0.11.x`.
+The release also ships bounded delegation and independent approval surfaces;
+future protocol holes return to `v0.12.x` patches rather than opening a new
+feature series.
 
-Status: planned.
+Status: delivered and publicly verified for the `v0.12.0` package and its
+bounded delegation/approval surfaces. The package includes a validated
+concurrency policy and CLI App Server runner, zero-write observer
+leases, typed reviewer/verifier approval lanes, and bounded parallel delegation.
+The broader independent-proof milestone remains in progress, pending the
+SYN-120–SYN-123 pilots, recovery drill, usage evidence, adversarial checks, and
+release gate below.
 
 | ID | Outcome | Depends on | Acceptance gate |
 |---|---|---|---|
-| SYN-120 | Pilot A: this repository on the published `v0.11.x` package | `v0.11` | A real Synod feature that is not closeout or version-truth documentation is delivered with `@ivand890/synod@0.11.x` pinned. The drill includes interruption plus restore of a reviewed dirty checkpoint. The reconstructed fingerprint matches exactly. |
+| SYN-120 | Pilot A: this repository on the published `v0.12.x` package | `v0.12` | A real Synod feature that is not closeout or version-truth documentation is delivered with `@ivand890/synod@0.12.x` pinned. The drill includes interruption plus restore of a reviewed dirty checkpoint. The reconstructed fingerprint matches exactly. |
 | SYN-121 | Pilot B: an independent repository | SYN-120 | A different repository and domain, preferably a different person. The human only requests the work and does not explain leases. The agent reaches `DONE`. If the human had to know what a bind is, the pilot fails. |
-| SYN-122 | Loop-cost evidence | SYN-120 | Canonical `usage` and coordination reports cover the pilot interval. Compare them to the historical 0.9.x dogfood snapshot (329 supervisor waits, hundreds of millions of tokens). Do not promise savings. If coordination cost does not drop clearly, do not tag `v1.0`; return to `v0.10`/`v0.11`. |
-| SYN-123 | Adversarial gap-fill | `v0.11` | Audit the existing suite and add only missing fail-closed cases: concurrent writers, stale leases, corrupted bundles, hash-chain breaks, unsafe paths, and partial transactions. Do not add a new test framework. |
+| SYN-122 | Loop-cost evidence | SYN-120 | Canonical `usage` and coordination reports cover the pilot interval. Compare them to the historical 0.9.x dogfood snapshot (329 supervisor waits, hundreds of millions of tokens). Do not promise savings. If coordination cost does not drop clearly, do not tag `v1.0`; return to a `v0.12.x` patch or defer the release gate. |
+| SYN-123 | Adversarial gap-fill | `v0.12` | Audit the existing suite and add only missing fail-closed cases: concurrent writers, stale leases, corrupted bundles, hash-chain breaks, unsafe paths, and partial transactions. Do not add a new test framework. |
 
 Release gate: both pilots run on published packages, the recovery drill is
 green, adversarial cases fail closed, and usage reports stay stable on the

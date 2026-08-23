@@ -32,13 +32,17 @@ separation between host, App Server, and canonical wait authority. The strict
 shapes: they do not add persistence, runners, process ownership, spawn/resume
 observation, or an execution plane.
 
-The public `v0.11.0` release retains the v0.9.4 injected
-`HostDelegationAdapter` for host-owned spawn identity, bind authorization, wait
-observation, and lease liveness. Without that adapter, the standalone CLI fails
-closed or returns an incomplete handoff; Synod never claims execution
-ownership. Proposal evidence also keeps independent Git lanes:
+The public `v0.12.0` release supports the Codex delegation paths. On a supported
+Codex CLI without an injected adapter, `delegate start` selects Synod's owned
+CLI App Server Path A to reserve, spawn, bind, and authorize the worker, then
+retains the exact owner for task-aware wait. An injected
+`HostDelegationAdapter` remains supported for host-owned spawn identity, bind
+authorization, wait observation, and lease liveness. Desktop returns an
+explicit host spawn/wait handoff and never starts a child App Server;
+unsupported or non-Codex contexts fail closed. Synod does not claim broad
+execution ownership. Proposal evidence also keeps independent Git lanes:
 `proposalAdded`, `gitTracked`, `staged`, and `committed` are separate facts,
-not one completion signal. The 0.9.5 hotfix, retained in 0.11.0, also makes the `--task`,
+not one completion signal. The 0.9.5 hotfix, retained since 0.11.0, also makes the `--task`,
 `--active-only`, and `--changed-since-checkpoint` selectors work through an
 initialized project-local bootstrap while incompatible selector combinations
 still fail closed. The public release requires Node.js `>=22`, and its Codex
