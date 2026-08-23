@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ERROR_CODES } from "../src/errors.js";
-import { evaluateProfile, getProfile, listProfiles, resolveImplementerProfile } from "../src/profiles.js";
+import { evaluateProfile, getProfile, listProfiles, resolveDelegationProfile, resolveImplementerProfile } from "../src/profiles.js";
 import type { ModelCapability } from "../src/profiles.js";
 
 function model(id: string, efforts: string[]): ModelCapability {
@@ -27,6 +27,21 @@ test("resolves the installed implementer role without a model or effort override
   });
   assert.deepEqual(resolveImplementerProfile("portable"), {
     profile: "portable",
+    model: "gpt-5.5",
+    effort: "high"
+  });
+});
+
+test("resolves reviewer and verifier lanes from the installed profile", () => {
+  assert.deepEqual(resolveDelegationProfile("synod-5.6", "reviewer"), {
+    profile: "synod-5.6",
+    role: "reviewer",
+    model: "gpt-5.6-terra",
+    effort: "high"
+  });
+  assert.deepEqual(resolveDelegationProfile("portable", "verifier"), {
+    profile: "portable",
+    role: "verifier",
     model: "gpt-5.5",
     effort: "high"
   });

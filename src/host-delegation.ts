@@ -15,7 +15,7 @@ import {
   type ReserveLeaseOptions
 } from "./orchestration.js";
 import type { OrchestrationDependencies } from "./orchestration.js";
-import type { LeaseScope, TaskLease, TaskLeaseReservation } from "./leases.js";
+import { normalizeLeaseScopePath, type LeaseScope, type TaskLease, type TaskLeaseReservation } from "./leases.js";
 import {
   waitForThreads,
   type HostWaitAdapter,
@@ -24,6 +24,7 @@ import {
   type WaitReport
 } from "./wait.js";
 import { isRecord } from "./validation.js";
+import { isDelegationRole, type DelegationRole } from "./profiles.js";
 
 /** The opaque identity returned by the host. Synod never derives or rewrites it. */
 export type HostOwnerIdentifier = string;
@@ -40,6 +41,7 @@ export interface HostDelegationReservationFence {
 export interface HostDelegationReadOnlyContract {
   taskId: string;
   taskRevision: number;
+  role?: DelegationRole;
   objective: string;
   acceptance: ReadonlyArray<string>;
   verification: ReadonlyArray<string>;
@@ -47,6 +49,10 @@ export interface HostDelegationReadOnlyContract {
   writeAuthorized: false;
   /** Worker-only execution guidance; canonical proposal mutations stay supervisor-owned. */
   proposalGuidance: string;
+  /** Exact sealed proposal context supplied to reviewer/verifier lanes. */
+  proposalBundleId?: string;
+  proposalRevision?: number;
+  ownedPaths?: ReadonlyArray<string>;
   instruction: "analysis may begin; writes, worktrees, and implementation commands wait for bind authorization";
 }
 
@@ -56,6 +62,7 @@ export interface HostDelegationSpawnRequest {
   reservation: TaskLeaseReservation;
   reservationFence: HostDelegationReservationFence;
   writeAuthorized: false;
+  role?: DelegationRole;
   readOnlyContract: HostDelegationReadOnlyContract;
   /** Alias retained for adapters that call this handoff the initial contract. */
   initialContract: HostDelegationReadOnlyContract;
@@ -85,7 +92,8 @@ export interface HostDelegationAuthorizeRequest {
   taskId: string;
   directory: string;
   ownerThread: HostOwnerIdentifier;
-  writeAuthorized: true;
+  writeAuthorized: boolean;
+  role?: DelegationRole;
   reservation: TaskLeaseReservation;
   lease: TaskLease;
   leaseFence: HostDelegationLeaseFence;
@@ -195,6 +203,7 @@ export interface HostDelegationResult {
   reservationFence: HostDelegationReservationFence;
   spawn: HostDelegationSpawnResult;
   ownerThread: HostOwnerIdentifier;
+  role: DelegationRole;
   lease: TaskLease;
   leaseFence: HostDelegationLeaseFence;
   authorization: HostAuthorizationReceipt;
@@ -205,9 +214,102 @@ export interface HostDelegationResult {
 }
 
 function taskIdentifier(options: HostDelegationOptions): string {
-  const id = String(options.id || options.taskId || "").trim();
+  const id = String(options.id || options.taskId || "").trim().toUpperCase();
   if (!id) throw new SynodError(ERROR_CODES.TASK_INVALID, "Host delegation requires a task ID.");
   return id;
+}
+
+interface PreparedDelegationReservation {
+  role: DelegationRole;
+  read: unknown[];
+  write: unknown[];
+  readTree: unknown[];
+  writeTree: unknown[];
+  observer?: true;
+}
+
+function sortedPaths(values: unknown[]): string[] {
+  return values.map(value => normalizeLeaseScopePath(value)).sort((left, right) => left.localeCompare(right));
+}
+
+function roleProposalGuidance(role: DelegationRole): string {
+  return role === "implementer"
+    ? "Worker may implement and run the listed verification only after bind; do not accept, verify, checkpoint, or mutate canonical Synod state. Report the exact changed paths and verification result so the supervisor can seal the exact proposal."
+    : `${role} may inspect only the exact sealed proposal and owned paths after bind; never write files, request write authorization, submit delivery, accept, verify, checkpoint, or mutate canonical Synod state. Report the decision and evidence to the supervisor.`;
+}
+
+function approvalNextCommand(
+  taskId: string,
+  role: Exclude<DelegationRole, "implementer">,
+  revision: number,
+  proposalBundleId: string,
+  ownerThread: string
+): HostNextCommand {
+  return {
+    operation: "task.approval",
+    argv: [
+      "task", "approve", taskId,
+      "--role", role,
+      "--revision", String(revision),
+      "--proposal-bundle-id", proposalBundleId,
+      "--owner-thread", ownerThread
+    ],
+    requirements: ["decision", "evidence", "exact-sealed-proposal"]
+  };
+}
+
+/** Validate role/state/scope before the first durable reservation mutation. */
+async function prepareDelegationReservation(
+  id: string,
+  options: HostDelegationOptions,
+  dependencies: HostDelegationDependencies
+): Promise<PreparedDelegationReservation> {
+  const role = options.role ?? "implementer";
+  if (!isDelegationRole(role)) {
+    throw new SynodError(ERROR_CODES.DELEGATION_ROLE_INVALID, `Unsupported delegation role: ${String(role)}.`, {
+      details: { role, allowed: ["implementer", "reviewer", "verifier"] }
+    });
+  }
+  if (role === "implementer") {
+    return {
+      role,
+      read: options.read || [],
+      write: options.write || [],
+      readTree: options.readTree || [],
+      writeTree: options.writeTree || []
+    };
+  }
+  if ((options.write || []).length > 0 || (options.writeTree || []).length > 0 || (options.readTree || []).length > 0) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${role} delegation accepts only exact read file scopes.`, {
+      details: { role, write: options.write || [], writeTree: options.writeTree || [], readTree: options.readTree || [] }
+    });
+  }
+  const read = dependencies.read || readOrchestration;
+  const canonical = await read(path.resolve(options.directory || "."));
+  const task = canonical.state.tasks[id];
+  if (!task) {
+    throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${id} does not exist.`, { details: { taskId: id } });
+  }
+  const expectedState = role === "reviewer" ? "REVIEW" : "ACCEPTED";
+  if (task.state !== expectedState) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${role} delegation is only valid from ${expectedState}.`, {
+      details: { taskId: id, role, state: task.state }
+    });
+  }
+  const proposal = task.proposal;
+  if (!proposal || proposal.status !== "SEALED" || proposal.revision !== task.revision) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_REQUIRED, `${role} delegation requires the current sealed proposal.`, {
+      details: { taskId: id, role, revision: task.revision, proposal: proposal ?? null }
+    });
+  }
+  const expected = sortedPaths(proposal.ownedPaths);
+  const requested = (options.read || []).length > 0 ? sortedPaths(options.read || []) : expected;
+  if (requested.length !== expected.length || requested.some((item, index) => item !== expected[index])) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${role} delegation read scopes must exactly cover proposal-owned paths.`, {
+      details: { taskId: id, role, expectedPaths: expected, requestedPaths: requested }
+    });
+  }
+  return { role, read: requested, write: [], readTree: [], writeTree: [], observer: true };
 }
 
 function reservationFence(reservation: TaskLeaseReservation): HostDelegationReservationFence {
@@ -584,28 +686,48 @@ export async function startHostDelegation(
     throw new SynodError(ERROR_CODES.HOST_ADAPTER_INVALID, "The injected host adapter must expose spawn and authorize methods.");
   }
   const id = taskIdentifier(options);
+  const prepared = await prepareDelegationReservation(id, options, dependencies);
   const reserve = dependencies.reserve || reserveTaskLease;
   const reserved = await reserve({
     id,
     directory: options.directory || ".",
-    read: options.read || [],
-    write: options.write || [],
-    readTree: options.readTree || [],
-    writeTree: options.writeTree || [],
+    role: prepared.role,
+    read: prepared.read,
+    write: prepared.write,
+    readTree: prepared.readTree,
+    writeTree: prepared.writeTree,
+    ...(prepared.observer ? { observer: true } : {}),
     ...(options.reservationTtlSeconds === undefined ? {} : { reservationTtlSeconds: options.reservationTtlSeconds }),
     ...(options.actor === undefined ? {} : { actor: options.actor })
   }, dependencies);
   const reservation = reserved.reservation;
+  if (prepared.role !== "implementer"
+    && (reservation.role !== prepared.role || reservation.observer !== true)) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${prepared.role} reservation was not preserved as an observer-only role lane.`, {
+      details: { role: prepared.role, reservation }
+    });
+  }
+  if (prepared.role !== "implementer" && !reserved.task.proposal) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_REQUIRED, `${prepared.role} delegation requires the exact sealed proposal in the reservation result.`, {
+      details: { taskId: id, role: prepared.role }
+    });
+  }
   const reservedFence = reservationFence(reservation);
   const readOnlyContract: HostDelegationReadOnlyContract = {
     taskId: id,
     taskRevision: reservation.taskRevision,
+    role: prepared.role,
     objective: typeof reserved.task.objective === "string" ? reserved.task.objective : "",
     acceptance: reserved.task.acceptance?.criteria || [],
     verification: reserved.task.verification?.commands || [],
     scopes: reservation.scopes,
     writeAuthorized: false,
-    proposalGuidance: "Worker may implement and run the listed verification only after bind; do not accept, verify, checkpoint, or mutate canonical Synod state. Report the exact changed paths and verification result so the supervisor can seal the exact proposal.",
+    proposalGuidance: roleProposalGuidance(prepared.role),
+    ...(prepared.role !== "implementer" && reserved.task.proposal ? {
+      proposalBundleId: reserved.task.proposal.bundleId,
+      proposalRevision: reserved.task.proposal.revision,
+      ownedPaths: [...reserved.task.proposal.ownedPaths]
+    } : {}),
     instruction: "analysis may begin; writes, worktrees, and implementation commands wait for bind authorization"
   };
   const clock = () => {
@@ -618,6 +740,7 @@ export async function startHostDelegation(
     reservation,
     reservationFence: reservedFence,
     writeAuthorized: false,
+    role: prepared.role,
     readOnlyContract,
     initialContract: readOnlyContract,
     contract: readOnlyContract
@@ -740,7 +863,8 @@ export async function startHostDelegation(
       taskId: id,
       directory: options.directory || ".",
       ownerThread,
-      writeAuthorized: true,
+      writeAuthorized: prepared.role === "implementer",
+      role: prepared.role,
       reservation,
       lease: bound.lease,
       leaseFence: leaseFence(bound.lease)
@@ -748,6 +872,19 @@ export async function startHostDelegation(
     authorization = authorizationReceipt(value);
     if (authorization.status === "failed" || authorization.status === "rejected" || authorization.status === "denied") {
       throw authorizationFailure(authorization, { task: bound.task, lease: bound.lease, ownerThread });
+    }
+    if (prepared.role !== "implementer" && bound.task.proposal) {
+      authorization = {
+        ...authorization,
+        approvalRequired: true,
+        nextCommand: approvalNextCommand(
+          id,
+          prepared.role,
+          bound.task.proposal.revision,
+          bound.task.proposal.bundleId,
+          ownerThread
+        )
+      };
     }
   } catch (error) {
     const classified = classifyPostBindChildLoss(error);
@@ -778,6 +915,7 @@ export async function startHostDelegation(
     reservationFence: reservedFence,
     spawn: spawned,
     ownerThread,
+    role: prepared.role,
     lease: bound.lease,
     leaseFence: leaseFence(bound.lease),
     authorization,
@@ -1053,17 +1191,24 @@ function readOnlyContractFor(
     objective: string;
     acceptance: { criteria: ReadonlyArray<string> };
     verification: { commands: ReadonlyArray<string> };
+    proposal?: { bundleId: string; revision: number; ownedPaths: ReadonlyArray<string> };
   }
 ): HostDelegationReadOnlyContract {
   return {
     taskId,
     taskRevision: reservation.taskRevision,
+    ...(reservation.role === undefined ? {} : { role: reservation.role }),
     objective: typeof task.objective === "string" ? task.objective : "",
     acceptance: task.acceptance?.criteria || [],
     verification: task.verification?.commands || [],
     scopes: reservation.scopes,
     writeAuthorized: false,
-    proposalGuidance: "Worker may implement and run the listed verification only after bind; do not accept, verify, checkpoint, or mutate canonical Synod state. Report the exact changed paths and verification result so the supervisor can seal the exact proposal.",
+    proposalGuidance: roleProposalGuidance(reservation.role ?? "implementer"),
+    ...((reservation.role === "reviewer" || reservation.role === "verifier") && task.proposal ? {
+      proposalBundleId: task.proposal.bundleId,
+      proposalRevision: task.proposal.revision,
+      ownedPaths: [...task.proposal.ownedPaths]
+    } : {}),
     instruction: "analysis may begin; writes, worktrees, and implementation commands wait for bind authorization"
   };
 }
@@ -1080,18 +1225,32 @@ export async function startHostDelegationHandoff(
     );
   }
   const id = taskIdentifier(options);
+  const prepared = await prepareDelegationReservation(id, options, dependencies);
   const reserve = dependencies.reserve || reserveTaskLease;
   const reserved = await reserve({
     id,
     directory: options.directory || ".",
-    read: options.read || [],
-    write: options.write || [],
-    readTree: options.readTree || [],
-    writeTree: options.writeTree || [],
+    role: prepared.role,
+    read: prepared.read,
+    write: prepared.write,
+    readTree: prepared.readTree,
+    writeTree: prepared.writeTree,
+    ...(prepared.observer ? { observer: true } : {}),
     ...(options.reservationTtlSeconds === undefined ? {} : { reservationTtlSeconds: options.reservationTtlSeconds }),
     ...(options.actor === undefined ? {} : { actor: options.actor })
   }, dependencies);
   const reservation = reserved.reservation;
+  if (prepared.role !== "implementer"
+    && (reservation.role !== prepared.role || reservation.observer !== true)) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${prepared.role} reservation was not preserved as an observer-only role lane.`, {
+      details: { role: prepared.role, reservation }
+    });
+  }
+  if (prepared.role !== "implementer" && !reserved.task.proposal) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_REQUIRED, `${prepared.role} delegation requires the exact sealed proposal in the reservation result.`, {
+      details: { taskId: id, role: prepared.role }
+    });
+  }
   const reservedFence = reservationFence(reservation);
   const runtime = dependencies.hostRuntimeResolver?.() || resolveCodexRuntime();
   return {
@@ -1158,7 +1317,11 @@ export async function completeHostDelegation(
         taskId: id,
         directory: targetDirectory,
         ownerThread,
-        writeAuthorized: true,
+        // Reservations from the pre-role API omit role and are legacy
+        // implementer leases. Only explicit reviewer/verifier roles are
+        // observer-only at this boundary.
+        writeAuthorized: reservation.role === undefined || reservation.role === "implementer",
+        ...(reservation.role === undefined ? {} : { role: reservation.role }),
         reservation,
         lease: bound.lease,
         leaseFence: leaseFence(bound.lease)
@@ -1177,6 +1340,19 @@ export async function completeHostDelegation(
   } else {
     authorization = { status: "accepted", hostNotificationRequired: true };
   }
+  if ((reservation.role === "reviewer" || reservation.role === "verifier") && bound.task.proposal) {
+    authorization = {
+      ...authorization,
+      approvalRequired: true,
+      nextCommand: approvalNextCommand(
+        id,
+        reservation.role,
+        bound.task.proposal.revision,
+        bound.task.proposal.bundleId,
+        ownerThread
+      )
+    };
+  }
   return {
     directory: targetDirectory,
     task: bound.task,
@@ -1184,6 +1360,7 @@ export async function completeHostDelegation(
     reservationFence: reservedFence,
     spawn: ownerThread,
     ownerThread,
+    role: reservation.role ?? "implementer",
     lease: bound.lease,
     leaseFence: leaseFence(bound.lease),
     authorization,

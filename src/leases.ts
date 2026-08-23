@@ -6,6 +6,7 @@ import {
 } from "./checkpoint.js";
 import { ERROR_CODES, SynodError } from "./errors.js";
 import { isRecord } from "./validation.js";
+import type { DelegationRole } from "./profiles.js";
 
 export const LEASE_BASELINES_PATH = ".synod/lease-baselines.json";
 export const LEASE_BASELINES_SCHEMA_VERSION = 1;
@@ -51,6 +52,7 @@ export interface TaskLeaseReservation {
   taskId: string;
   taskRevision: number;
   executor: string;
+  role?: DelegationRole;
   scopes: LeaseScope[];
   observer?: true;
   reservedAt: string;
@@ -67,6 +69,7 @@ export interface TaskLease {
   taskRevision: number;
   ownerThread: string;
   executor: string;
+  role?: DelegationRole;
   scopes: LeaseScope[];
   observer?: true;
   acquiredAt: string;
@@ -323,6 +326,10 @@ function hasValidObserverScopes(value: { observer?: unknown; scopes: LeaseScope[
   return value.scopes.length > 0 && value.scopes.every(scope => scope.access === "read");
 }
 
+function isDelegationRole(value: unknown): value is DelegationRole {
+  return value === "implementer" || value === "reviewer" || value === "verifier";
+}
+
 export function isTaskLease(value: unknown): value is TaskLease {
   return isRecord(value)
     && isUuid(value.id)
@@ -334,9 +341,12 @@ export function isTaskLease(value: unknown): value is TaskLease {
     && value.ownerThread.length > 0
     && typeof value.executor === "string"
     && value.executor.length > 0
+    && (value.role === undefined || isDelegationRole(value.role))
     && Array.isArray(value.scopes)
     && value.scopes.length > 0
     && value.scopes.every(isLeaseScope)
+    && (value.role === undefined || value.role === "implementer"
+      || (value.observer === true && value.scopes.every(scope => scope.access === "read")))
     && hasValidObserverScopes({ ...value, scopes: value.scopes })
     && validIsoTimestamp(value.acquiredAt)
     && validIsoTimestamp(value.heartbeatAt)
@@ -375,9 +385,12 @@ export function isTaskLeaseReservation(value: unknown): value is TaskLeaseReserv
     && isNonNegativeInteger(value.taskRevision)
     && typeof value.executor === "string"
     && value.executor.length > 0
+    && (value.role === undefined || isDelegationRole(value.role))
     && Array.isArray(value.scopes)
     && value.scopes.length > 0
     && value.scopes.every(isLeaseScope)
+    && (value.role === undefined || value.role === "implementer"
+      || (value.observer === true && value.scopes.every(scope => scope.access === "read")))
     && hasValidObserverScopes({ ...value, scopes: value.scopes })
     && validIsoTimestamp(value.reservedAt)
     && validIsoTimestamp(value.expiresAt)

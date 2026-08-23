@@ -21,6 +21,7 @@ import {
   formatOrchestrationStatus,
   heartbeatTaskLease,
   recordCheckpoint,
+  recordTaskApproval,
   recordTaskCorrection,
   recoverTaskLease,
   releaseTaskLease,
@@ -86,6 +87,7 @@ Usage:
   synod bundle restore <bundle> --cwd <directory> [--include-local-docs] [--json]
   synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--correction-limit <n>] [--cwd <directory>] [--json]
   synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
+  synod task approve <task-id> --role <reviewer|verifier> --decision <approved|rejected> --revision <n> --proposal-bundle-id <bundle> --owner-thread <thread-id> --evidence <reference> [--actor <id>] [--cwd <directory>] [--json]
   synod task correct <task-id> --revision <n> --reason <text> --evidence <reference> [--actor <id>] [--cwd <directory>] [--json]
   synod task override <task-id> --additional-rounds <n> --approver <id> --reference <ref> --reason <text> --evidence <ref> [--cwd <directory>] [--json]
   synod task split <task-id> --replacement <task-id> --replacement <task-id> --reason <text> --evidence <ref> [--cwd <directory>] [--json]
@@ -122,7 +124,7 @@ Usage:
   synod profiles [--json]
   synod usage [--session <thread-id>] [--cwd <directory>] [--since-event <sequence|id> | --since-checkpoint | --task <task-id>] [--until-event <sequence|id>] [--price-file <path>] [--by-model] [--json]
   synod wait (--task <task-id> | --thread <thread-id>) [--task <task-id>] [--thread <thread-id>] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
-  synod delegate start <task-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--actor <id>] [--evidence <reference>] [--reservation-ttl-seconds <n>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--wait] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
+  synod delegate start <task-id> [--role <implementer|reviewer|verifier>] [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--actor <id>] [--evidence <reference>] [--reservation-ttl-seconds <n>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--wait] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
   synod delegate complete <task-id> --owner-thread <thread-id> [--actor <id>] [--evidence <reference>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
   synod --help
   synod --version
@@ -197,6 +199,7 @@ Options:
               generated STATUS.md and other ignored files remain excluded.
   Delegate start options:
     --actor <id>                   Record the supervisor or host actor identity.
+    --role <role>                  Select implementer, reviewer, or verifier (default implementer).
     --evidence <reference>         Attach scoped evidence to a correction bind.
     --reservation-ttl-seconds <n>  Bound the pre-bind reservation lifetime.
     --ttl-seconds <n>              Bound the post-bind writer lease lifetime.
@@ -593,11 +596,13 @@ export async function run(
         createCliAdapter: () => dependencies.cliAppServerAdapterFactory?.({
           runtime,
           ...(installedProfile === undefined ? {} : { profile: installedProfile }),
+          ...(options.role === undefined ? {} : { role: options.role }),
           ...(options.cwd === undefined ? {} : { directory: options.cwd })
         })
           ?? createCliAppServerAdapter({
             runtime,
             ...(installedProfile === undefined ? {} : { profile: installedProfile }),
+            ...(options.role === undefined ? {} : { role: options.role }),
             ...(options.cwd === undefined ? {} : { directory: options.cwd })
           })
       });
@@ -615,6 +620,7 @@ export async function run(
           id: options.id,
           directory: options.cwd,
           actor: options.actor,
+          ...(options.role === undefined ? {} : { role: options.role }),
           read: options.read,
           write: options.write,
           readTree: options.readTree,
@@ -647,6 +653,7 @@ export async function run(
         id: options.id,
         directory: options.cwd,
         actor: options.actor,
+        ...(options.role === undefined ? {} : { role: options.role }),
         read: options.read,
         write: options.write,
         readTree: options.readTree,
@@ -665,7 +672,7 @@ export async function run(
         ownerThread: result.ownerThread,
         lease: result.lease,
         authorization: result.authorization,
-        ...(isRecord(result.authorization) && result.authorization.proposalRequired === true
+        ...(isRecord(result.authorization) && (result.authorization.proposalRequired === true || result.authorization.approvalRequired === true)
           ? { nextCommand: result.authorization.nextCommand }
           : {}),
         ...(result.wait ? { wait: result.wait } : {}),
@@ -677,10 +684,10 @@ export async function run(
         const diagnostics = result.wait?.diagnostics || {};
         printJsonEnvelope(successEnvelope("delegate", data, { diagnostics } ), output, view);
       } else {
-        output.log(`Delegated ${result.task.id} to ${result.ownerThread}; write authorized ${result.authorization.status}${result.authorization.proposalRequired === true ? "; canonical proposal still required." : "."}`);
+        output.log(`Delegated ${result.task.id} to ${result.ownerThread}; write authorized ${result.authorization.status}${result.authorization.proposalRequired === true ? "; canonical proposal still required." : result.authorization.approvalRequired === true ? "; typed approval record still required." : "."}`);
         if (result.wait) output.log(formatWaitReport(result.wait));
       }
-      return result.wait?.incomplete || result.authorization.proposalRequired === true ? 1 : 0;
+      return result.wait?.incomplete || result.authorization.proposalRequired === true || result.authorization.approvalRequired === true ? 1 : 0;
     }
 
     if (command === "wait") {
@@ -858,6 +865,11 @@ export async function run(
           output.log(`Transitioned ${result.task.id} to ${result.task.state} at revision ${result.task.revision}.`);
           for (const item of result.evidence) output.log(`Recorded evidence ${item.id}: ${item.kind} @ revision ${item.revision}.`);
         }
+      } else if (options.action === "approve") {
+        const result = await recordTaskApproval(options, dependencies);
+        const data = { task: result.task, approval: result.approval, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
+        if (options.json) printJsonEnvelope(successEnvelope("task", { action: "approve", ...data }), output, view);
+        else output.log(`Recorded ${result.approval.role} ${result.approval.decision} approval for ${result.task.id} revision ${result.approval.revision}.`);
       } else if (options.action === "correct") {
         const result = await recordTaskCorrection(options, dependencies);
         const data = { task: result.task, correction: result.correction, evidence: result.evidence, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };

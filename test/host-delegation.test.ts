@@ -149,6 +149,53 @@ test("host delegation reserves, spawns read-only, binds the opaque owner, then a
   assert.equal(result.authorization.status, "authorized");
 });
 
+test("reviewer handoff validates the exact sealed proposal and preserves observer authority", async () => {
+  const proposal = {
+    status: "SEALED",
+    revision: 1,
+    bundleId: "sha256:proposal",
+    ownedPaths: ["src/owned.ts"]
+  } as never;
+  const reviewTask = {
+    ...task,
+    state: "REVIEW",
+    revision: 1,
+    proposal,
+    acceptance: { criteria: [] },
+    verification: { commands: [] }
+  } as unknown as OrchestrationTask;
+  const reviewerReservation = {
+    ...reservation,
+    generation: 1,
+    taskRevision: 1,
+    role: "reviewer",
+    observer: true,
+    scopes: [{ path: "src/owned.ts", access: "read", kind: "file" }]
+  } as unknown as TaskLeaseReservation;
+  let reservedOptions: Record<string, unknown> | undefined;
+  const handoff = await startHostDelegationHandoff({
+    id: "T-HOST",
+    role: "reviewer",
+    read: ["src/owned.ts"]
+  }, {
+    read: async () => ({ state: { tasks: { "T-HOST": reviewTask } } } as never),
+    reserve: async options => {
+      reservedOptions = options as unknown as Record<string, unknown>;
+      return { task: reviewTask, reservation: reviewerReservation, writeAuthorized: false as const, state: {} } as never;
+    },
+    hostRuntimeResolver: () => ({ surface: "desktop", resolved: true, executableSource: "desktop-process", executable: "codex" })
+  });
+
+  assert.equal(reservedOptions?.role, "reviewer");
+  assert.equal(reservedOptions?.observer, true);
+  assert.deepEqual(reservedOptions?.read, ["src/owned.ts"]);
+  assert.equal(handoff.readOnlyContract.role, "reviewer");
+  assert.equal(handoff.readOnlyContract.writeAuthorized, false);
+  assert.equal(handoff.readOnlyContract.proposalBundleId, "sha256:proposal");
+  assert.deepEqual(handoff.readOnlyContract.ownedPaths, ["src/owned.ts"]);
+  assert.match(handoff.readOnlyContract.proposalGuidance, /never write files/);
+});
+
 test("spawn failure cancels the complete reservation fence", async () => {
   let cancelled: Record<string, unknown> | undefined;
   let closed = 0;
@@ -564,6 +611,41 @@ test("Codex handoff reserves and complete binds the stored fence", async () => {
   assert.equal(completed.ownerThread, "opaque-owner");
   assert.equal(completed.authorization.status, "accepted");
   assert.equal(completed.authorization.hostNotificationRequired, true);
+});
+
+test("complete authorizes legacy role-less reservations as implementers", async () => {
+  let authorizedRequest: Record<string, unknown> | undefined;
+  const adapter: HostDelegationAdapter = {
+    async spawn() { return "unused"; },
+    async authorize(request) {
+      authorizedRequest = request as unknown as Record<string, unknown>;
+      return { status: "authorized" };
+    }
+  };
+  const completed = await completeHostDelegation({
+    id: "T-HOST",
+    ownerThread: "legacy-owner",
+    adapter
+  }, {
+    ...dependencies({
+      bind: async (options = {}) => ({
+        task,
+        lease: lease(options.ownerThread),
+        writeAuthorized: true as const,
+        evidence: [],
+        state: { checkpoint: {}, lastEvent: {} }
+      })
+    }),
+    read: (async () => ({
+      state: { tasks: { "T-HOST": { id: "T-HOST", leaseReservation: reservation } } },
+      events: [],
+      leaseBaselines: { baselines: [] }
+    })) as never
+  });
+
+  assert.equal(authorizedRequest?.writeAuthorized, true);
+  assert.equal(authorizedRequest?.role, undefined);
+  assert.equal(completed.role, "implementer");
 });
 
 test("handoff --wait without an adapter fails closed", async () => {

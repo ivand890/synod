@@ -65,6 +65,7 @@ function compactLease(value: unknown): unknown {
     "taskRevision",
     "ownerThread",
     "executor",
+    "role",
     "observer",
     "acquiredAt",
     "heartbeatAt",
@@ -85,6 +86,7 @@ function compactReservation(value: unknown): unknown {
     "taskId",
     "taskRevision",
     "executor",
+    "role",
     "observer",
     "reservedAt",
     "expiresAt",
@@ -131,6 +133,20 @@ function compactProposal(value: unknown): unknown {
   return result;
 }
 
+function compactApproval(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  return pick(value, [
+    "role",
+    "decision",
+    "ownerThread",
+    "revision",
+    "proposalBundleId",
+    "actor",
+    "recordedAt",
+    "consumedAt"
+  ]);
+}
+
 function compactRecovery(value: unknown): unknown {
   if (!isRecord(value)) return value;
   const result = pick(value, ["status", "detectedAt", "reason", "decision"]);
@@ -167,7 +183,8 @@ function compactTask(value: unknown): unknown {
     "blockedFrom",
     "supersededReason",
     "splitFrom",
-    "preLease"
+    "preLease",
+    "approvalPolicy"
   ]);
   if (isRecord(value.correctionPolicy)) result.correctionPolicy = pick(value.correctionPolicy, ["limit", "used"]);
   if (isRecord(value.acceptance)) result.acceptance = pick(value.acceptance, ["status", "revision"]);
@@ -176,6 +193,9 @@ function compactTask(value: unknown): unknown {
   result.leaseReservation = isRecord(value.leaseReservation) ? compactReservation(value.leaseReservation) : null;
   if (isRecord(value.reservation)) result.reservation = compactReservation(value.reservation);
   result.proposal = isRecord(value.proposal) ? compactProposal(value.proposal) : null;
+  if (Array.isArray(value.approvals)) {
+    result.approvals = value.approvals.map(item => compactApproval(item));
+  }
   result.recovery = isRecord(value.recovery) ? compactRecovery(value.recovery) : null;
   if (isRecord(value.budget)) result.budget = compactBudget(value.budget);
   if (Array.isArray(value.evidence)) result.evidenceCount = value.evidence.length;

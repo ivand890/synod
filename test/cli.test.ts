@@ -1533,6 +1533,19 @@ test("read-only lease scopes acquire observer leases through the CLI", async () 
   }
 });
 
+test("delegate start parses only the three supported delegation roles", () => {
+  const roleOf = (value: ReturnType<typeof parseDelegateArgs>) => "role" in value ? value.role : undefined;
+  assert.equal(roleOf(parseDelegateArgs(["start", "T-001"])), undefined);
+  assert.equal(roleOf(parseDelegateArgs(["start", "T-001", "--role", "reviewer"])), "reviewer");
+  assert.equal(roleOf(parseDelegateArgs(["start", "T-001", "--role", "verifier"])), "verifier");
+  assert.throws(
+    () => parseDelegateArgs(["start", "T-001", "--role", "explorer"]),
+    error => error instanceof Error
+      && "code" in error
+      && (error as Error & { code?: string }).code === ERROR_CODES.DELEGATION_ROLE_INVALID
+  );
+});
+
 test("lease reservation commands expose the pre-spawn and post-bind authorization boundary", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-reservation-json-test-"));
   const { messages, output } = capturedOutput();

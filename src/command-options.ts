@@ -1,6 +1,7 @@
 import process from "node:process";
 import { ERROR_CODES, SynodError } from "./errors.js";
 import { parseOutputViewArgs } from "./output-view.js";
+import type { DelegationRole } from "./profiles.js";
 
 export interface HelpOptions {
   help: true;
@@ -47,6 +48,7 @@ export interface DelegateStartCommandOptions {
   cwd: string;
   json: boolean;
   actor: string;
+  role?: DelegationRole;
   read: string[];
   write: string[];
   readTree: string[];
@@ -250,6 +252,16 @@ export interface TaskTransitionOptions extends TaskCommonOptions {
   evidence: string[];
 }
 
+export interface TaskApprovalOptions extends TaskCommonOptions {
+  action: "approve";
+  role: "reviewer" | "verifier";
+  decision: "approved" | "rejected";
+  revision: number;
+  proposalBundleId: string;
+  ownerThread: string;
+  evidence: string[];
+}
+
 export interface TaskCorrectionOptions extends TaskCommonOptions {
   action: "correct";
   reason: string;
@@ -280,7 +292,7 @@ export interface TaskNextOptions {
   actor: string;
 }
 
-export type TaskOptions = TaskAddOptions | TaskTransitionOptions | TaskCorrectionOptions | TaskOverrideOptions | TaskSplitOptions | TaskNextOptions;
+export type TaskOptions = TaskAddOptions | TaskTransitionOptions | TaskApprovalOptions | TaskCorrectionOptions | TaskOverrideOptions | TaskSplitOptions | TaskNextOptions;
 
 export interface ProposalSubmitOptions {
   action: "submit";
@@ -657,6 +669,7 @@ export function parseDelegateArgs(args: string[]): DelegateCommandOptions | Help
     timeoutMs: 5 * 60_000,
     pollIntervalMs: 1_000
   };
+  let role: DelegationRole | undefined;
   let timeoutSpecified = false;
   let pollIntervalSpecified = false;
   for (let index = 2; index < args.length; index += 1) {
@@ -666,7 +679,7 @@ export function parseDelegateArgs(args: string[]): DelegateCommandOptions | Help
     if (arg === "--json") { options.json = true; continue; }
     if (arg === "--wait") { options.wait = true; continue; }
     const valueOptions = [
-      "--cwd", "--actor", "--read", "--write", "--read-tree", "--write-tree", "--evidence",
+      "--cwd", "--actor", "--role", "--read", "--write", "--read-tree", "--write-tree", "--evidence",
       "--reservation-ttl-seconds", "--ttl-seconds", "--heartbeat-seconds", "--timeout-seconds", "--poll-interval-ms"
     ];
     if (!valueOptions.includes(arg)) {
@@ -676,6 +689,14 @@ export function parseDelegateArgs(args: string[]): DelegateCommandOptions | Help
     const value = optionValue(args, index, arg);
     if (arg === "--cwd") options.cwd = value;
     else if (arg === "--actor") options.actor = value;
+    else if (arg === "--role") {
+      if (value !== "implementer" && value !== "reviewer" && value !== "verifier") {
+        throw new SynodError(ERROR_CODES.DELEGATION_ROLE_INVALID, `Delegate start role must be implementer, reviewer, or verifier.`, {
+          details: { role: value, allowed: ["implementer", "reviewer", "verifier"] }
+        });
+      }
+      role = value;
+    }
     else if (arg === "--read") options.read.push(value);
     else if (arg === "--write") options.write.push(value);
     else if (arg === "--read-tree") options.readTree.push(value);
@@ -713,7 +734,7 @@ export function parseDelegateArgs(args: string[]): DelegateCommandOptions | Help
       throw new SynodError(ERROR_CODES.LEASE_INVALID, `Delegate start requires an integer value for ${name}.`, { details: { option: name } });
     }
   }
-  return { ...options, evidence: [...new Set(options.evidence)] };
+  return { ...options, ...(role === undefined ? {} : { role }), evidence: [...new Set(options.evidence)] };
 }
 
 export function parseCheckpointArgs(args: string[]): CheckpointOptions | HelpOptions {
@@ -1148,7 +1169,7 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   args = parseOutputViewArgs(args).args;
   const action = args[0];
   if (!action || action === "-h" || action === "--help") return { help: true };
-  if (!["add", "transition", "correct", "override", "split", "next"].includes(action)) {
+  if (!["add", "transition", "approve", "approval", "record-approval", "correct", "override", "split", "next"].includes(action)) {
     throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unknown task action: ${action}`, { details: { action } });
   }
   if (hasHelpFlagAfterAction(args)) return { help: true };
@@ -1182,6 +1203,10 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   let additionalRounds: number | undefined;
   let approver: string | undefined;
   let reference: string | undefined;
+  let role: "reviewer" | "verifier" | undefined;
+  let decision: "approved" | "rejected" | undefined;
+  let proposalBundleId: string | undefined;
+  let ownerThread: string | undefined;
   const acceptance: string[] = [];
   const verification: string[] = [];
   const dependsOn: string[] = [];
@@ -1200,7 +1225,8 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
     const valueOptions = [
       "--cwd", "--objective", "--executor", "--actor", "--reason",
       "--acceptance", "--verification", "--depends-on", "--evidence", "--revision",
-      "--correction-limit", "--additional-rounds", "--approver", "--reference", "--replacement"
+      "--correction-limit", "--additional-rounds", "--approver", "--reference", "--replacement",
+      "--role", "--decision", "--proposal-bundle-id", "--owner-thread"
     ];
     if (valueOptions.includes(arg)) {
       const value = optionValue(args, index, arg);
@@ -1216,6 +1242,20 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
       else if (arg === "--replacement") replacements.push(value);
       else if (arg === "--approver") approver = value;
       else if (arg === "--reference") reference = value;
+      else if (arg === "--role") {
+        if (value !== "reviewer" && value !== "verifier") {
+          throw new SynodError(ERROR_CODES.APPROVAL_INVALID, "Task approval role must be reviewer or verifier.", { details: { role: value } });
+        }
+        role = value;
+      }
+      else if (arg === "--decision") {
+        if (value !== "approved" && value !== "rejected") {
+          throw new SynodError(ERROR_CODES.APPROVAL_INVALID, "Task approval decision must be approved or rejected.", { details: { decision: value } });
+        }
+        decision = value;
+      }
+      else if (arg === "--proposal-bundle-id") proposalBundleId = value;
+      else if (arg === "--owner-thread") ownerThread = value;
       else if (arg === "--correction-limit") correctionLimit = /^\d+$/.test(value) ? Number(value) : Number.NaN;
       else if (arg === "--additional-rounds") additionalRounds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
       else revision = /^\d+$/.test(value) ? Number(value) : Number.NaN;
@@ -1229,15 +1269,41 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
 
   if (action === "add") {
     if (revision !== undefined || evidence.length > 0 || reason !== undefined || additionalRounds !== undefined
-      || approver !== undefined || reference !== undefined || replacements.length > 0) {
+      || approver !== undefined || reference !== undefined || replacements.length > 0
+      || role !== undefined || decision !== undefined || proposalBundleId !== undefined || ownerThread !== undefined) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task add received a transition-only option.");
     }
     if (correctionLimit !== undefined && Number.isNaN(correctionLimit)) throw new SynodError(ERROR_CODES.TASK_INVALID, "Task add requires an integer --correction-limit.");
     return { action, id, directory, json, actor, objective, executor, acceptance, verification, dependsOn, ...(correctionLimit === undefined ? {} : { correctionLimit }) };
   }
+  if (action === "approve" || action === "approval" || action === "record-approval") {
+    if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
+      || dependsOn.length > 0 || correctionLimit !== undefined || additionalRounds !== undefined
+      || approver !== undefined || reference !== undefined || replacements.length > 0 || reason !== undefined) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task approval received an unrelated task option.");
+    }
+    if (!role || !decision || revision === undefined || !Number.isSafeInteger(revision) || revision < 0
+      || !proposalBundleId || !ownerThread || evidence.length === 0) {
+      throw new SynodError(ERROR_CODES.APPROVAL_INVALID, "Task approval requires --role, --decision, --revision, --proposal-bundle-id, --owner-thread, and --evidence.");
+    }
+    return {
+      action: "approve",
+      id,
+      directory,
+      json,
+      actor,
+      role,
+      decision,
+      revision,
+      proposalBundleId,
+      ownerThread,
+      evidence: [...new Set(evidence)]
+    };
+  }
   if (action === "override") {
     if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
-      || dependsOn.length > 0 || revision !== undefined || correctionLimit !== undefined || replacements.length > 0) {
+      || dependsOn.length > 0 || revision !== undefined || correctionLimit !== undefined || replacements.length > 0
+      || role !== undefined || decision !== undefined || proposalBundleId !== undefined || ownerThread !== undefined) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task override received an unrelated task option.");
     }
     if (!additionalRounds || Number.isNaN(additionalRounds) || !approver || !reference || !reason || evidence.length === 0) {
@@ -1248,7 +1314,8 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   if (action === "correct") {
     if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
       || dependsOn.length > 0 || correctionLimit !== undefined || additionalRounds !== undefined
-      || approver !== undefined || reference !== undefined || replacements.length > 0) {
+      || approver !== undefined || reference !== undefined || replacements.length > 0
+      || role !== undefined || decision !== undefined || proposalBundleId !== undefined || ownerThread !== undefined) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task correct received an unrelated task option.");
     }
     if (!reason || evidence.length === 0 || revision === undefined || !Number.isSafeInteger(revision) || revision < 0) {
@@ -1259,7 +1326,8 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   if (action === "split") {
     if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
       || dependsOn.length > 0 || revision !== undefined || correctionLimit !== undefined || additionalRounds !== undefined
-      || approver !== undefined || reference !== undefined) {
+      || approver !== undefined || reference !== undefined || role !== undefined || decision !== undefined
+      || proposalBundleId !== undefined || ownerThread !== undefined) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task split received an unrelated task option.");
     }
     if (replacements.length < 2 || !reason || evidence.length === 0) {
@@ -1268,7 +1336,8 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
     return { action, id, directory, json, actor, replacements, reason, evidence };
   }
   if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0 || dependsOn.length > 0
-    || correctionLimit !== undefined || additionalRounds !== undefined || approver !== undefined || reference !== undefined || replacements.length > 0) {
+    || correctionLimit !== undefined || additionalRounds !== undefined || approver !== undefined || reference !== undefined || replacements.length > 0
+    || role !== undefined || decision !== undefined || proposalBundleId !== undefined || ownerThread !== undefined) {
     throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task transition received a task-definition option.");
   }
   if (!to) throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, "Task transition is missing a target state.");

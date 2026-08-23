@@ -42,6 +42,7 @@ import {
   readOrchestration,
   recordTaskCorrection,
   recordCheckpoint,
+  recordTaskApproval,
   recoverTaskLease,
   releaseTaskLease,
   reserveTaskLease,
@@ -625,6 +626,190 @@ test("delivery seals only owned paths and acceptance tolerates disjoint authoriz
     evidence: ["acceptance:T-A:r1"]
   });
   assert.equal(accepted.task.acceptance.status, "accepted");
+});
+
+test("reviewer and verifier approvals bind exact sealed proposals through observer leases", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/t-001.ts"), "sealed\n");
+  const delivered = await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery"] });
+  const proposal = delivered.task.proposal!;
+  const reviewerReservation = await reserveTaskLease({
+    directory,
+    id: "T-001",
+    role: "reviewer",
+    read: proposal.ownedPaths
+  });
+  assert.equal(reviewerReservation.reservation.observer, true);
+  assert.equal(reviewerReservation.reservation.role, "reviewer");
+  assert.equal(reviewerReservation.task.state, "REVIEW");
+  assert.equal(reviewerReservation.task.approvalPolicy, "typed");
+  assert.deepEqual(reviewerReservation.task.proposal, proposal);
+  const reservationState = await readOrchestration(directory);
+  const forgedReservationState = structuredClone(reservationState.state);
+  forgedReservationState.tasks["T-001"]!.leaseReservation!.scopes = [
+    { path: "src/not-owned.ts", access: "read", kind: "file" }
+  ];
+  assert.throws(
+    () => validateOrchestrationState(forgedReservationState),
+    error => error instanceof SynodError && error.code === ERROR_CODES.ORCHESTRATION_STATE_INVALID
+  );
+  const reviewerBound = await bindTaskLease({
+    directory,
+    id: "T-001",
+    ...reservationFence(reviewerReservation.reservation),
+    ownerThread: "reviewer:1"
+  });
+  assert.equal(reviewerBound.writeAuthorized, false);
+  assert.equal(reviewerBound.lease.observer, true);
+  assert.equal(reviewerBound.lease.role, "reviewer");
+  assert.equal(reviewerBound.task.state, "REVIEW");
+  assert.deepEqual(reviewerBound.task.proposal, proposal);
+  const leaseState = await readOrchestration(directory);
+  const forgedLeaseState = structuredClone(leaseState.state);
+  forgedLeaseState.tasks["T-001"]!.lease!.scopes = [
+    { path: "src/not-owned.ts", access: "read", kind: "file" }
+  ];
+  assert.throws(
+    () => validateOrchestrationState(forgedLeaseState),
+    error => error instanceof SynodError && error.code === ERROR_CODES.ORCHESTRATION_STATE_INVALID
+  );
+  await recordTaskApproval({
+    directory,
+    id: "T-001",
+    role: "reviewer",
+    decision: "approved",
+    revision: 1,
+    proposalBundleId: proposal.bundleId,
+    ownerThread: "reviewer:1",
+    evidence: ["reviewer:pass"]
+  });
+  const accepted = await transitionTask({ directory, id: "T-001", to: "ACCEPTED", revision: 1, evidence: ["acceptance"] });
+  assert.equal(accepted.task.state, "ACCEPTED");
+  assert.equal(accepted.task.lease, undefined);
+  assert.equal(accepted.task.approvalPolicy, "typed");
+  assert.equal(accepted.task.approvals?.[0]?.consumedAt !== undefined, true);
+  const acceptedState = await readOrchestration(directory);
+  const duplicateApprovalState = structuredClone(acceptedState.state);
+  duplicateApprovalState.tasks["T-001"]!.approvals = [
+    ...(duplicateApprovalState.tasks["T-001"]!.approvals || []),
+    structuredClone(duplicateApprovalState.tasks["T-001"]!.approvals![0]!)
+  ];
+  assert.throws(
+    () => validateOrchestrationState(duplicateApprovalState),
+    error => error instanceof SynodError && error.code === ERROR_CODES.ORCHESTRATION_STATE_INVALID
+  );
+  await assert.rejects(
+    transitionTask({ directory, id: "T-001", to: "VERIFIED", revision: 1, evidence: ["verification"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.APPROVAL_REQUIRED
+  );
+
+  const verifierReservation = await reserveTaskLease({
+    directory,
+    id: "T-001",
+    role: "verifier",
+    read: proposal.ownedPaths
+  });
+  assert.equal(verifierReservation.task.approvalPolicy, "typed");
+  const verifierBound = await bindTaskLease({
+    directory,
+    id: "T-001",
+    ...reservationFence(verifierReservation.reservation),
+    ownerThread: "verifier:1"
+  });
+  assert.equal(verifierBound.task.state, "ACCEPTED");
+  assert.equal(verifierBound.writeAuthorized, false);
+  await recordTaskApproval({
+    directory,
+    id: "T-001",
+    role: "verifier",
+    decision: "approved",
+    revision: 1,
+    proposalBundleId: proposal.bundleId,
+    ownerThread: "verifier:1",
+    evidence: ["verifier:pass"]
+  });
+  const verified = await transitionTask({ directory, id: "T-001", to: "VERIFIED", revision: 1, evidence: ["verification"] });
+  assert.equal(verified.task.state, "VERIFIED");
+  assert.equal(verified.task.lease, undefined);
+  assert.equal(verified.task.approvals?.[1]?.consumedAt !== undefined, true);
+});
+
+test("rejected and conflicting approvals fail closed without advancing lifecycle state", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireDefaultLease(directory);
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/t-001.ts"), "sealed\n");
+  const delivered = await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery"] });
+  const proposal = delivered.task.proposal!;
+  const reserved = await reserveTaskLease({ directory, id: "T-001", role: "reviewer", read: proposal.ownedPaths });
+  const bound = await bindTaskLease({ directory, id: "T-001", ...reservationFence(reserved.reservation), ownerThread: "reviewer:reject" });
+  await recordTaskApproval({
+    directory,
+    id: "T-001",
+    role: "reviewer",
+    decision: "rejected",
+    revision: 1,
+    proposalBundleId: proposal.bundleId,
+    ownerThread: "reviewer:reject",
+    evidence: ["reviewer:reject"]
+  });
+  const beforeTransition = await readOrchestration(directory);
+  await assert.rejects(
+    transitionTask({ directory, id: "T-001", to: "ACCEPTED", revision: 1, evidence: ["acceptance"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.APPROVAL_REQUIRED
+  );
+  const afterTransition = await readOrchestration(directory);
+  assert.equal(afterTransition.state.lastEvent.sequence, beforeTransition.state.lastEvent.sequence);
+  assert.equal(afterTransition.state.tasks["T-001"]?.state, "REVIEW");
+  await assert.rejects(
+    recordTaskApproval({
+      directory,
+      id: "T-001",
+      role: "reviewer",
+      decision: "approved",
+      revision: 1,
+      proposalBundleId: proposal.bundleId,
+      ownerThread: "reviewer:reject",
+      evidence: ["reviewer:conflict"]
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.APPROVAL_CONFLICT
+  );
+  await assert.rejects(
+    recordTaskApproval({
+      directory,
+      id: "T-001",
+      role: "reviewer",
+      decision: "approved",
+      revision: 1,
+      proposalBundleId: proposal.bundleId,
+      ownerThread: "reviewer:reject",
+      evidence: [{ reference: "must-not-stringify" }]
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.APPROVAL_INVALID
+  );
+  await assert.rejects(
+    recordTaskApproval({
+      directory,
+      id: "T-001",
+      role: "reviewer",
+      decision: "approved",
+      revision: 1,
+      proposalBundleId: proposal.bundleId,
+      ownerThread: "reviewer:reject",
+      evidence: ["   "]
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.APPROVAL_INVALID
+  );
 });
 
 test("delivery rejects unowned and read-scope drift without releasing the lease", async () => {

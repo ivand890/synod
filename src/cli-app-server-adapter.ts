@@ -23,7 +23,7 @@ import {
   type HostDelegationSpawnResult
 } from "./host-delegation.js";
 import { normalizeLeaseScopePath, type LeaseScope } from "./leases.js";
-import { resolveImplementerProfile, type ImplementerProfile } from "./profiles.js";
+import { isDelegationRole, resolveDelegationProfile, type DelegationProfile, type DelegationRole } from "./profiles.js";
 import { isRecord } from "./validation.js";
 import type { WaitLossCause } from "./wait.js";
 
@@ -56,6 +56,7 @@ export interface CliAppServerAdapterOptions {
   runtime: Pick<ResolvedCodexRuntime, "surface" | "executable">;
   /** Profile recorded by the installed Synod manifest. */
   profile?: string | undefined;
+  role?: DelegationRole;
   directory?: string;
   clientFactory?: CliAppServerClientFactory;
   turnCompletionTimeoutMs?: number;
@@ -65,11 +66,12 @@ export interface CliAppServerAdapterOptions {
 export interface CliAppServerTurnEvidence {
   threadId: string;
   turnId: string;
+  role?: DelegationRole;
   turnStatus: "completed";
   waitAuthority: "appServer";
   /** A completed transport turn is not a canonical delivery until its exact proposal is sealed. */
   completion: "incomplete";
-  proposalRequired: true;
+  proposalRequired: boolean;
   sandbox: "read-only" | "workspace-write";
   model: string;
   reasoningEffort: string;
@@ -87,7 +89,7 @@ export interface CliAppServerTurnEvidence {
 interface LiveSession {
   client: CliAppServerClient;
   ownerThread: string;
-  implementer: ImplementerProfile;
+  implementer: DelegationProfile;
   directory: string;
   threadStartResponse: unknown;
   contract: HostDelegationSpawnRequest["readOnlyContract"];
@@ -1053,6 +1055,7 @@ function taskPrompt(
   return [
     `Task ID: ${contract.taskId}`,
     `Task revision: ${contract.taskRevision}`,
+    ...(contract.role ? [`Delegation role: ${contract.role}`] : []),
     `Objective: ${contract.objective}`,
     "Acceptance criteria:",
     acceptance,
@@ -1060,6 +1063,11 @@ function taskPrompt(
     verification,
     "Authorized repository scopes:",
     scopes,
+    ...(contract.proposalBundleId ? [
+      `Sealed proposal bundle: ${contract.proposalBundleId}`,
+      `Sealed proposal revision: ${contract.proposalRevision ?? contract.taskRevision}`,
+      `Proposal-owned paths: ${(contract.ownedPaths || []).join(", ") || "(none)"}`
+    ] : []),
     execution,
     `Worker-only proposal guidance: ${contract.proposalGuidance}`
   ].join("\n");
@@ -1203,12 +1211,78 @@ export function createCliAppServerAdapter(
       );
     }
 
+    const roleCandidates: unknown[] = [options.role, request.role, request.readOnlyContract.role, request.reservation.role]
+      .filter(candidate => candidate !== undefined);
+    const role = roleCandidates[0] ?? "implementer";
+    if (!isDelegationRole(role)) {
+      throw adapterError(ERROR_CODES.DELEGATION_ROLE_INVALID, "The CLI App Server adapter received an unsupported delegation role.", {
+        role,
+        constructedAppServer: false
+      });
+    }
+    if (roleCandidates.some(candidate => candidate !== role)) {
+      throw adapterError(ERROR_CODES.DELEGATION_INVALID, "CLI delegation role metadata did not agree across the reservation and role contract.", {
+        roles: roleCandidates,
+        constructedAppServer: false
+      });
+    }
+    if (role !== "implementer" && (request.reservation.observer !== true
+      || request.reservation.scopes.some(scope => scope.access === "write")
+      || request.writeAuthorized !== false)) {
+      throw adapterError(ERROR_CODES.DELEGATION_INVALID, `${role} CLI delegation requires an observer-only reservation.`, {
+        role,
+        constructedAppServer: false
+      });
+    }
+    if (request.readOnlyContract.taskId !== request.taskId
+      || request.readOnlyContract.taskRevision !== request.reservation.taskRevision) {
+      throw adapterError(ERROR_CODES.DELEGATION_INVALID, "CLI delegation contract identity did not match the reservation fence.", {
+        taskId: request.taskId,
+        contractTaskId: request.readOnlyContract.taskId,
+        contractRevision: request.readOnlyContract.taskRevision,
+        reservationRevision: request.reservation.taskRevision,
+        constructedAppServer: false
+      });
+    }
+    if (role !== "implementer") {
+      let proposalPaths: string[] = [];
+      let contractPaths: string[] = [];
+      try {
+        proposalPaths = request.reservation.scopes
+          .filter(scope => scope.access === "read" && scope.kind === "file")
+          .map(scope => normalizeLeaseScopePath(scope.path))
+          .sort();
+        contractPaths = (request.readOnlyContract.ownedPaths || [])
+          .map(scopePath => normalizeLeaseScopePath(scopePath))
+          .sort();
+      } catch {
+        throw adapterError(ERROR_CODES.DELEGATION_INVALID, `${role} CLI delegation contains an unsafe proposal path contract.`, {
+          role,
+          constructedAppServer: false
+        });
+      }
+      if (typeof request.readOnlyContract.proposalBundleId !== "string"
+        || request.readOnlyContract.proposalBundleId.trim().length === 0
+        || request.readOnlyContract.proposalRevision !== request.reservation.taskRevision
+        || proposalPaths.length !== contractPaths.length
+        || proposalPaths.some((item, index) => item !== contractPaths[index])) {
+        throw adapterError(ERROR_CODES.DELEGATION_INVALID, `${role} CLI delegation requires the exact sealed proposal identity and owned paths.`, {
+          role,
+          proposalBundleId: request.readOnlyContract.proposalBundleId ?? null,
+          proposalRevision: request.readOnlyContract.proposalRevision ?? null,
+          reservationRevision: request.reservation.taskRevision,
+          proposalPaths,
+          contractPaths,
+          constructedAppServer: false
+        });
+      }
+    }
     // Resolve once before starting the App Server. The same exact profile
     // result is carried by the live session into both protocol requests and
     // effective-settings verification below.
-    let implementer: ImplementerProfile;
+    let implementer: DelegationProfile;
     try {
-      implementer = resolveImplementerProfile(options.profile);
+      implementer = resolveDelegationProfile(options.profile, role);
     } catch (error) {
       if (error instanceof SynodError) {
         error.details = {
@@ -1396,15 +1470,15 @@ export function createCliAppServerAdapter(
       if (metadata.model !== session.implementer.model) {
         throw adapterError(
           ERROR_CODES.APP_SERVER_UNSUPPORTED,
-          "effective model did not match the synod_implementer profile.",
-          { expectedModel: session.implementer.model, observedModel: metadata.model ?? null, constructedAppServer: true }
+          `effective model did not match the synod ${session.implementer.role} profile.`,
+          { expectedModel: session.implementer.model, role: session.implementer.role, observedModel: metadata.model ?? null, constructedAppServer: true }
         );
       }
       if (metadata.reasoningEffort !== session.implementer.effort) {
         throw adapterError(
           ERROR_CODES.APP_SERVER_UNSUPPORTED,
-          "effective reasoning effort did not match the synod_implementer profile.",
-          { expectedReasoningEffort: session.implementer.effort, observedReasoningEffort: metadata.reasoningEffort ?? null, constructedAppServer: true }
+          `effective reasoning effort did not match the synod ${session.implementer.role} profile.`,
+          { expectedReasoningEffort: session.implementer.effort, role: session.implementer.role, observedReasoningEffort: metadata.reasoningEffort ?? null, constructedAppServer: true }
         );
       }
       const fencedRoot = fence.runtimeWorkspaceRoots.length === 1
@@ -1487,10 +1561,11 @@ export function createCliAppServerAdapter(
       const evidence: CliAppServerTurnEvidence = {
         threadId: session.ownerThread,
         turnId,
+        role: session.implementer.role,
         turnStatus: "completed",
         waitAuthority: "appServer",
         completion: "incomplete",
-        proposalRequired: true,
+        proposalRequired: session.implementer.role === "implementer",
         sandbox: fence.sandbox,
         model: metadata.model,
         reasoningEffort: metadata.reasoningEffort,
@@ -1508,14 +1583,29 @@ export function createCliAppServerAdapter(
       session.client.detach?.();
       session.authorized = true;
       retainForWait = true;
+      const nextCommand = session.implementer.role === "implementer"
+        ? {
+            operation: "proposal.submit",
+            argv: ["proposal", "submit", request.taskId, "--evidence", `app-server:${session.ownerThread}:${turnId}`],
+            requirements: ["exact-sealed-proposal"]
+          }
+        : {
+            operation: "task.approval",
+            argv: [
+              "task", "approve", request.taskId,
+              "--role", session.implementer.role,
+              "--revision", String(session.contract.proposalRevision ?? request.reservation.taskRevision),
+              "--proposal-bundle-id", session.contract.proposalBundleId || "<sealed-proposal-bundle>",
+              "--owner-thread", session.ownerThread,
+              "--evidence", `app-server:${session.ownerThread}:${turnId}`
+            ],
+            requirements: ["decision", "evidence", "exact-sealed-proposal"]
+          };
       return {
         status: "authorized",
         ...evidence,
-        nextCommand: {
-          operation: "proposal.submit",
-          argv: ["proposal", "submit", request.taskId, "--evidence", `app-server:${session.ownerThread}:${turnId}`],
-          requirements: ["exact-sealed-proposal"]
-        }
+        ...(session.implementer.role === "implementer" ? {} : { approvalRequired: true }),
+        nextCommand
       };
     } catch (error) {
       const classified = classifyAuthorizeFailure(error);
