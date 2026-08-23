@@ -453,10 +453,16 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.equal(product.match(/^\d+\. /gm)?.length, 5);
   assert.match(product, /WCAG 2\.2 AA/);
   assert.match(product, /`JobHandle` and `JobEvent`/);
+  assert.match(product, /public `v0\.12\.0` release/);
+  assert.match(product, /CLI App Server Path A[\s\S]*reserve, spawn, bind, and authorize[\s\S]*exact owner for task-aware wait/);
   assert.match(product, /injected\s+`HostDelegationAdapter`/);
+  assert.match(product, /Desktop returns an\s+explicit host spawn\/wait handoff[\s\S]*never starts a child App Server/);
+  assert.match(product, /unsupported or non-Codex contexts fail closed/);
   assert.match(product, /independent Git lanes/);
   assert.match(product, /execution\s+ownership/);
-  assert.match(product, /0\.9\.5 hotfix, retained in 0\.11\.0, also makes the `--task`,\s+`--active-only`, and\s+`--changed-since-checkpoint` selectors/);
+  assert.doesNotMatch(product, /Without that adapter, the standalone CLI fails closed/);
+  assert.doesNotMatch(product, /standalone CLI fails closed or returns an incomplete handoff/);
+  assert.match(product, /0\.9\.5 hotfix, retained since 0\.11\.0, also makes the `--task`,\s+`--active-only`, and\s+`--changed-since-checkpoint` selectors/);
   assert.match(product, /Node\.js `>=22`/);
   assert.match(product, /numeric major and\s+minor are `0\.148`/);
 
