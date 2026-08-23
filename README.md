@@ -56,9 +56,12 @@ The v0.11.0 source surfaces remain available in this release:
   `--changed-since-checkpoint`; the 0.9.5 hotfix, retained since v0.11.0, makes
   each selector available through the initialized project-local bootstrap
   while mixed selectors still fail closed.
-- `delegate start` through an injected `HostDelegationAdapter`. The standalone
-  CLI has no host adapter, fails closed or reports an incomplete handoff, and
-  never claims execution ownership.
+- `delegate start` on a supported Codex CLI without an injected adapter uses
+  Synod's owned CLI App Server Path A: it reserves, spawns, binds, and
+  authorizes the worker, retaining the exact owner for task-aware wait. An
+  injected `HostDelegationAdapter` remains supported. Desktop returns an
+  explicit host spawn/wait handoff and never starts a child App Server;
+  unsupported or non-Codex contexts fail closed.
 - The explicit `--include-local-docs` recovery-bundle path.
 
 These commands are available in the public v0.12.0 release. The public/pinned
@@ -257,7 +260,7 @@ synod lease bind T-001 \
 
 The successful bind JSON adds an activation handoff derived from the existing `lease.bound` event: task and lease identity, `boundAt`, the exact event `{ sequence, id, hash }`, `writeAuthorized:true`, `supervisorNotification.status: "required-not-observed"`, and a typed `wait --task T-001` follow-up. The supervisor must send explicit write authorization to the worker only after bind succeeds, then run that task-aware wait; the receipt never claims that Codex notification, receipt, or execution was observed and never repeats the reservation token.
 
-If spawn fails, run `lease cancel` with the complete reservation fence and a reason. If no owner ID returns, wait for the reservation TTL and use the reservation form of `lease expire`. Neither pre-bind cleanup path creates an abandoned-worker recovery record because the reservation never authorized writes. The public/pinned `0.12.0` CLI cannot invoke Codex `spawn_agent` or claim execution ownership. The released CLI provides `delegate start` only through an injected `HostDelegationAdapter`; an unadapted standalone CLI fails closed or returns the explicit incomplete host handoff.
+If spawn fails, run `lease cancel` with the complete reservation fence and a reason. If no owner ID returns, wait for the reservation TTL and use the reservation form of `lease expire`. Neither pre-bind cleanup path creates an abandoned-worker recovery record because the reservation never authorized writes. On a supported Codex CLI without an injected adapter, `delegate start` uses Synod's owned CLI App Server Path A to reserve, spawn, bind, and authorize, then retains the exact owner for `wait --task`. An injected `HostDelegationAdapter` remains supported. Desktop returns an explicit host spawn/wait handoff without starting a child App Server; unsupported or non-Codex contexts fail closed.
 
 Callers that already know the worker identity may still use `lease acquire`. After bind or acquire, the JSON result contains the active lease ID, generation, task revision, owner, and `heartbeatAt`. Copy those exact values into heartbeat, release, worktree, revocation, or recovery commands; a stale value fails closed:
 
