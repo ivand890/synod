@@ -126,6 +126,7 @@ export interface LeaseAcquireCommandOptions extends LeaseCommonOptions {
   write: string[];
   readTree: string[];
   writeTree: string[];
+  observer?: true;
   ttlSeconds?: number;
   heartbeatIntervalSeconds?: number;
 }
@@ -136,6 +137,7 @@ export interface LeaseReserveCommandOptions extends LeaseCommonOptions {
   write: string[];
   readTree: string[];
   writeTree: string[];
+  observer?: true;
   reservationTtlSeconds?: number;
 }
 
@@ -942,6 +944,7 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
       write,
       readTree,
       writeTree,
+      ...(write.length === 0 && writeTree.length === 0 ? { observer: true as const } : {}),
       ...(ownerThread === undefined ? {} : { ownerThread }),
       ...(ttlSeconds === undefined ? {} : { ttlSeconds }),
       ...(heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds })
@@ -963,6 +966,7 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
       write,
       readTree,
       writeTree,
+      ...(write.length === 0 && writeTree.length === 0 ? { observer: true as const } : {}),
       ...(reservationTtlSeconds === undefined ? {} : { reservationTtlSeconds })
     };
   }

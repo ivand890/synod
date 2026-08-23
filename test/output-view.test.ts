@@ -382,7 +382,7 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
           actions: [action],
           evidence: [{ id: "omit-history" }]
         }],
-        concurrency: { limit: 3, activeWriters: 2, availableSlots: 1 },
+        concurrency: { limit: 3, activeWriters: 2, activeReaders: 0, availableSlots: 1 },
         lastEvent: { sequence: 12, id: "event-12", hash: "sha256:event" }
       }
     },
@@ -391,14 +391,14 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
   };
 
   assert.deepEqual(projectJsonEnvelope(envelope, "full"), envelope);
-  assert.deepEqual(envelope.data.guidance.concurrency, { limit: 3, activeWriters: 2, availableSlots: 1 });
+  assert.deepEqual(envelope.data.guidance.concurrency, { limit: 3, activeWriters: 2, activeReaders: 0, availableSlots: 1 });
   assert.deepEqual(envelope.data.guidance.tasks[0]!.proposal?.pathStates, [
     { path: "src/guidance.ts", proposalAdded: true, gitTracked: true, staged: false, committed: true },
     { path: "src/guidance-new.ts", proposalAdded: true, gitTracked: false, staged: false, committed: false }
   ]);
   const summary = projectJsonEnvelope(envelope, "summary") as typeof envelope;
   const task = summary.data.guidance.tasks[0]!;
-  assert.deepEqual(summary.data.guidance.concurrency, { limit: 3, activeWriters: 2, availableSlots: 1 });
+  assert.deepEqual(summary.data.guidance.concurrency, { limit: 3, activeWriters: 2, activeReaders: 0, availableSlots: 1 });
   assert.equal(task.id, "T-GUIDANCE");
   assert.deepEqual(task.dependsOn, ["T-BASE"]);
   assert.deepEqual(task.incompleteDependencies, ["T-BASE"]);

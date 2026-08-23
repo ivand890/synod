@@ -3,6 +3,7 @@ import test from "node:test";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
 import {
   isCorrectionPolicy,
+  isTaskLease,
   isTaskLeaseReservation,
   leaseScopesOverlap,
   normalizeLeaseScopePath,
@@ -111,4 +112,104 @@ test("tree collisions are component-aware while readers may overlap writers", ()
     { path: "src/Task.ts", access: "write", kind: "file" },
     { path: "src/task.ts", access: "write", kind: "file" }
   ), true);
+});
+
+const leaseBaseline = {
+  path: ".synod/lease-baselines.json",
+  snapshotContentHash: `sha256:${"a".repeat(64)}`,
+  branch: "main",
+  head: "b".repeat(40),
+  worktreeFingerprint: `sha256:${"c".repeat(64)}`,
+  lastEvent: {
+    sequence: 2,
+    id: "00000000-0000-4000-8000-000000000003",
+    hash: `sha256:${"d".repeat(64)}`
+  }
+};
+
+function writerLeaseFixture() {
+  return {
+    id: "00000000-0000-4000-8000-000000000011",
+    generation: 1,
+    taskId: "T-001",
+    taskRevision: 0,
+    ownerThread: "thread:one",
+    executor: "synod_implementer",
+    scopes: [{ path: "src/task.ts", access: "write", kind: "file" }],
+    acquiredAt: "2026-08-13T00:00:00.000Z",
+    heartbeatAt: "2026-08-13T00:01:00.000Z",
+    expiresAt: "2026-08-13T00:30:00.000Z",
+    heartbeatIntervalSeconds: 300,
+    ttlSeconds: 1_800,
+    baseline: leaseBaseline,
+    status: "ACTIVE"
+  };
+}
+
+test("observer leases validate only with all-read scopes and fail closed otherwise", () => {
+  const writer = writerLeaseFixture();
+  assert.equal(isTaskLease(writer), true);
+
+  const observer = {
+    ...writer,
+    id: "00000000-0000-4000-8000-000000000012",
+    scopes: [{ path: "src/input.ts", access: "read", kind: "file" }],
+    observer: true as const
+  };
+  assert.equal(isTaskLease(observer), true);
+  assert.equal(isTaskLease({ ...observer, observer: undefined }), false);
+  assert.equal(isTaskLease({ ...writer, observer: false }), false);
+  assert.equal(isTaskLease({ ...writer, observer: "true" }), false);
+  assert.equal(isTaskLease({
+    ...observer,
+    scopes: [...observer.scopes, { path: "src/task.ts", access: "write", kind: "file" }]
+  }), false);
+});
+
+test("observer reservations follow the same fail-closed validator matrix", () => {
+  const reservation = {
+    id: "00000000-0000-4000-8000-000000000001",
+    token: "00000000-0000-4000-8000-000000000002",
+    generation: 1,
+    taskId: "T-001",
+    taskRevision: 0,
+    executor: "synod_implementer",
+    scopes: [{ path: "src/input.ts", access: "read", kind: "file" }, { path: "src/docs", access: "read", kind: "tree" }],
+    observer: true as const,
+    reservedAt: "2026-08-13T00:00:00.000Z",
+    expiresAt: "2026-08-13T00:05:00.000Z",
+    ttlSeconds: 300,
+    baseline: leaseBaseline,
+    status: "RESERVED"
+  };
+  assert.equal(isTaskLeaseReservation(reservation), true);
+  assert.equal(isTaskLeaseReservation({
+    ...reservation,
+    scopes: [{ path: "src/input.ts", access: "read", kind: "file" }],
+    observer: undefined
+  }), false);
+  assert.equal(isTaskLeaseReservation({
+    ...reservation,
+    scopes: [{ path: "src/task.ts", access: "write", kind: "file" }]
+  }), false);
+  assert.equal(isTaskLeaseReservation({ ...reservation, observer: false }), false);
+  assert.equal(isTaskLeaseReservation({ ...reservation, observer: 1 }), false);
+});
+
+test("observer scope normalization accepts all-read sets only when explicitly requested", () => {
+  assert.deepEqual(normalizeLeaseScopes(
+    { read: ["src/b.ts"], readTree: ["src/a"] },
+    { observer: true }
+  ), [
+    { path: "src/a", access: "read", kind: "tree" },
+    { path: "src/b.ts", access: "read", kind: "file" }
+  ]);
+  for (const candidate of [
+    () => normalizeLeaseScopes({ read: ["src/a.ts"], write: ["src/b.ts"] }, { observer: true }),
+    () => normalizeLeaseScopes({ writeTree: ["src"] }, { observer: true }),
+    () => normalizeLeaseScopes({}, { observer: true }),
+    () => normalizeLeaseScopes({ read: ["README.md"] })
+  ]) {
+    assert.throws(candidate, error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_INVALID);
+  }
 });

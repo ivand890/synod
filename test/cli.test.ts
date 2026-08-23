@@ -1485,6 +1485,54 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
   }
 });
 
+test("read-only lease scopes acquire observer leases through the CLI", async () => {
+  const parsedObserverAcquire = parseLeaseArgs(["acquire", "T-001", "--owner-thread", "thread:x", "--read", "src/a.ts"]);
+  assert.equal("observer" in parsedObserverAcquire && parsedObserverAcquire.observer === true, true);
+  const parsedWriterAcquire = parseLeaseArgs(["acquire", "T-001", "--owner-thread", "thread:x", "--write", "src/b.ts"]);
+  assert.equal("observer" in parsedWriterAcquire, false);
+  const parsedObserverReserve = parseLeaseArgs(["reserve", "T-001", "--read-tree", "docs"]);
+  assert.equal("observer" in parsedObserverReserve && parsedObserverReserve.observer === true, true);
+
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-observer-lease-test-"));
+  const { messages, output } = capturedOutput();
+
+  try {
+    await run(["init", directory], output);
+    initializeGitHead(directory);
+    messages.length = 0;
+    await run([
+      "task", "add", "T-OBS",
+      "--objective", "Observe without writes",
+      "--executor", "synod_implementer",
+      "--acceptance", "The observer lease is fenced",
+      "--verification", "pnpm test",
+      "--cwd", directory
+    ], output);
+    messages.length = 0;
+    await run(["task", "transition", "T-OBS", "READY", "--revision", "0", "--cwd", directory], output);
+    messages.length = 0;
+
+    const acquireCode = await run([
+      "lease", "acquire", "T-OBS",
+      "--owner-thread", "thread:obs",
+      "--read", "src/observed.ts",
+      "--read-tree", "docs",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const acquired = JSON.parse(takeMessage(messages));
+    assert.equal(acquireCode, 0);
+    assert.equal(acquired.data.action, "acquire");
+    assert.equal(acquired.data.lease.observer, true);
+    assert.deepEqual(acquired.data.lease.scopes, [
+      { path: "docs", access: "read", kind: "tree" },
+      { path: "src/observed.ts", access: "read", kind: "file" }
+    ]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("lease reservation commands expose the pre-spawn and post-bind authorization boundary", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-reservation-json-test-"));
   const { messages, output } = capturedOutput();

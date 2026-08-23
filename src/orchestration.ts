@@ -1863,15 +1863,23 @@ export function concurrencyPolicy(state: Pick<OrchestrationStateCore, "concurren
 export interface ConcurrencyStatus {
   limit: number;
   activeWriters: number;
+  activeReaders: number;
   availableSlots: number;
+}
+
+function isObserverAuthority(task: Pick<OrchestrationTask, "lease" | "leaseReservation">): boolean {
+  return task.lease?.observer === true || task.leaseReservation?.observer === true;
 }
 
 export function concurrencyStatus(state: OrchestrationStateCore): ConcurrencyStatus {
   const policy = concurrencyPolicy(state);
-  const activeWriters = taskList(state).filter(task => task.lease || task.leaseReservation).length;
+  const authorities = taskList(state).filter(task => task.lease || task.leaseReservation);
+  const activeWriters = authorities.filter(task => !isObserverAuthority(task)).length;
+  const activeReaders = authorities.filter(isObserverAuthority).length;
   return {
     limit: policy.maxConcurrentSubagents,
     activeWriters,
+    activeReaders,
     availableSlots: Math.max(policy.maxConcurrentSubagents - activeWriters, 0)
   };
 }
@@ -5340,7 +5348,9 @@ function reservationScopeConflicts(
 
 function concurrentWriterTaskIds(state: OrchestrationState, taskId?: string): string[] {
   return taskList(state)
-    .filter(other => other.id !== taskId && (other.lease || other.leaseReservation))
+    .filter(other => other.id !== taskId
+      && !isObserverAuthority(other)
+      && (other.lease || other.leaseReservation))
     .map(other => other.id)
     .sort();
 }
@@ -5390,6 +5400,7 @@ export interface ReserveLeaseOptions {
   write?: unknown[];
   readTree?: unknown[];
   writeTree?: unknown[];
+  observer?: boolean;
   reservationTtlSeconds?: number;
   actor?: string;
 }
@@ -5401,6 +5412,7 @@ export async function reserveTaskLease({
   write = [],
   readTree = [],
   writeTree = [],
+  observer,
   reservationTtlSeconds = DEFAULT_LEASE_RESERVATION_TTL_SECONDS,
   actor = "supervisor"
 }: ReserveLeaseOptions = {}, dependencies: OrchestrationDependencies = {}) {
@@ -5415,7 +5427,14 @@ export async function reserveTaskLease({
       }
     });
   }
-  const scopes = normalizeLeaseScopes({ read, write, readTree, writeTree });
+  if (observer !== undefined && observer !== true) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, "Observer mode must be requested with a true observer flag.");
+  }
+  const observerRequested = observer === true;
+  if (observerRequested && (write.length > 0 || writeTree.length > 0)) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, "An observer lease cannot contain write scopes.");
+  }
+  const scopes = normalizeLeaseScopes({ read, write, readTree, writeTree }, { observer: observerRequested });
   const targetDirectory = path.resolve(directory);
   return commitMutation(targetDirectory, "lease.reserved", { actor, taskId }, async (state, context) => {
     if (!context.snapshot.available || !context.snapshot.head) {
@@ -5426,7 +5445,7 @@ export async function reserveTaskLease({
     await validateLeaseScopeFilesystemPaths(targetDirectory, scopes);
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
-    assertBudgetAllowsExecution(task, "writer lease reservation");
+    assertBudgetAllowsExecution(task, observerRequested ? "observer lease reservation" : "writer lease reservation");
     assertReservationEligible(task);
     if (task.lease || task.leaseReservation) {
       throw new SynodError(ERROR_CODES.LEASE_CONFLICT, `Task ${taskId} already has writer authority reserved.`, {
@@ -5437,7 +5456,7 @@ export async function reserveTaskLease({
         }
       });
     }
-    assertConcurrencyCapacity(state, taskId);
+    if (!observerRequested) assertConcurrencyCapacity(state, taskId);
     reservationScopeConflicts(state, taskId, scopes);
     if (!context.acknowledgedSnapshot) {
       throw new SynodError(ERROR_CODES.CHECKPOINT_SNAPSHOT_INVALID, "A writer reservation requires an acknowledged checkpoint snapshot.", {
@@ -5477,6 +5496,7 @@ export async function reserveTaskLease({
       taskRevision: task.revision,
       executor: task.executor,
       scopes,
+      ...(observerRequested ? { observer: true as const } : {}),
       reservedAt: context.timestamp,
       expiresAt: leaseDeadline(context.timestamp, ttl),
       ttlSeconds: ttl,
@@ -5623,6 +5643,7 @@ export async function bindTaskLease({
       ownerThread: owner,
       executor: reservation.executor,
       scopes: reservation.scopes,
+      ...(reservation.observer === true ? { observer: true as const } : {}),
       acquiredAt: context.timestamp,
       heartbeatAt: context.timestamp,
       expiresAt: leaseDeadline(context.timestamp, ttl),
@@ -5730,6 +5751,7 @@ export interface AcquireLeaseOptions {
   write?: unknown[];
   readTree?: unknown[];
   writeTree?: unknown[];
+  observer?: boolean;
   ttlSeconds?: number;
   heartbeatIntervalSeconds?: number;
   actor?: string;
@@ -5743,6 +5765,7 @@ export async function acquireTaskLease({
   write = [],
   readTree = [],
   writeTree = [],
+  observer,
   ttlSeconds = DEFAULT_LEASE_TTL_SECONDS,
   heartbeatIntervalSeconds = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
   actor = "supervisor"
@@ -5752,6 +5775,13 @@ export async function acquireTaskLease({
   const ttl = parseLeaseDuration(ttlSeconds, "ttlSeconds");
   const heartbeat = parseLeaseDuration(heartbeatIntervalSeconds, "heartbeatIntervalSeconds");
   if (!owner) throw new SynodError(ERROR_CODES.LEASE_INVALID, "A writer lease requires --owner-thread.");
+  if (observer !== undefined && observer !== true) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, "Observer mode must be requested with a true observer flag.");
+  }
+  const observerRequested = observer === true;
+  if (observerRequested && (write.length > 0 || writeTree.length > 0)) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, "An observer lease cannot contain write scopes.");
+  }
   if (ttl < MIN_LEASE_TTL_SECONDS || ttl > MAX_LEASE_TTL_SECONDS || heartbeat >= ttl) {
     throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease heartbeat/expiry policy is outside the supported bounds.", {
       details: {
@@ -5762,18 +5792,18 @@ export async function acquireTaskLease({
       }
     });
   }
-  const scopes = normalizeLeaseScopes({ read, write, readTree, writeTree });
+  const scopes = normalizeLeaseScopes({ read, write, readTree, writeTree }, { observer: observerRequested });
   const targetDirectory = path.resolve(directory);
   return commitMutation(targetDirectory, "lease.acquired", { actor, taskId }, async (state, context) => {
     if (!context.snapshot.available || !context.snapshot.head) {
-      throw new SynodError(ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE, "A writer lease requires an exact Git HEAD and worktree snapshot.", {
+      throw new SynodError(ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE, `A ${observerRequested ? "observer" : "writer"} lease requires an exact Git HEAD and worktree snapshot.`, {
         details: { taskId, branch: context.snapshot.branch, head: context.snapshot.head }
       });
     }
     await validateLeaseScopeFilesystemPaths(targetDirectory, scopes);
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
-    assertBudgetAllowsExecution(task, "writer lease acquisition");
+    assertBudgetAllowsExecution(task, observerRequested ? "observer lease acquisition" : "writer lease acquisition");
     const eligible = task.state === "READY"
       || (task.state === "ACTIVE" && task.preLease)
       || ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)
@@ -5782,7 +5812,7 @@ export async function acquireTaskLease({
         || (task.preLease && leaseMigrationState(task.blockedFrom))
       ));
     if (!eligible) {
-      throw new SynodError(ERROR_CODES.LEASE_INVALID, `Task ${taskId} cannot acquire a writer lease from ${task.state}.`, {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, `Task ${taskId} cannot acquire an ${observerRequested ? "observer" : "writer"} lease from ${task.state}.`, {
         details: { taskId, state: task.state }
       });
     }
@@ -5868,6 +5898,7 @@ export async function acquireTaskLease({
       ownerThread: owner,
       executor: task.executor,
       scopes,
+      ...(observerRequested ? { observer: true as const } : {}),
       acquiredAt: context.timestamp,
       heartbeatAt: context.timestamp,
       expiresAt: leaseDeadline(context.timestamp, ttl),
@@ -6436,6 +6467,11 @@ export async function transitionTask({
         details: { taskId, revision }
       });
     }
+    if (deliveredLease && deliveredLease.observer === true) {
+      throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} cannot deliver under an observer lease; a writer lease is required.`, {
+        details: { taskId, revision }
+      });
+    }
     const sealed = deliveredLease
       ? await sealTaskProposal(targetDirectory, state, task, deliveredLease, revision, context, dependencies)
       : undefined;
@@ -6543,6 +6579,11 @@ export async function submitTaskProposal({
   if (task.state !== "ACTIVE" || !task.lease || task.lease.status !== "ACTIVE") {
     throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} requires an active bound writer lease before proposal submission.`, {
       details: { taskId, state: task.state, hasLease: Boolean(task.lease) }
+    });
+  }
+  if (task.lease.observer === true) {
+    throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} proposal submission requires a writer lease; observer leases are read-only.`, {
+      details: { taskId, state: task.state, leaseId: task.lease.id }
     });
   }
   return transitionTask({

@@ -178,7 +178,9 @@ Options:
   --owner-thread
               Bind a writer lease to one opaque Codex thread ID.
   --write     Add a repository-relative writer scope to a lease.
-  --read      Add a repository-relative read scope to a lease.
+  --read      Add a repository-relative read scope to a lease;
+              lease acquire/reserve with only read scopes acquires an
+              observer lease that never conflicts and never submits proposals.
   --write-tree
               Add a repository-relative writer scope covering a directory tree.
   --read-tree Add a repository-relative read scope covering a directory tree.

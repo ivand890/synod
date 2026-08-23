@@ -52,6 +52,7 @@ export interface TaskLeaseReservation {
   taskRevision: number;
   executor: string;
   scopes: LeaseScope[];
+  observer?: true;
   reservedAt: string;
   expiresAt: string;
   ttlSeconds: number;
@@ -67,6 +68,7 @@ export interface TaskLease {
   ownerThread: string;
   executor: string;
   scopes: LeaseScope[];
+  observer?: true;
   acquiredAt: string;
   heartbeatAt: string;
   expiresAt: string;
@@ -234,14 +236,21 @@ export function normalizeLeaseScopes({
   write?: unknown[];
   readTree?: unknown[];
   writeTree?: unknown[];
-}): LeaseScope[] {
+}, { observer = false }: { observer?: boolean } = {}): LeaseScope[] {
   const scopes = [
     ...read.map(value => ({ path: normalizeLeaseScopePath(value), access: "read" as const, kind: "file" as const })),
     ...write.map(value => ({ path: normalizeLeaseScopePath(value), access: "write" as const, kind: "file" as const })),
     ...readTree.map(value => ({ path: normalizeLeaseScopePath(value), access: "read" as const, kind: "tree" as const })),
     ...writeTree.map(value => ({ path: normalizeLeaseScopePath(value), access: "write" as const, kind: "tree" as const }))
   ];
-  if (!scopes.some(scope => scope.access === "write")) {
+  if (observer === true) {
+    if (scopes.some(scope => scope.access === "write")) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "An observer lease cannot contain write scopes.");
+    }
+    if (scopes.length === 0) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "An observer lease requires at least one read scope.");
+    }
+  } else if (!scopes.some(scope => scope.access === "write")) {
     throw new SynodError(ERROR_CODES.LEASE_INVALID, "A writer lease requires at least one write scope.");
   }
   const spellings = new Map<string, string>();
@@ -308,6 +317,12 @@ export function isLeaseScope(value: unknown): value is LeaseScope {
     })();
 }
 
+function hasValidObserverScopes(value: { observer?: unknown; scopes: LeaseScope[] }): boolean {
+  if (value.observer === undefined) return value.scopes.some(scope => scope.access === "write");
+  if (value.observer !== true) return false;
+  return value.scopes.length > 0 && value.scopes.every(scope => scope.access === "read");
+}
+
 export function isTaskLease(value: unknown): value is TaskLease {
   return isRecord(value)
     && isUuid(value.id)
@@ -322,7 +337,7 @@ export function isTaskLease(value: unknown): value is TaskLease {
     && Array.isArray(value.scopes)
     && value.scopes.length > 0
     && value.scopes.every(isLeaseScope)
-    && value.scopes.some(scope => scope.access === "write")
+    && hasValidObserverScopes({ ...value, scopes: value.scopes })
     && validIsoTimestamp(value.acquiredAt)
     && validIsoTimestamp(value.heartbeatAt)
     && validIsoTimestamp(value.expiresAt)
@@ -363,7 +378,7 @@ export function isTaskLeaseReservation(value: unknown): value is TaskLeaseReserv
     && Array.isArray(value.scopes)
     && value.scopes.length > 0
     && value.scopes.every(isLeaseScope)
-    && value.scopes.some(scope => scope.access === "write")
+    && hasValidObserverScopes({ ...value, scopes: value.scopes })
     && validIsoTimestamp(value.reservedAt)
     && validIsoTimestamp(value.expiresAt)
     && isPositiveInteger(value.ttlSeconds)

@@ -1371,11 +1371,11 @@ test("reservations enforce the concurrent subagent limit and task-next reports r
   assert.equal(first.reservation.status, "RESERVED");
   assert.equal(second.reservation.status, "RESERVED");
   let guidance = await nextTaskGuidance({ directory });
-  assert.deepEqual(guidance.concurrency, { limit: CONCURRENCY_POLICY_DEFAULTS.maxConcurrentSubagents, activeWriters: 2, availableSlots: 1 });
+  assert.deepEqual(guidance.concurrency, { limit: CONCURRENCY_POLICY_DEFAULTS.maxConcurrentSubagents, activeWriters: 2, activeReaders: 0, availableSlots: 1 });
 
   await reserveTaskLease({ directory, id: "T-C", write: ["src/c.ts"] });
   guidance = await nextTaskGuidance({ directory });
-  assert.deepEqual(guidance.concurrency, { limit: 3, activeWriters: 3, availableSlots: 0 });
+  assert.deepEqual(guidance.concurrency, { limit: 3, activeWriters: 3, activeReaders: 0, availableSlots: 0 });
 
   await assert.rejects(
     reserveTaskLease({ directory, id: "T-D", write: ["src/d.ts"] }),
@@ -1399,7 +1399,129 @@ test("reservations enforce the concurrent subagent limit and task-next reports r
     reason: "freeing a slot"
   });
   guidance = await nextTaskGuidance({ directory });
-  assert.deepEqual(guidance.concurrency, { limit: 3, activeWriters: 2, availableSlots: 1 });
+  assert.deepEqual(guidance.concurrency, { limit: 3, activeWriters: 2, activeReaders: 0, availableSlots: 1 });
+});
+
+test("observer reservations coexist with writers at the capacity limit and bind as observer leases", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  for (const id of ["T-W1", "T-W2", "T-W3", "T-OBS-1", "T-OBS-2", "T-W4"]) {
+    await addDefaultTask(directory, { id, objective: `Reserve ${id}` });
+    await transitionTask({ directory, id, to: "READY", revision: 0 });
+  }
+
+  for (const [id, scope] of [
+    ["T-W1", "src/a.ts"],
+    ["T-W2", "src/b.ts"],
+    ["T-W3", "src/c.ts"]
+  ] as const) {
+    await reserveTaskLease({ directory, id, write: [scope] });
+  }
+  let guidance = await nextTaskGuidance({ directory });
+  assert.deepEqual(guidance.concurrency, {
+    limit: CONCURRENCY_POLICY_DEFAULTS.maxConcurrentSubagents,
+    activeWriters: 3,
+    activeReaders: 0,
+    availableSlots: 0
+  });
+
+  const observer = await reserveTaskLease({
+    directory,
+    id: "T-OBS-1",
+    read: ["src/a.ts"],
+    readTree: ["src/b"],
+    observer: true
+  });
+  assert.equal(observer.reservation.observer, true);
+  assert.deepEqual(observer.reservation.scopes, [
+    { path: "src/a.ts", access: "read", kind: "file" },
+    { path: "src/b", access: "read", kind: "tree" }
+  ]);
+  guidance = await nextTaskGuidance({ directory });
+  assert.deepEqual(guidance.concurrency, { limit: 3, activeWriters: 3, activeReaders: 1, availableSlots: 0 });
+
+  const bound = await bindTaskLease({
+    directory,
+    id: "T-OBS-1",
+    ...reservationFence(observer.reservation),
+    ownerThread: "thread:observer"
+  });
+  assert.equal(bound.lease.observer, true);
+  assert.equal(bound.task.state, "ACTIVE");
+
+  const acquiredObserver = await acquireTaskLease({
+    directory,
+    id: "T-OBS-2",
+    ownerThread: "thread:observer-2",
+    readTree: ["src/c"],
+    observer: true
+  });
+  assert.equal(acquiredObserver.lease.observer, true);
+
+  guidance = await nextTaskGuidance({ directory });
+  assert.deepEqual(guidance.concurrency, { limit: 3, activeWriters: 3, activeReaders: 2, availableSlots: 0 });
+
+  await assert.rejects(
+    reserveTaskLease({ directory, id: "T-W4", write: ["src/d.ts"] }),
+    error => {
+      assert.ok(error instanceof SynodError);
+      assert.equal(error.code, ERROR_CODES.CONCURRENCY_EXCEEDED);
+      assert.deepEqual((error.details as { conflictingTaskIds: string[] }).conflictingTaskIds, ["T-W1", "T-W2", "T-W3"]);
+      return true;
+    }
+  );
+});
+
+test("writer overlap stays rejected while observers under the same tree are accepted", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  for (const id of ["T-A", "T-B", "T-OBS"]) {
+    await addDefaultTask(directory, { id, objective: `Lease ${id}` });
+    await transitionTask({ directory, id, to: "READY", revision: 0 });
+  }
+  const writer = await acquireTaskLease({ directory, id: "T-A", ownerThread: "thread:a", writeTree: ["src"] });
+  assert.equal(writer.lease.observer, undefined);
+
+  const observer = await acquireTaskLease({
+    directory,
+    id: "T-OBS",
+    ownerThread: "thread:obs",
+    readTree: ["src"],
+    observer: true
+  });
+  assert.equal(observer.lease.observer, true);
+
+  await assert.rejects(
+    acquireTaskLease({ directory, id: "T-B", ownerThread: "thread:b", write: ["src/inside.ts"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_CONFLICT
+  );
+});
+
+test("proposal submission fails closed under an observer-only lease", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireTaskLease({
+    directory,
+    id: "T-001",
+    ownerThread: "thread:obs",
+    read: ["src/input.ts"],
+    observer: true
+  });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+
+  await assert.rejects(
+    submitTaskProposal({ directory, id: "T-001" }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_REQUIRED
+  );
+  await assert.rejects(
+    transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery"] }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_REQUIRED
+  );
+  const task = (await readOrchestration(directory)).state.tasks["T-001"];
+  assert.equal(task?.state, "ACTIVE");
+  assert.ok(task?.lease?.observer === true);
 });
 
 test("binding a correction reservation applies the released correction transition effects", async () => {
