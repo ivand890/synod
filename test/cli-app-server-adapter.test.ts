@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import type { AppServerDiagnostics, AppServerEvent } from "../src/app-server.js";
 import {
   createCliAppServerAdapter,
@@ -55,6 +57,35 @@ function diagnostics(overrides: Record<string, unknown> = {}): AppServerDiagnost
 }
 
 const waitEndpointRoot = path.join(process.platform === "win32" ? os.tmpdir() : "/tmp", "synod-cli-app-server");
+const testRepositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+function childLoaderSpecifier(specifier: string, requireMode: boolean): string {
+  const resolved = specifier.startsWith(".") || specifier.startsWith("/") || specifier.startsWith("file:")
+    || specifier.startsWith("node:") || specifier.startsWith("data:")
+    ? specifier
+    : (() => {
+      try { return import.meta.resolve(specifier); } catch { return specifier; }
+    })();
+  return requireMode && resolved.startsWith("file:") ? fileURLToPath(resolved) : resolved;
+}
+
+function childLoaderArgv(): string[] {
+  const result: string[] = [];
+  const argv = process.execArgv;
+  for (let index = 0; index < argv.length; index += 1) {
+    const item = argv[index];
+    if (item === "--import" || item === "--require") {
+      const next = argv[index + 1];
+      if (next) result.push(item, childLoaderSpecifier(next, item === "--require"));
+      index += 1;
+    } else if (item?.startsWith("--import=") || item?.startsWith("--require=")) {
+      const separator = item.indexOf("=");
+      const flag = item.slice(0, separator);
+      result.push(`${flag}=${childLoaderSpecifier(item.slice(separator + 1), flag === "--require")}`);
+    }
+  }
+  return result;
+}
 
 function waitEndpointPaths(directory: string, threadId: string): { metadataPath: string; socketPath: string } {
   const identity = createHash("sha256")
@@ -1225,6 +1256,218 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
   }
 });
 
+test("production runner close acknowledgement settles without the fallback timeout", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-runner-close-"));
+  const fakeCodex = path.join(directory, "fake-codex.mjs");
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+import readline from "node:readline";
+const reply = (id, result) => process.stdout.write(JSON.stringify({ id, result }) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", line => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.148.0", codexHome: "/tmp" });
+});
+`, "utf8");
+  await chmod(fakeCodex, 0o755);
+  const client = createCliAppServerRunnerClient({
+    codexBin: fakeCodex,
+    directory,
+    requestTimeoutMs: 3_000
+  });
+  try {
+    await client.start();
+    const startedAt = Date.now();
+    await client.close();
+    assert.ok(Date.now() - startedAt < 1_000, "close must not wait for the parent fallback timeout");
+  } finally {
+    await client.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("production runner cleans up when retain metadata publication fails", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-runner-retain-failure-"));
+  const fakeCodex = path.join(directory, "fake-codex.mjs");
+  const marker = path.join(directory, "app-server.pid");
+  const threadId = "44444444-5555-4666-8777-888888888888";
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import readline from "node:readline";
+const marker = ${JSON.stringify(marker)};
+const threadId = ${JSON.stringify(threadId)};
+writeFileSync(marker, String(process.pid));
+const stop = () => {
+  try { if (existsSync(marker)) unlinkSync(marker); } catch {}
+  process.exit(0);
+};
+process.once("SIGTERM", stop);
+process.once("SIGINT", stop);
+const reply = (id, result) => process.stdout.write(JSON.stringify({ id, result }) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", line => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.148.0", codexHome: "/tmp" });
+  else if (message.method === "thread/start") reply(message.id, { thread: { id: threadId, cliVersion: "0.148.0", cwd: process.cwd(), status: { type: "idle" }, turns: [] } });
+});
+`, "utf8");
+  await chmod(fakeCodex, 0o755);
+  const client = createCliAppServerRunnerClient({
+    codexBin: fakeCodex,
+    directory,
+    requestTimeoutMs: 1_000,
+    sessionTtlMs: 100
+  });
+  try {
+    await client.start();
+    await client.request("thread/start", {
+      cwd: directory,
+      approvalPolicy: "never",
+      model: "gpt-5.6-luna",
+      sandbox: "read-only"
+    });
+    const paths = waitEndpointPaths(directory, threadId);
+    const metadata = JSON.parse(await readFile(paths.metadataPath, "utf8")) as { ownerPid?: unknown };
+    assert.equal(typeof metadata.ownerPid, "number");
+    const ownerPid = metadata.ownerPid as number;
+    const blocker = path.join(directory, "metadata-blocker");
+    await mkdir(blocker);
+    await rm(paths.metadataPath, { force: true });
+    await symlink(blocker, paths.metadataPath);
+    const startedAt = Date.now();
+    await assert.rejects(client.retain(), error => error instanceof SynodError);
+    assert.ok(Date.now() - startedAt < 1_000, "retain failure must not wait for the session TTL");
+
+    const cleanupDeadline = Date.now() + 5_000;
+    while (Date.now() < cleanupDeadline
+      && (existsSync(paths.metadataPath)
+        || existsSync(paths.socketPath)
+        || existsSync(marker)
+        || (() => {
+          try { process.kill(ownerPid, 0); return true; } catch { return false; }
+        })())) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.equal(existsSync(paths.metadataPath), false, "retain failure must remove endpoint metadata");
+    assert.equal(existsSync(paths.socketPath), false, "retain failure must remove endpoint socket");
+    assert.equal(existsSync(marker), false, "retain failure must close the owned App Server");
+    assert.throws(() => process.kill(ownerPid, 0), /ESRCH|not found/i);
+  } finally {
+    await client.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("production runner cleans up after completion when control disconnects before retain", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-runner-disconnect-"));
+  const fakeCodex = path.join(directory, "fake-codex.mjs");
+  const helperScript = path.join(directory, "starter.mjs");
+  const marker = path.join(directory, "app-server.pid");
+  const threadId = "33333333-4444-4555-8666-777777777777";
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import readline from "node:readline";
+const marker = ${JSON.stringify(marker)};
+const threadId = ${JSON.stringify(threadId)};
+writeFileSync(marker, String(process.pid));
+const stop = () => {
+  try { if (existsSync(marker)) unlinkSync(marker); } catch {}
+  process.exit(0);
+};
+process.once("SIGTERM", stop);
+process.once("SIGINT", stop);
+const thread = () => ({ id: threadId, cliVersion: "0.148.0", cwd: process.cwd(), status: { type: "idle" }, turns: [] });
+const reply = (id, result) => process.stdout.write(JSON.stringify({ id, result }) + "\\n");
+const notify = (method, params) => process.stdout.write(JSON.stringify({ method, params }) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", line => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.148.0", codexHome: "/tmp" });
+  else if (message.method === "thread/start") reply(message.id, { thread: { ...thread(), model: "gpt-5.6-luna", reasoningEffort: "max", sandbox: { type: "readOnly" } } });
+  else if (message.method === "turn/start") {
+    reply(message.id, { turn: { id: "turn-1", status: "inProgress", items: [] } });
+    setTimeout(() => notify("turn/completed", { threadId, turn: { id: "turn-1", status: "completed", items: [] } }), 10);
+  }
+});
+`, "utf8");
+  await chmod(fakeCodex, 0o755);
+  await writeFile(helperScript, `import { createCliAppServerRunnerClient } from ${JSON.stringify(path.join(testRepositoryRoot, "src/cli-app-server-runner.ts"))};
+const client = createCliAppServerRunnerClient({
+  codexBin: ${JSON.stringify(fakeCodex)},
+  directory: ${JSON.stringify(directory)},
+  requestTimeoutMs: 1_000,
+  sessionTtlMs: 100
+});
+await client.start();
+await client.request("thread/start", { cwd: ${JSON.stringify(directory)}, approvalPolicy: "never", model: "gpt-5.6-luna", sandbox: "read-only" });
+let completed = false;
+client.subscribeEvents(event => {
+  if (event.type === "notification" && event.method === "turn/completed") completed = true;
+});
+await client.request("turn/start", { threadId: ${JSON.stringify(threadId)}, input: [] });
+const deadline = Date.now() + 1_000;
+while (!completed && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+if (!completed) throw new Error("turn/completed was not observed");
+process.stdout.write("ready\\n");
+await new Promise(() => {});
+`, "utf8");
+  const helper = spawn(process.execPath, [...childLoaderArgv(), helperScript], {
+    cwd: directory,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let stderr = "";
+  helper.stderr?.setEncoding("utf8");
+  helper.stderr?.on("data", chunk => { stderr += String(chunk); });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let output = "";
+      const onData = (chunk: string) => {
+        output += chunk;
+        if (!output.includes("ready\n")) return;
+        helper.stdout?.off("data", onData);
+        helper.off("error", onError);
+        helper.off("exit", onExit);
+        resolve();
+      };
+      const onError = (error: Error) => reject(error);
+      const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+        reject(new Error(`starter exited before disconnect (${code ?? "signal"} ${signal ?? ""}): ${stderr}`));
+      };
+      helper.stdout?.setEncoding("utf8");
+      helper.stdout?.on("data", onData);
+      helper.once("error", onError);
+      helper.once("exit", onExit);
+    });
+    const paths = waitEndpointPaths(directory, threadId);
+    const metadata = JSON.parse(await readFile(paths.metadataPath, "utf8")) as { ownerPid?: unknown; expiresAt?: unknown };
+    assert.equal(metadata.expiresAt, Number.MAX_SAFE_INTEGER);
+    assert.equal(typeof metadata.ownerPid, "number");
+    const ownerPid = metadata.ownerPid as number;
+    assert.doesNotThrow(() => process.kill(ownerPid, 0));
+    assert.ok(existsSync(paths.socketPath));
+    assert.ok(existsSync(marker));
+
+    helper.kill("SIGTERM");
+    await new Promise<void>(resolve => helper.once("exit", () => resolve()));
+    const cleanupDeadline = Date.now() + 5_000;
+    while (Date.now() < cleanupDeadline
+      && (existsSync(paths.metadataPath)
+        || existsSync(paths.socketPath)
+        || existsSync(marker)
+        || (() => {
+          try { process.kill(ownerPid, 0); return true; } catch { return false; }
+        })())) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.equal(existsSync(paths.metadataPath), false, "control loss after completion must remove endpoint metadata");
+    assert.equal(existsSync(paths.socketPath), false, "control loss after completion must remove endpoint socket");
+    assert.equal(existsSync(marker), false, "control loss after completion must close the owned App Server");
+    assert.throws(() => process.kill(ownerPid, 0), /ESRCH|not found/i);
+  } finally {
+    if (helper.exitCode === null && helper.signalCode === null) helper.kill("SIGTERM");
+    if (helper.exitCode === null && helper.signalCode === null) {
+      await new Promise<void>(resolve => helper.once("exit", () => resolve()));
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("production detached owner TTL removes endpoint, runner, and App Server", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-runner-ttl-"));
   const fakeCodex = path.join(directory, "fake-codex.mjs");
@@ -1242,36 +1485,68 @@ const stop = () => {
 };
 process.once("SIGTERM", stop);
 process.once("SIGINT", stop);
-const thread = () => ({ id: threadId, cliVersion: "0.148.0", cwd: process.cwd(), status: { type: "idle" }, turns: [] });
-const reply = (id, result) => process.stdout.write(JSON.stringify({ id, result }) + "\\n");
-readline.createInterface({ input: process.stdin }).on("line", line => {
-  const message = JSON.parse(line);
-  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.148.0", codexHome: "/tmp" });
-  else if (message.method === "thread/start") reply(message.id, { thread: { ...thread(), model: "gpt-5.6-luna", reasoningEffort: "max", sandbox: { type: "readOnly" } } });
-  else if (message.method === "thread/read") reply(message.id, { thread: thread() });
-});
+  const thread = () => ({ id: threadId, cliVersion: "0.148.0", cwd: process.cwd(), status: { type: "idle" }, turns: [] });
+  const reply = (id, result) => process.stdout.write(JSON.stringify({ id, result }) + "\\n");
+  const notify = (method, params) => process.stdout.write(JSON.stringify({ method, params }) + "\\n");
+  readline.createInterface({ input: process.stdin }).on("line", line => {
+    const message = JSON.parse(line);
+    if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.148.0", codexHome: "/tmp" });
+    else if (message.method === "thread/start") reply(message.id, { thread: { ...thread(), model: "gpt-5.6-luna", reasoningEffort: "max", sandbox: { type: "readOnly" } } });
+    else if (message.method === "turn/start") {
+      reply(message.id, { turn: { id: "turn-1", status: "inProgress", items: [] } });
+      setTimeout(() => notify("turn/completed", { threadId, turn: { id: "turn-1", status: "completed", items: [] } }), 10);
+    }
+    else if (message.method === "thread/read") reply(message.id, { thread: thread() });
+  });
 `, "utf8");
   await chmod(fakeCodex, 0o755);
-  const adapter = createCliAppServerAdapter({
-    runtime: { surface: "cli", executable: fakeCodex },
-    profile: "synod-5.6",
+  const client = createCliAppServerRunnerClient({
+    codexBin: fakeCodex,
     directory,
+    requestTimeoutMs: 1_000,
     sessionTtlMs: 100
   });
   try {
-    const spawn = spawnRequest();
-    spawn.directory = directory;
-    const spawned = await adapter.spawn(spawn);
-    assert.deepEqual(spawned, { ownerId: threadId, threadId });
+    await client.start();
+    const spawned = await client.request("thread/start", {
+      cwd: directory,
+      approvalPolicy: "never",
+      model: "gpt-5.6-luna",
+      sandbox: "read-only"
+    });
+    assert.equal((spawned as { thread: { id: string } }).thread.id, threadId);
 
     const paths = waitEndpointPaths(directory, threadId);
     assert.ok(existsSync(paths.metadataPath), "TTL owner must publish metadata");
     assert.ok(existsSync(paths.socketPath), "TTL owner must publish a socket");
-    const metadata = JSON.parse(await readFile(paths.metadataPath, "utf8")) as { ownerPid?: unknown };
+    const metadata = JSON.parse(await readFile(paths.metadataPath, "utf8")) as { ownerPid?: unknown; expiresAt?: unknown };
     assert.equal(typeof metadata.ownerPid, "number");
+    assert.equal(metadata.expiresAt, Number.MAX_SAFE_INTEGER);
     const ownerPid = metadata.ownerPid as number;
     assert.doesNotThrow(() => process.kill(ownerPid, 0));
     assert.ok(existsSync(marker), "the owned App Server must be live before TTL");
+
+    let completed = false;
+    const unsubscribe = client.subscribeEvents(event => {
+      if (event.type === "notification" && event.method === "turn/completed") completed = true;
+    });
+    await client.request("turn/start", { threadId, input: [] });
+    const completionDeadline = Date.now() + 1_000;
+    while (!completed && Date.now() < completionDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    unsubscribe();
+    assert.equal(completed, true, "the production runner must observe turn/completed");
+    await new Promise(resolve => setTimeout(resolve, 250));
+    assert.ok(existsSync(paths.metadataPath), "completion must not spend the observation TTL");
+    assert.ok(existsSync(paths.socketPath), "completion must leave the endpoint available before retain");
+    assert.doesNotThrow(() => process.kill(ownerPid, 0), "completion must not expire the runner before retain");
+    assert.ok(existsSync(marker), "completion must leave the owned App Server live before retain");
+    const retainedAt = Date.now();
+    await client.retain();
+    const retainedMetadata = JSON.parse(await readFile(paths.metadataPath, "utf8")) as { expiresAt?: unknown };
+    assert.equal(typeof retainedMetadata.expiresAt, "number");
+    assert.ok((retainedMetadata.expiresAt as number) >= retainedAt + 75, "retention must refresh a full observation window");
 
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline
@@ -1288,7 +1563,7 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
     assert.equal(existsSync(marker), false, "TTL must close the owned App Server");
     assert.throws(() => process.kill(ownerPid, 0), /ESRCH|not found/i);
   } finally {
-    await adapter.close?.();
+    await client.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

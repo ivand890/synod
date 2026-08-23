@@ -936,6 +936,7 @@ export async function run(
       const ownerCleanup = ownerThread
         ? await disposeCliAppServerOwner(options.directory, ownerThread)
         : undefined;
+      const activationWriteAuthorized = "writeAuthorized" in result ? result.writeAuthorized : true;
       const data = {
         action: options.action,
         task: result.task,
@@ -951,13 +952,26 @@ export async function run(
             ownerThread: result.lease.ownerThread,
             boundAt: result.lease.acquiredAt,
             event: result.state.lastEvent,
-            writeAuthorized: true,
+            writeAuthorized: activationWriteAuthorized,
             supervisorNotification: { status: "required-not-observed" as const },
-            followUp: {
-              operation: "wait",
-              arguments: { taskIds: [result.task.id] },
-              requirements: []
-            }
+            followUp: activationWriteAuthorized
+              ? {
+                  operation: "wait",
+                  arguments: { taskIds: [result.task.id] },
+                  requirements: []
+                }
+              : {
+                  operation: "lease.release",
+                  arguments: {
+                    taskId: result.task.id,
+                    leaseId: result.lease.id,
+                    generation: result.lease.generation,
+                    revision: result.lease.taskRevision,
+                    expectedHeartbeatAt: result.lease.heartbeatAt,
+                    ownerThread: result.lease.ownerThread
+                  },
+                  requirements: []
+                }
           }
         } : {}),
         ...("evidence" in result ? { evidence: result.evidence } : {}),

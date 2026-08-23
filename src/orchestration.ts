@@ -6013,14 +6013,13 @@ export async function bindTaskLease({
     }
     const fromState = task.state;
     const observerLease = reservation.observer === true;
-    const approvalObserverLease = approvalRole !== undefined;
-    const references = !approvalObserverLease && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(fromState)
+    const references = !observerLease && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(fromState)
       ? requireEvidence(task, "ACTIVE", evidence)
       : [];
     const createdEvidence = references.length > 0
       ? recordEvidence(state, task, "correction", task.revision, references, actor, context)
       : [];
-    if (!approvalObserverLease && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(fromState)) {
+    if (!observerLease && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(fromState)) {
       task.correctionRound += 1;
       task.correctionPolicy.used += 1;
       resetAcceptanceAndVerification(task);
@@ -6046,7 +6045,7 @@ export async function bindTaskLease({
     };
     delete task.leaseReservation;
     task.lease = lease;
-    if (!approvalObserverLease) {
+    if (!observerLease) {
       task.state = "ACTIVE";
       delete task.preLease;
       delete task.blocker;
@@ -6056,7 +6055,7 @@ export async function bindTaskLease({
     return {
       metadata: {
         fromState,
-        ...(approvalObserverLease ? {} : { toState: "ACTIVE" as const }),
+        ...(observerLease ? {} : { toState: "ACTIVE" as const }),
         revision: task.revision,
         payload: {
           leaseId: lease.id,
@@ -6233,6 +6232,7 @@ export async function acquireTaskLease({
         details: { taskId, leaseId: task.leaseReservation.id, generation: task.leaseReservation.generation }
       });
     }
+    if (!observerRequested) assertConcurrencyCapacity(state, taskId);
     for (const other of taskList(state)) {
       const leaseCollisions = other.lease
         ? scopes.filter(scope => other.lease?.scopes.some(existing => leaseScopesOverlap(scope, existing)))

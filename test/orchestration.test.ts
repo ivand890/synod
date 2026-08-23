@@ -1587,6 +1587,92 @@ test("reservations enforce the concurrent subagent limit and task-next reports r
   assert.deepEqual(guidance.concurrency, { limit: 3, activeWriters: 2, activeReaders: 0, availableSlots: 1 });
 });
 
+test("direct writer acquisition enforces capacity, excludes observers, and reuses a released slot", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  for (const id of ["T-A", "T-B", "T-C", "T-D", "T-OBSERVER"]) {
+    await addDefaultTask(directory, { id, objective: `Acquire ${id}` });
+    await transitionTask({ directory, id, to: "READY", revision: 0 });
+  }
+
+  const first = await acquireTaskLease({ directory, id: "T-A", ownerThread: "thread:a", write: ["src/a.ts"] });
+  const second = await acquireTaskLease({ directory, id: "T-B", ownerThread: "thread:b", write: ["src/b.ts"] });
+  const third = await acquireTaskLease({ directory, id: "T-C", ownerThread: "thread:c", write: ["src/c.ts"] });
+  const observer = await acquireTaskLease({
+    directory,
+    id: "T-OBSERVER",
+    ownerThread: "thread:observer",
+    read: ["src/a.ts"],
+    observer: true
+  });
+  assert.equal(observer.lease.observer, true);
+
+  await assert.rejects(
+    acquireTaskLease({ directory, id: "T-D", ownerThread: "thread:d", write: ["src/d.ts"] }),
+    error => {
+      assert.ok(error instanceof SynodError);
+      assert.equal(error.code, ERROR_CODES.CONCURRENCY_EXCEEDED);
+      assert.deepEqual(error.details, {
+        taskId: "T-D",
+        limit: 3,
+        active: 3,
+        conflictingTaskIds: ["T-A", "T-B", "T-C"]
+      });
+      return true;
+    }
+  );
+
+  await releaseTaskLease({
+    directory,
+    id: "T-A",
+    leaseId: first.lease.id,
+    generation: first.lease.generation,
+    revision: first.lease.taskRevision,
+    expectedHeartbeatAt: first.lease.heartbeatAt,
+    ownerThread: first.lease.ownerThread
+  });
+  const acquired = await acquireTaskLease({ directory, id: "T-D", ownerThread: "thread:d", write: ["src/d.ts"] });
+  assert.equal(acquired.lease.ownerThread, "thread:d");
+  assert.equal(acquired.lease.observer, undefined);
+
+  await releaseTaskLease({
+    directory,
+    id: "T-B",
+    leaseId: second.lease.id,
+    generation: second.lease.generation,
+    revision: second.lease.taskRevision,
+    expectedHeartbeatAt: second.lease.heartbeatAt,
+    ownerThread: second.lease.ownerThread
+  });
+  await releaseTaskLease({
+    directory,
+    id: "T-C",
+    leaseId: third.lease.id,
+    generation: third.lease.generation,
+    revision: third.lease.taskRevision,
+    expectedHeartbeatAt: third.lease.heartbeatAt,
+    ownerThread: third.lease.ownerThread
+  });
+  await releaseTaskLease({
+    directory,
+    id: "T-D",
+    leaseId: acquired.lease.id,
+    generation: acquired.lease.generation,
+    revision: acquired.lease.taskRevision,
+    expectedHeartbeatAt: acquired.lease.heartbeatAt,
+    ownerThread: acquired.lease.ownerThread
+  });
+  await releaseTaskLease({
+    directory,
+    id: "T-OBSERVER",
+    leaseId: observer.lease.id,
+    generation: observer.lease.generation,
+    revision: observer.lease.taskRevision,
+    expectedHeartbeatAt: observer.lease.heartbeatAt,
+    ownerThread: observer.lease.ownerThread
+  });
+});
+
 test("observer reservations coexist with writers at the capacity limit and bind as observer leases", async () => {
   const directory = await temporaryProject();
   await initializeGitHead(directory);
@@ -1632,7 +1718,7 @@ test("observer reservations coexist with writers at the capacity limit and bind 
     ownerThread: "thread:observer"
   });
   assert.equal(bound.lease.observer, true);
-  assert.equal(bound.task.state, "ACTIVE");
+  assert.equal(bound.task.state, "READY");
 
   const acquiredObserver = await acquireTaskLease({
     directory,
@@ -1655,6 +1741,54 @@ test("observer reservations coexist with writers at the capacity limit and bind 
       return true;
     }
   );
+});
+
+test("generic observer bind preserves proposal and correction identity through exact release", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-001", ownerThread: "thread:writer", write: ["src/observed.ts"] });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/observed.ts"), "observed\n");
+  const delivered = await transitionTask({ directory, id: "T-001", to: "REVIEW", revision: 1, evidence: ["delivery"] });
+  const proposal = delivered.task.proposal!;
+  const correctionRound = delivered.task.correctionRound;
+  const correctionPolicy = structuredClone(delivered.task.correctionPolicy);
+  const reserved = await reserveTaskLease({
+    directory,
+    id: "T-001",
+    read: proposal.ownedPaths,
+    observer: true
+  });
+  const bound = await bindTaskLease({
+    directory,
+    id: "T-001",
+    ...reservationFence(reserved.reservation),
+    ownerThread: "thread:observer"
+  });
+  assert.equal(bound.writeAuthorized, false);
+  assert.equal(bound.lease.observer, true);
+  assert.equal(bound.task.state, "REVIEW");
+  assert.deepEqual(bound.task.proposal, proposal);
+  assert.equal(bound.task.correctionRound, correctionRound);
+  assert.deepEqual(bound.task.correctionPolicy, correctionPolicy);
+
+  const released = await releaseTaskLease({
+    directory,
+    id: "T-001",
+    leaseId: bound.lease.id,
+    generation: bound.lease.generation,
+    revision: bound.lease.taskRevision,
+    expectedHeartbeatAt: bound.lease.heartbeatAt,
+    ownerThread: bound.lease.ownerThread
+  });
+  assert.equal(released.task.state, "REVIEW");
+  assert.equal(released.task.lease, undefined);
+  assert.deepEqual(released.task.proposal, proposal);
+  assert.equal(released.task.correctionRound, correctionRound);
+  assert.deepEqual(released.task.correctionPolicy, correctionPolicy);
 });
 
 test("task next emits deterministic planned writer batches without guessing legacy tasks", async () => {

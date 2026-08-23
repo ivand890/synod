@@ -1764,6 +1764,88 @@ test("lease reservation commands expose the pre-spawn and post-bind authorizatio
   }
 });
 
+test("observer bind activation is read-only and offers an exact lease release", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-observer-bind-test-"));
+  const { messages, output } = capturedOutput();
+  const fence = (reservation: Record<string, unknown>) => [
+    "--reservation-token", String(reservation.token),
+    "--lease-id", String(reservation.id),
+    "--generation", String(reservation.generation),
+    "--revision", String(reservation.taskRevision),
+    "--expected-reserved-at", String(reservation.reservedAt),
+    "--baseline-hash", String((reservation.baseline as Record<string, unknown>).snapshotContentHash)
+  ];
+
+  try {
+    await run(["init", directory], output);
+    await mkdir(path.join(directory, "src"), { recursive: true });
+    await writeFile(path.join(directory, "src/observed.ts"), "observed\n", "utf8");
+    initializeGitHead(directory);
+    messages.length = 0;
+    await run([
+      "task", "add", "T-OBSERVER",
+      "--objective", "Observe a task without changing lifecycle state",
+      "--executor", "synod_implementer",
+      "--acceptance", "The observer remains read-only",
+      "--verification", "pnpm test",
+      "--cwd", directory
+    ], output);
+    messages.length = 0;
+    await run(["task", "transition", "T-OBSERVER", "READY", "--revision", "0", "--cwd", directory], output);
+    messages.length = 0;
+
+    const reserveCode = await run([
+      "lease", "reserve", "T-OBSERVER",
+      "--read", "src/observed.ts",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const reserved = JSON.parse(takeMessage(messages));
+    assert.equal(reserveCode, 0);
+
+    const bindCode = await run([
+      "lease", "bind", "T-OBSERVER",
+      ...fence(reserved.data.reservation),
+      "--owner-thread", "thread:observer",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const bound = JSON.parse(takeMessage(messages));
+    assert.equal(bindCode, 0);
+    assert.equal(bound.data.writeAuthorized, false);
+    assert.equal(bound.data.task.state, "READY");
+    assert.deepEqual(bound.data.activation.followUp, {
+      operation: "lease.release",
+      arguments: {
+        taskId: "T-OBSERVER",
+        leaseId: bound.data.lease.id,
+        generation: bound.data.lease.generation,
+        revision: bound.data.lease.taskRevision,
+        expectedHeartbeatAt: bound.data.lease.heartbeatAt,
+        ownerThread: "thread:observer"
+      },
+      requirements: []
+    });
+
+    const releaseCode = await run([
+      "lease", "release", "T-OBSERVER",
+      "--lease-id", bound.data.lease.id,
+      "--generation", String(bound.data.lease.generation),
+      "--revision", String(bound.data.lease.taskRevision),
+      "--expected-heartbeat-at", bound.data.lease.heartbeatAt,
+      "--owner-thread", "thread:observer",
+      "--cwd", directory,
+      "--json"
+    ], output);
+    const released = JSON.parse(takeMessage(messages));
+    assert.equal(releaseCode, 0);
+    assert.equal(released.data.task.state, "READY");
+    assert.equal(released.data.task.lease, undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("task override and split commands expose canonical policy decisions through JSON", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-policy-json-test-"));
   const { messages, output } = capturedOutput();

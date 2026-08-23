@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, rm, unlink, writeFile } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import os from "node:os";
@@ -25,6 +25,7 @@ import { isRecord } from "./validation.js";
 const RUNNER_MARKER = "--synod-cli-app-server-runner";
 const DEFAULT_CONTROL_TIMEOUT_MS = 15_000;
 const DEFAULT_SESSION_TTL_MS = 10 * 60 * 1000;
+const UNARMED_ENDPOINT_EXPIRY = Number.MAX_SAFE_INTEGER;
 
 export interface CliAppServerRunnerClientOptions {
   codexBin: string;
@@ -156,6 +157,29 @@ function writeLine(socket: Socket, value: unknown): void {
   if (!socket.destroyed) socket.write(`${JSON.stringify(value)}\n`);
 }
 
+function writeLineFlushed(socket: Socket, value: unknown): Promise<void> {
+  if (socket.destroyed) return Promise.resolve();
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      socket.off("error", onError);
+      socket.off("close", onClose);
+      resolve();
+    };
+    const onError = () => finish();
+    const onClose = () => finish();
+    socket.once("error", onError);
+    socket.once("close", onClose);
+    try {
+      socket.write(`${JSON.stringify(value)}\n`, finish);
+    } catch {
+      finish();
+    }
+  });
+}
+
 function threadIdFrom(value: unknown): string | undefined {
   if (!isRecord(value) || !isRecord(value.thread)) return undefined;
   return asString(value.thread.id) ?? asString(value.thread.threadId);
@@ -170,6 +194,15 @@ function diagnosticsIsCli(value: AppServerDiagnostics): boolean {
 
 function endpointError(error: unknown): EndpointResponse {
   return { ok: false, error: errorRecord(error) };
+}
+
+function ownerProcessIsAlive(ownerPid: number): boolean {
+  try {
+    process.kill(ownerPid, 0);
+    return true;
+  } catch (error) {
+    return isRecord(error) && error.code === "EPERM";
+  }
 }
 
 async function removeEndpoint(metadata: EndpointMetadata | undefined): Promise<void> {
@@ -263,9 +296,9 @@ class DetachedRunnerOwner {
     socket.on("close", () => {
       if (this.controlSocket !== socket) return;
       this.controlSocket = undefined;
-      // Once the turn completed, the endpoint is intentionally durable after
-      // the starter disappears. Before that point a lost starter is a failed
-      // handoff and the owner is cleaned up immediately.
+      // The starter remains authoritative until it explicitly retains the
+      // owner. A completed turn alone must not turn a lost control handoff
+      // into an unbounded runner.
       if (!this.retained) void this.close();
       else {
         try { this.controlServer.close(); } catch { /* already closed */ }
@@ -275,11 +308,6 @@ class DetachedRunnerOwner {
   }
 
   private forwardEvent(event: AppServerEvent): void {
-    if (event.type === "notification" && event.method === "turn/completed") {
-      const params = isRecord(event.params) ? event.params : undefined;
-      const threadId = asString(params?.threadId);
-      if (threadId && threadId === this.currentTurnThread) this.retained = true;
-    }
     if (this.controlSocket) writeLine(this.controlSocket, { event } satisfies ControlEvent);
     if (event.type === "failure" && !this.retained) void this.close();
   }
@@ -303,7 +331,7 @@ class DetachedRunnerOwner {
     }
     if (request.method === "close") {
       await this.close(false);
-      writeLine(socket, { id: request.id, ok: true } satisfies ControlResponse);
+      await writeLineFlushed(socket, { id: request.id, ok: true } satisfies ControlResponse);
       socket.end();
       setImmediate(() => process.exit(0));
       return;
@@ -329,6 +357,15 @@ class DetachedRunnerOwner {
         throw new SynodError(ERROR_CODES.HOST_ADAPTER_INVALID, "CLI App Server runner cannot retain before thread/start.");
       }
       this.retained = true;
+      try {
+        await this.armEndpointObservation();
+      } catch (error) {
+        this.retained = false;
+        // A failed metadata publication must not leave an unarmed endpoint
+        // with an effectively infinite lifetime while control remains open.
+        void this.close();
+        throw error;
+      }
       writeLine(socket, { id: request.id, ok: true, result: { threadId: this.currentTurnThread } } satisfies ControlResponse);
       return;
     }
@@ -351,7 +388,7 @@ class DetachedRunnerOwner {
     await mkdir(path.dirname(paths.socketPath), { recursive: true, mode: 0o700 });
     if (existsSync(paths.metadataPath) || existsSync(paths.socketPath)) {
       const stale = this.readEndpointMetadata(paths.metadataPath);
-      if (!stale || stale.expiresAt > Date.now()) {
+      if (!stale || (stale.expiresAt > Date.now() && ownerProcessIsAlive(stale.ownerPid))) {
         throw new SynodError(ERROR_CODES.HOST_ADAPTER_INVALID, "an exact-thread CLI App Server wait endpoint is already present.", {
           details: { threadId, socketPath: paths.socketPath }
         });
@@ -364,7 +401,10 @@ class DetachedRunnerOwner {
       threadId,
       directory: path.resolve(this.args.directory),
       token: randomUUID(),
-      expiresAt: Date.now() + this.args.sessionTtlMs,
+      // Keep the endpoint discoverable while the starter runs its bounded
+      // turn, but do not spend the observation TTL before retention succeeds.
+      // Control loss still closes an unretained owner immediately.
+      expiresAt: UNARMED_ENDPOINT_EXPIRY,
       socketPath: paths.socketPath,
       ownerPid: process.pid
     };
@@ -390,6 +430,20 @@ class DetachedRunnerOwner {
         details: { socketPath: paths.socketPath }
       });
     });
+  }
+
+  private async armEndpointObservation(): Promise<void> {
+    const current = this.endpointMetadata;
+    if (this.closed || !current) return;
+    if (this.endpointTimer !== undefined) clearTimeout(this.endpointTimer);
+    this.endpointTimer = undefined;
+    const metadata: EndpointMetadata = {
+      ...current,
+      expiresAt: Date.now() + this.args.sessionTtlMs
+    };
+    this.endpointMetadata = metadata;
+    const metadataPath = cliAppServerEndpointPaths(metadata.directory, metadata.threadId).metadataPath;
+    writeFileSync(metadataPath, JSON.stringify(metadata), { encoding: "utf8", mode: 0o600 });
     const timer = setTimeout(() => { void this.close(); }, this.args.sessionTtlMs);
     timer.unref?.();
     this.endpointTimer = timer;
@@ -400,7 +454,8 @@ class DetachedRunnerOwner {
       const value: unknown = JSON.parse(readFileSync(metadataPath, "utf8"));
       if (!isRecord(value) || value.version !== 1 || typeof value.threadId !== "string"
         || typeof value.directory !== "string" || typeof value.token !== "string"
-        || typeof value.expiresAt !== "number" || typeof value.socketPath !== "string") return undefined;
+        || typeof value.expiresAt !== "number" || typeof value.socketPath !== "string"
+        || typeof value.ownerPid !== "number") return undefined;
       return value as unknown as EndpointMetadata;
     } catch {
       return undefined;
@@ -509,9 +564,7 @@ class DetachedRunnerOwner {
     try { this.controlServer.close(); } catch { /* already closed */ }
     await unlink(this.args.socketPath).catch(() => undefined);
     await this.client.close().catch(() => undefined);
-    const controlSocket = this.controlSocket;
     this.controlSocket = undefined;
-    controlSocket?.destroy();
     if (exit) setImmediate(() => process.exit(0));
   }
 }
