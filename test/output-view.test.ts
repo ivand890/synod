@@ -382,6 +382,7 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
           actions: [action],
           evidence: [{ id: "omit-history" }]
         }],
+        parallelBatches: [{ taskIds: ["T-GUIDANCE"], actions: [action] }],
         concurrency: { limit: 3, activeWriters: 2, activeReaders: 0, availableSlots: 1 },
         lastEvent: { sequence: 12, id: "event-12", hash: "sha256:event" }
       }
@@ -399,6 +400,7 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
   const summary = projectJsonEnvelope(envelope, "summary") as typeof envelope;
   const task = summary.data.guidance.tasks[0]!;
   assert.deepEqual(summary.data.guidance.concurrency, { limit: 3, activeWriters: 2, activeReaders: 0, availableSlots: 1 });
+  assert.deepEqual(summary.data.guidance.parallelBatches, [{ taskIds: ["T-GUIDANCE"], actions: [action] }]);
   assert.equal(task.id, "T-GUIDANCE");
   assert.deepEqual(task.dependsOn, ["T-BASE"]);
   assert.deepEqual(task.incompleteDependencies, ["T-BASE"]);

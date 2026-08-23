@@ -55,6 +55,7 @@ import {
   isCorrectionPolicy,
   isEndedTaskLease,
   isLeaseBaselineReference,
+  isPlannedLeaseScopes,
   isTaskLease,
   isTaskLeaseReservation,
   isTaskProposalReference,
@@ -63,6 +64,7 @@ import {
   leaseScopesOverlap,
   normalizeLeaseScopePath,
   normalizeLeaseScopes,
+  normalizePlannedLeaseScopes,
   parseLeaseDuration,
   retainLeaseBaselinesLedger,
   serializeLeaseBaselinesLedger,
@@ -72,6 +74,7 @@ import {
   type LeaseBaseline,
   type LeaseBaselinesLedger,
   type LeaseBaselineReference,
+  type LeaseScope,
   type TaskLease,
   type TaskLeaseReservation,
   TASK_PROPOSAL_PATH_STATES_VERSION,
@@ -238,6 +241,12 @@ export interface OrchestrationTask {
   correctionRound: number;
   correctionPolicy: CorrectionPolicy;
   leaseGeneration: number;
+  /**
+   * Optional additive scheduler intent. Legacy tasks omit this field and
+   * remain readable/actionable, but only tasks with a valid writer lane are
+   * eligible for parallel writer guidance.
+   */
+  plannedScopes?: LeaseScope[];
   lease?: TaskLease;
   leaseReservation?: TaskLeaseReservation;
   proposal?: TaskProposalReference;
@@ -633,7 +642,19 @@ export function legalTaskTransitions(
 }
 
 function guidanceArgv(operation: string, taskId: string, args: Record<string, unknown> = {}): string[] {
-  if (operation === "delegate.start") return ["delegate", "start", taskId];
+  if (operation === "delegate.start") {
+    const lane = (key: "write" | "writeTree" | "read" | "readTree", flag: string) => {
+      const values = Array.isArray(args[key]) ? args[key] : [];
+      return values.flatMap(value => [flag, String(value)]);
+    };
+    return [
+      "delegate", "start", taskId,
+      ...lane("write", "--write"),
+      ...lane("writeTree", "--write-tree"),
+      ...lane("read", "--read"),
+      ...lane("readTree", "--read-tree")
+    ];
+  }
   if (operation === "delegate.complete") return ["delegate", "complete", taskId];
   if (operation === "wait.task") return ["wait", "--task", taskId];
   if (operation === "proposal.submit") return ["proposal", "submit", taskId];
@@ -744,6 +765,79 @@ function preferredTransition(state: TaskState): TaskState | undefined {
   return undefined;
 }
 
+interface ParallelTaskBatch {
+  taskIds: string[];
+  actions: TaskGuidanceAction[];
+}
+
+function plannedWriterScopes(task: OrchestrationTask): LeaseScope[] {
+  return task.plannedScopes?.filter(scope => scope.access === "write") || [];
+}
+
+function plannedScopesConflict(left: readonly LeaseScope[], right: readonly LeaseScope[]): boolean {
+  return left.some(scope => right.some(candidate => leaseScopesOverlap(scope, candidate)));
+}
+
+function proposalPathsForScheduling(task: OrchestrationTask): string[] {
+  const current = task.proposal && proposalReservesPaths(task) ? task.proposal.ownedPaths : [];
+  const recovery = task.recovery?.status === "PENDING" ? task.recovery.proposal?.ownedPaths || [] : [];
+  return [...new Set([...current, ...recovery])];
+}
+
+function plannedScopesHitProposal(scopes: readonly LeaseScope[], paths: readonly string[]): boolean {
+  return scopes.some(scope => paths.some(candidate => leaseScopeCoversPath(scope, candidate)));
+}
+
+async function parallelReadyBatches(
+  targetDirectory: string,
+  state: OrchestrationState,
+  guidanceTasks: readonly { id: string; actions: TaskGuidanceAction[] }[]
+): Promise<ParallelTaskBatch[]> {
+  const availableSlots = concurrencyStatus(state).availableSlots;
+  if (availableSlots <= 0) return [];
+
+  const activeWriterScopes = taskList(state).flatMap(task => {
+    const authority = task.leaseReservation || task.lease;
+    if (!authority || authority.observer === true) return [];
+    return authority.scopes.filter(scope => scope.access === "write");
+  });
+  const sealedProposalPaths = taskList(state).flatMap(proposalPathsForScheduling);
+  const candidates = guidanceTasks
+    .map(guidance => ({ guidance, task: state.tasks[guidance.id]! }))
+    .filter(({ guidance, task }) => task.state === "READY"
+      && task.lease === undefined
+      && task.leaseReservation === undefined
+      && task.recovery?.status !== "PENDING"
+      && task.dependsOn.every(dependency => state.tasks[dependency]?.state === "DONE")
+      && guidance.actions.some(action => action.operation === "delegate.start")
+      && plannedWriterScopes(task).length > 0);
+  // guidanceTasks already follows the canonical taskOrder. Preserve that
+  // order so the scheduler's deterministic winner agrees with the ordinary
+  // recommendedTaskId and never promotes a lexical-ID successor.
+  const selected: Array<{ task: OrchestrationTask; action: TaskGuidanceAction }> = [];
+  for (const candidate of candidates) {
+    if (selected.length >= availableSlots) break;
+    const scopes = plannedWriterScopes(candidate.task);
+    try {
+      await validateLeaseScopeFilesystemPaths(targetDirectory, candidate.task.plannedScopes || []);
+    } catch {
+      // A plan whose filesystem identity drifted after task creation is not a
+      // safe scheduler candidate. The ordinary per-task action remains
+      // available and the eventual reservation will report the typed fence.
+      continue;
+    }
+    if (plannedScopesConflict(scopes, activeWriterScopes)
+      || plannedScopesHitProposal(scopes, sealedProposalPaths)) continue;
+    if (selected.some(item => plannedScopesConflict(scopes, plannedWriterScopes(item.task)))) continue;
+    const action = candidate.guidance.actions.find(item => item.operation === "delegate.start");
+    if (!action) continue;
+    selected.push({ task: candidate.task, action });
+  }
+  return selected.length === 0
+    ? []
+    : [{ taskIds: selected.map(item => item.task.id), actions: selected.map(item => item.action) }];
+}
+
 export async function nextTaskGuidance(
   { directory = "." }: { directory?: string } = {},
   { clock = () => Date.now() }: { clock?: () => number } = {}
@@ -789,12 +883,13 @@ export async function nextTaskGuidance(
         : legalTransitions;
       const transitionActions = orderedTransitions.flatMap(to => {
         if (leaseActivationReady && to === "ACTIVE") {
+          const planned = task.plannedScopes || [];
           return [guidanceAction("delegate.start", {
             taskId: task.id,
-            write: [],
-            writeTree: [],
-            read: [],
-            readTree: []
+            write: planned.filter(scope => scope.access === "write" && scope.kind === "file").map(scope => scope.path),
+            writeTree: planned.filter(scope => scope.access === "write" && scope.kind === "tree").map(scope => scope.path),
+            read: planned.filter(scope => scope.access === "read" && scope.kind === "file").map(scope => scope.path),
+            readTree: planned.filter(scope => scope.access === "read" && scope.kind === "tree").map(scope => scope.path)
           }, ["write-scope"])];
         }
         if (task.state === "ACTIVE" && to === "REVIEW") {
@@ -897,6 +992,7 @@ export async function nextTaskGuidance(
         state: task.state,
         revision: task.revision,
         dependsOn: [...task.dependsOn],
+        ...(task.plannedScopes === undefined ? {} : { plannedScopes: structuredClone(task.plannedScopes) }),
         incompleteDependencies,
         correction: structuredClone(task.correctionPolicy),
         budget: task.budget ? {
@@ -953,9 +1049,11 @@ export async function nextTaskGuidance(
         actions
       };
     });
+  const parallelBatches = await parallelReadyBatches(targetDirectory, canonical.state, tasks);
   return {
     recommendedTaskId: tasks.find(task => task.actions.length > 0)?.id || null,
     tasks,
+    parallelBatches,
     concurrency: concurrencyStatus(canonical.state),
     lastEvent: canonical.state.lastEvent
   };
@@ -1598,6 +1696,7 @@ export function renderStatusMarkdown(
         `- Revision: ${task.revision}`,
         `- Correction round: ${task.correctionRound}`,
         `- Correction policy: ${task.correctionPolicy.used}/${task.correctionPolicy.limit} used; ${task.correctionPolicy.overrides.length} override(s)`,
+        `- Planned delegation scopes: ${task.plannedScopes && task.plannedScopes.length > 0 ? task.plannedScopes.map(scope => `${scope.access} ${scope.kind} ${markdownCell(scope.path)}`).join(", ") : "—"}`,
         `- Token budget: ${task.budget ? `${task.budget.thresholdStatus}; policy r${task.budget.policy.revision}; soft ${task.budget.policy.softTotalTokens ?? "—"}; hard ${effectiveHardTotalTokens(task.budget) ?? "—"}; session ${markdownCell(task.budget.policy.rootSessionId)}; ${task.budget.observations.length} observation(s); ${task.budget.decisions.length} decision(s)` : "—"}`,
         `- Writer lease: ${task.lease ? `${task.lease.id} generation ${task.lease.generation}; owner ${markdownCell(task.lease.ownerThread)}; expires ${task.lease.expiresAt}` : task.preLease ? "migration required before further progress" : "—"}`,
         `- Writer reservation: ${task.leaseReservation ? `${task.leaseReservation.id} generation ${task.leaseReservation.generation}; write authorized no; expires ${task.leaseReservation.expiresAt}` : "—"}`,
@@ -2078,6 +2177,7 @@ function isOrchestrationTask(value: unknown): value is OrchestrationTask {
     && isCorrectionPolicy(value.correctionPolicy)
     && value.correctionPolicy.used === value.correctionRound
     && isNonNegativeInteger(value.leaseGeneration)
+    && (value.plannedScopes === undefined || isPlannedLeaseScopes(value.plannedScopes))
     && (value.lease === undefined || isTaskLease(value.lease))
     && (value.leaseReservation === undefined || isTaskLeaseReservation(value.leaseReservation))
     && (value.proposal === undefined || isTaskProposalReference(value.proposal))
@@ -3847,6 +3947,12 @@ export interface AddTaskOptions {
   acceptance?: unknown[];
   verification?: unknown[];
   dependsOn?: unknown[];
+  /** Canonical planned scopes, useful to API callers that already have lanes. */
+  plannedScopes?: unknown[];
+  plannedRead?: unknown[];
+  plannedWrite?: unknown[];
+  plannedReadTree?: unknown[];
+  plannedWriteTree?: unknown[];
   correctionLimit?: number;
   actor?: string;
 }
@@ -3859,6 +3965,11 @@ export async function addTask({
   acceptance = [],
   verification = [],
   dependsOn = [],
+  plannedScopes,
+  plannedRead = [],
+  plannedWrite = [],
+  plannedReadTree = [],
+  plannedWriteTree = [],
   correctionLimit = 2,
   actor = "supervisor"
 }: AddTaskOptions = {}, dependencies: OrchestrationDependencies = {}) {
@@ -3874,9 +3985,23 @@ export async function addTask({
   const criteria = normalizedList(acceptance, "acceptance criterion");
   const commands = normalizedList(verification, "verification command");
   const dependenciesList = [...new Set(dependsOn.map(value => String(value).trim().toUpperCase()).filter(Boolean))];
+  const laneValues = [...plannedRead, ...plannedWrite, ...plannedReadTree, ...plannedWriteTree];
+  if (plannedScopes !== undefined && laneValues.length > 0) {
+    throw new SynodError(ERROR_CODES.TASK_INVALID, "Task planned scopes must use either canonical scopes or explicit lane options, not both.");
+  }
+  const normalizedPlannedScopes = plannedScopes !== undefined
+    ? normalizePlannedLeaseScopes(plannedScopes)
+    : laneValues.length > 0
+      ? normalizeLeaseScopes({
+          read: plannedRead,
+          write: plannedWrite,
+          readTree: plannedReadTree,
+          writeTree: plannedWriteTree
+        })
+      : undefined;
   const targetDirectory = path.resolve(directory);
 
-  return commitMutation(targetDirectory, "task.created", { actor, taskId }, (state, context) => {
+  return commitMutation(targetDirectory, "task.created", { actor, taskId }, async (state, context) => {
     if (state.tasks[taskId]) throw new SynodError(ERROR_CODES.TASK_EXISTS, `Task ${taskId} already exists.`, { details: { taskId } });
     for (const dependency of dependenciesList) {
       if (!state.tasks[dependency] || dependency === taskId) {
@@ -3885,6 +4010,7 @@ export async function addTask({
         });
       }
     }
+    if (normalizedPlannedScopes) await validateLeaseScopeFilesystemPaths(targetDirectory, normalizedPlannedScopes);
     const task: OrchestrationTask = {
       id: taskId,
       objective: taskObjective,
@@ -3895,6 +4021,7 @@ export async function addTask({
       correctionRound: 0,
       correctionPolicy: { limit: correctionLimit, used: 0, overrides: [] },
       leaseGeneration: 0,
+      ...(normalizedPlannedScopes === undefined ? {} : { plannedScopes: normalizedPlannedScopes }),
       acceptance: { criteria, status: "pending", revision: null, evidenceIds: [] },
       verification: { commands, status: "pending", revision: null, evidenceIds: [] },
       evidence: [],

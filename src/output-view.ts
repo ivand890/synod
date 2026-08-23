@@ -184,7 +184,8 @@ function compactTask(value: unknown): unknown {
     "supersededReason",
     "splitFrom",
     "preLease",
-    "approvalPolicy"
+    "approvalPolicy",
+    "plannedScopes"
   ]);
   if (isRecord(value.correctionPolicy)) result.correctionPolicy = pick(value.correctionPolicy, ["limit", "used"]);
   if (isRecord(value.acceptance)) result.acceptance = pick(value.acceptance, ["status", "revision"]);
@@ -237,6 +238,7 @@ function compactGuidanceTask(value: unknown): unknown {
     "state",
     "revision",
     "dependsOn",
+    "plannedScopes",
     "incompleteDependencies",
     "constraints",
     "legalTransitions",

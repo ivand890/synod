@@ -290,6 +290,58 @@ export function normalizeLeaseScopes({
   );
 }
 
+/**
+ * Normalize the additive task-level implementer plan into the same canonical
+ * scope representation used by runtime leases. Task plans describe the
+ * implementer delegate.start lane and therefore require at least one writer
+ * scope; read scopes may accompany those writer scopes. Read-only observer
+ * and reviewer/verifier lanes continue to use runtime lease normalization.
+ */
+export function normalizePlannedLeaseScopes(value: unknown): LeaseScope[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, "A planned delegation requires at least one scope.");
+  }
+  const lanes: {
+    read: unknown[];
+    write: unknown[];
+    readTree: unknown[];
+    writeTree: unknown[];
+  } = { read: [], write: [], readTree: [], writeTree: [] };
+  for (const scope of value) {
+    if (!isRecord(scope)
+      || (scope.access !== "read" && scope.access !== "write")
+      || (scope.kind !== "file" && scope.kind !== "tree")
+      || typeof scope.path !== "string") {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "Planned delegation scopes must use the canonical path/access/kind shape.", {
+        details: { scope }
+      });
+    }
+    if (scope.access === "read" && scope.kind === "file") lanes.read.push(scope.path);
+    else if (scope.access === "write" && scope.kind === "file") lanes.write.push(scope.path);
+    else if (scope.access === "read" && scope.kind === "tree") lanes.readTree.push(scope.path);
+    else lanes.writeTree.push(scope.path);
+  }
+  return normalizeLeaseScopes(lanes);
+}
+
+export function isPlannedLeaseScopes(value: unknown): value is LeaseScope[] {
+  try {
+    const normalized = normalizePlannedLeaseScopes(value);
+    return Array.isArray(value)
+      && value.length === normalized.length
+      && value.every((scope, index) => {
+        const candidate = normalized[index];
+        return isRecord(scope)
+          && candidate !== undefined
+          && scope.path === candidate.path
+          && scope.access === candidate.access
+          && scope.kind === candidate.kind;
+      });
+  } catch {
+    return false;
+  }
+}
+
 export function leaseScopesOverlap(left: LeaseScope, right: LeaseScope): boolean {
   if (left.access !== "write" || right.access !== "write") return false;
   const leftPath = left.path.normalize("NFC").toLowerCase();

@@ -3,11 +3,13 @@ import test from "node:test";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
 import {
   isCorrectionPolicy,
+  isPlannedLeaseScopes,
   isTaskLease,
   isTaskLeaseReservation,
   leaseScopesOverlap,
   normalizeLeaseScopePath,
-  normalizeLeaseScopes
+  normalizeLeaseScopes,
+  normalizePlannedLeaseScopes
 } from "../src/leases.js";
 
 test("lease reservations validate as a distinct pre-bind authority", () => {
@@ -212,4 +214,29 @@ test("observer scope normalization accepts all-read sets only when explicitly re
   ]) {
     assert.throws(candidate, error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_INVALID);
   }
+});
+
+test("planned implementer scopes reuse lease normalization and require a writer lane", () => {
+  assert.deepEqual(normalizePlannedLeaseScopes([
+    { path: "src/read.ts", access: "read", kind: "file" },
+    { path: "src/write", access: "write", kind: "tree" }
+  ]), [
+    { path: "src/read.ts", access: "read", kind: "file" },
+    { path: "src/write", access: "write", kind: "tree" }
+  ]);
+  const readOnly = [{ path: "docs", access: "read", kind: "tree" }];
+  assert.throws(
+    () => normalizePlannedLeaseScopes(readOnly),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_INVALID
+  );
+  assert.equal(isPlannedLeaseScopes(readOnly), false);
+  assert.equal(isPlannedLeaseScopes([]), false);
+  assert.equal(isPlannedLeaseScopes([
+    { path: "src", access: "write", kind: "tree" },
+    { path: "src/file.ts", access: "write", kind: "file" }
+  ]), false);
+  assert.throws(
+    () => normalizePlannedLeaseScopes([{ path: "../outside", access: "write", kind: "file" }]),
+    error => error instanceof SynodError && error.code === ERROR_CODES.LEASE_INVALID
+  );
 });

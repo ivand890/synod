@@ -287,6 +287,119 @@ test("seals and transactionally integrates a scoped proposal while preserving at
   assert.equal(reviewed.task.proposal?.fingerprint, integrated.integration.fingerprint);
 });
 
+test("parallel disjoint worktrees preserve both deliveries in either seal and integration order", async () => {
+  for (const order of [["T-A", "T-B"], ["T-B", "T-A"]] as const) {
+    const root = await mkdtemp(path.join(os.tmpdir(), "synod-worktree-parallel-test-"));
+    temporaryDirectories.add(root);
+    const control = path.join(root, "control");
+    await mkdir(control);
+    await initProject({ directory: control });
+    await git(control, "init", "--quiet");
+    await git(control, "config", "user.name", "Synod Tests");
+    await git(control, "config", "user.email", "synod-tests@example.invalid");
+    await git(control, "config", "commit.gpgsign", "false");
+    await writeFile(path.join(control, "source.txt"), "base\n");
+    await git(control, "add", ".");
+    await git(control, "commit", "--quiet", "-m", "parallel fixture");
+
+    const worktrees = new Map<string, { options: Parameters<typeof sealTaskWorktreeProposal>[0]; destination: string }>();
+    for (const [id, file] of [["T-A", "src/a.ts"], ["T-B", "src/b.ts"]] as const) {
+      await addTask({
+        directory: control,
+        id,
+        objective: `Disjoint ${id}`,
+        executor: "synod_implementer",
+        acceptance: ["The exact delta is preserved."],
+        verification: ["pnpm test"]
+      });
+      await transitionTask({ directory: control, id, to: "READY", revision: 0 });
+      const acquired = await acquireTaskLease({
+        directory: control,
+        id,
+        ownerThread: `thread:${id}`,
+        write: [file]
+      });
+      const destination = path.join(root, `task-${id}`);
+      const options = {
+        directory: control,
+        taskId: id,
+        destination,
+        leaseId: acquired.lease.id,
+        generation: acquired.lease.generation,
+        revision: acquired.lease.taskRevision,
+        expectedHeartbeatAt: acquired.lease.heartbeatAt,
+        ownerThread: acquired.lease.ownerThread
+      };
+      await createTaskWorktree(options);
+      await transitionTask({ directory: control, id, to: "ACTIVE", revision: 0 });
+      await mkdir(path.dirname(path.join(destination, file)), { recursive: true });
+      await writeFile(path.join(destination, file), `${id}\n`);
+      worktrees.set(id, { options, destination });
+    }
+
+    const sealed = new Map<string, Awaited<ReturnType<typeof sealTaskWorktreeProposal>>>();
+    for (const id of order) sealed.set(id, await sealTaskWorktreeProposal(worktrees.get(id)!.options));
+    assert.deepEqual([...sealed.values()].map(record => record.proposal?.status), ["SEALED", "SEALED"]);
+
+    const integrated = new Map<string, Awaited<ReturnType<typeof integrateTaskWorktreeProposal>>>();
+    for (const id of order) integrated.set(id, await integrateTaskWorktreeProposal(worktrees.get(id)!.options));
+    assert.deepEqual([...integrated.values()].map(record => record.integration.status), ["COMPLETE", "COMPLETE"]);
+    assert.equal(await readFile(path.join(control, "src/a.ts"), "utf8"), "T-A\n");
+    assert.equal(await readFile(path.join(control, "src/b.ts"), "utf8"), "T-B\n");
+
+    for (const id of order) {
+      const delivered = await transitionTask({
+        directory: control,
+        id,
+        to: "REVIEW",
+        revision: 1,
+        evidence: [`delivery:${id}`]
+      });
+      assert.deepEqual(delivered.task.proposal?.ownedPaths, [`src/${id.slice(-1).toLowerCase()}.ts`]);
+      assert.deepEqual(delivered.task.proposal?.excludedForeignPaths, [id === "T-A" ? "src/b.ts" : "src/a.ts"]);
+    }
+  }
+});
+
+test("simultaneous same-fence proposal seals converge on one idempotent artifact", async () => {
+  const { control, destination, options } = await fixture();
+  await createTaskWorktree(options);
+  await activate(control);
+  await mkdir(path.join(destination, "src"), { recursive: true });
+  await writeFile(path.join(destination, "src/t-001.ts"), "same fenced delta\n");
+
+  const attempts = await Promise.allSettled([
+    sealTaskWorktreeProposal(options),
+    sealTaskWorktreeProposal(options)
+  ]);
+  const successful = attempts.filter((item): item is PromiseFulfilledResult<Awaited<ReturnType<typeof sealTaskWorktreeProposal>>> => item.status === "fulfilled");
+  assert.ok(successful.length === 1 || successful.length === 2);
+  const rejected = attempts.filter((item): item is PromiseRejectedResult => item.status === "rejected");
+  if (successful.length === 1) {
+    assert.equal(rejected.length, 1);
+    assert.ok(rejected[0]?.reason instanceof SynodError);
+    assert.equal((rejected[0]?.reason as SynodError).code, ERROR_CODES.ORCHESTRATION_LOCKED);
+  } else {
+    assert.equal(rejected.length, 0);
+  }
+  const proposals = successful.map(item => item.value.proposal);
+  assert.ok(proposals.every(proposal => proposal?.status === "SEALED"));
+  assert.equal(new Set(proposals.map(proposal => proposal?.bundleId)).size, 1);
+
+  const registry = validateTaskWorktreeRegistry(JSON.parse(await readFile(path.join(control, TASK_WORKTREES_PATH), "utf8")));
+  assert.equal(registry.records.length, 1);
+  assert.equal(registry.records[0]?.proposal?.status, "SEALED");
+  assert.equal(registry.sealedProposals.length, 1);
+  assert.equal(registry.events.filter(event => event.type === "worktree.proposal.sealed").length, 1);
+
+  const retry = await sealTaskWorktreeProposal(options);
+  assert.equal(retry.proposal?.status, "SEALED");
+  assert.equal(retry.proposal?.bundleId, proposals[0]?.bundleId);
+  const afterRetry = validateTaskWorktreeRegistry(JSON.parse(await readFile(path.join(control, TASK_WORKTREES_PATH), "utf8")));
+  assert.equal(afterRetry.sealedProposals.length, 1);
+  assert.equal(afterRetry.events.filter(event => event.type === "worktree.proposal.sealed").length, 1);
+});
+
 test("integration rejects unowned drift and rolls back ordinary restore failures", async () => {
   const unowned = await fixture();
   await createTaskWorktree(unowned.options);

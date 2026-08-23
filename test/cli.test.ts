@@ -878,6 +878,35 @@ test("typed task-next and proposal-submit parsing reject copied transition fence
   );
 });
 
+test("task add parses explicit planned file and tree lanes", () => {
+  assert.deepEqual(parseTaskArgs([
+    "add", "T-PLANNED",
+    "--objective", "Plan exact lanes",
+    "--executor", "synod_implementer",
+    "--acceptance", "The lanes are retained",
+    "--verification", "pnpm test",
+    "--planned-write", "src/a.ts",
+    "--planned-write-tree", "src/generated",
+    "--planned-read", "README.md",
+    "--planned-read-tree", "docs"
+  ]), {
+    action: "add",
+    id: "T-PLANNED",
+    objective: "Plan exact lanes",
+    executor: "synod_implementer",
+    acceptance: ["The lanes are retained"],
+    verification: ["pnpm test"],
+    dependsOn: [],
+    plannedRead: ["README.md"],
+    plannedWrite: ["src/a.ts"],
+    plannedReadTree: ["docs"],
+    plannedWriteTree: ["src/generated"],
+    directory: ".",
+    json: false,
+    actor: "supervisor"
+  });
+});
+
 test("recognized nested help wins before positional validation and mutation", async () => {
   const parserCases = [
     { parser: parseLeaseArgs, actions: ["reserve", "bind", "cancel", "acquire", "heartbeat", "release", "expire", "revoke", "recover"] },

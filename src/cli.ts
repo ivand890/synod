@@ -85,7 +85,7 @@ Usage:
   synod bundle export <destination> [--cwd <directory>] [--include-untracked] [--include-local-docs] [--json]
   synod bundle verify <bundle> [--json]
   synod bundle restore <bundle> --cwd <directory> [--include-local-docs] [--json]
-  synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--correction-limit <n>] [--cwd <directory>] [--json]
+  synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--planned-read <path>] [--planned-write <path>] [--planned-read-tree <path>] [--planned-write-tree <path>] [--correction-limit <n>] [--cwd <directory>] [--json]
   synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
   synod task approve <task-id> --role <reviewer|verifier> --decision <approved|rejected> --revision <n> --proposal-bundle-id <bundle> --owner-thread <thread-id> --evidence <reference> [--actor <id>] [--cwd <directory>] [--json]
   synod task correct <task-id> --revision <n> --reason <text> --evidence <reference> [--actor <id>] [--cwd <directory>] [--json]
@@ -186,6 +186,14 @@ Options:
   --write-tree
               Add a repository-relative writer scope covering a directory tree.
   --read-tree Add a repository-relative read scope covering a directory tree.
+  --planned-read
+              Add a read-file lane to a task's persisted delegation plan.
+  --planned-write
+              Add a write-file lane to a task's persisted delegation plan.
+  --planned-read-tree
+              Add a read-tree lane to a task's persisted delegation plan.
+  --planned-write-tree
+              Add a write-tree lane to a task's persisted delegation plan.
   --explain   Include a read-only path-level delta from the acknowledged checkpoint.
   --active-only
               Show operationally open, nonterminal tasks only.

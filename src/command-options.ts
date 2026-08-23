@@ -241,6 +241,10 @@ export interface TaskAddOptions extends TaskCommonOptions {
   acceptance: string[];
   verification: string[];
   dependsOn: string[];
+  plannedRead: string[];
+  plannedWrite: string[];
+  plannedReadTree: string[];
+  plannedWriteTree: string[];
   correctionLimit?: number;
 }
 
@@ -1210,6 +1214,10 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   const acceptance: string[] = [];
   const verification: string[] = [];
   const dependsOn: string[] = [];
+  const plannedRead: string[] = [];
+  const plannedWrite: string[] = [];
+  const plannedReadTree: string[] = [];
+  const plannedWriteTree: string[] = [];
   const evidence: string[] = [];
   const replacements: string[] = [];
   const start = action === "transition" ? 3 : 2;
@@ -1226,7 +1234,8 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
       "--cwd", "--objective", "--executor", "--actor", "--reason",
       "--acceptance", "--verification", "--depends-on", "--evidence", "--revision",
       "--correction-limit", "--additional-rounds", "--approver", "--reference", "--replacement",
-      "--role", "--decision", "--proposal-bundle-id", "--owner-thread"
+      "--role", "--decision", "--proposal-bundle-id", "--owner-thread",
+      "--planned-read", "--planned-write", "--planned-read-tree", "--planned-write-tree"
     ];
     if (valueOptions.includes(arg)) {
       const value = optionValue(args, index, arg);
@@ -1238,6 +1247,10 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
       else if (arg === "--acceptance") acceptance.push(value);
       else if (arg === "--verification") verification.push(value);
       else if (arg === "--depends-on") dependsOn.push(value);
+      else if (arg === "--planned-read") plannedRead.push(value);
+      else if (arg === "--planned-write") plannedWrite.push(value);
+      else if (arg === "--planned-read-tree") plannedReadTree.push(value);
+      else if (arg === "--planned-write-tree") plannedWriteTree.push(value);
       else if (arg === "--evidence") evidence.push(value);
       else if (arg === "--replacement") replacements.push(value);
       else if (arg === "--approver") approver = value;
@@ -1274,12 +1287,29 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task add received a transition-only option.");
     }
     if (correctionLimit !== undefined && Number.isNaN(correctionLimit)) throw new SynodError(ERROR_CODES.TASK_INVALID, "Task add requires an integer --correction-limit.");
-    return { action, id, directory, json, actor, objective, executor, acceptance, verification, dependsOn, ...(correctionLimit === undefined ? {} : { correctionLimit }) };
+    return {
+      action,
+      id,
+      directory,
+      json,
+      actor,
+      objective,
+      executor,
+      acceptance,
+      verification,
+      dependsOn,
+      plannedRead,
+      plannedWrite,
+      plannedReadTree,
+      plannedWriteTree,
+      ...(correctionLimit === undefined ? {} : { correctionLimit })
+    };
   }
   if (action === "approve" || action === "approval" || action === "record-approval") {
     if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
       || dependsOn.length > 0 || correctionLimit !== undefined || additionalRounds !== undefined
-      || approver !== undefined || reference !== undefined || replacements.length > 0 || reason !== undefined) {
+      || approver !== undefined || reference !== undefined || replacements.length > 0 || reason !== undefined
+      || plannedRead.length > 0 || plannedWrite.length > 0 || plannedReadTree.length > 0 || plannedWriteTree.length > 0) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task approval received an unrelated task option.");
     }
     if (!role || !decision || revision === undefined || !Number.isSafeInteger(revision) || revision < 0
@@ -1303,7 +1333,8 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   if (action === "override") {
     if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
       || dependsOn.length > 0 || revision !== undefined || correctionLimit !== undefined || replacements.length > 0
-      || role !== undefined || decision !== undefined || proposalBundleId !== undefined || ownerThread !== undefined) {
+      || role !== undefined || decision !== undefined || proposalBundleId !== undefined || ownerThread !== undefined
+      || plannedRead.length > 0 || plannedWrite.length > 0 || plannedReadTree.length > 0 || plannedWriteTree.length > 0) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task override received an unrelated task option.");
     }
     if (!additionalRounds || Number.isNaN(additionalRounds) || !approver || !reference || !reason || evidence.length === 0) {
@@ -1315,7 +1346,8 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
     if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
       || dependsOn.length > 0 || correctionLimit !== undefined || additionalRounds !== undefined
       || approver !== undefined || reference !== undefined || replacements.length > 0
-      || role !== undefined || decision !== undefined || proposalBundleId !== undefined || ownerThread !== undefined) {
+      || role !== undefined || decision !== undefined || proposalBundleId !== undefined || ownerThread !== undefined
+      || plannedRead.length > 0 || plannedWrite.length > 0 || plannedReadTree.length > 0 || plannedWriteTree.length > 0) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task correct received an unrelated task option.");
     }
     if (!reason || evidence.length === 0 || revision === undefined || !Number.isSafeInteger(revision) || revision < 0) {
@@ -1327,7 +1359,8 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
     if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
       || dependsOn.length > 0 || revision !== undefined || correctionLimit !== undefined || additionalRounds !== undefined
       || approver !== undefined || reference !== undefined || role !== undefined || decision !== undefined
-      || proposalBundleId !== undefined || ownerThread !== undefined) {
+      || proposalBundleId !== undefined || ownerThread !== undefined
+      || plannedRead.length > 0 || plannedWrite.length > 0 || plannedReadTree.length > 0 || plannedWriteTree.length > 0) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task split received an unrelated task option.");
     }
     if (replacements.length < 2 || !reason || evidence.length === 0) {
@@ -1337,7 +1370,8 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   }
   if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0 || dependsOn.length > 0
     || correctionLimit !== undefined || additionalRounds !== undefined || approver !== undefined || reference !== undefined || replacements.length > 0
-    || role !== undefined || decision !== undefined || proposalBundleId !== undefined || ownerThread !== undefined) {
+    || role !== undefined || decision !== undefined || proposalBundleId !== undefined || ownerThread !== undefined
+    || plannedRead.length > 0 || plannedWrite.length > 0 || plannedReadTree.length > 0 || plannedWriteTree.length > 0) {
     throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task transition received a task-definition option.");
   }
   if (!to) throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, "Task transition is missing a target state.");
