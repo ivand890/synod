@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +17,7 @@ import {
   addTask,
   readOrchestration,
   recordCheckpoint,
+  renderStatusMarkdown,
   reserveTaskLease,
   revokeTaskLease,
   transitionTask
@@ -25,6 +27,18 @@ import { exportRecoveryBundle } from "../src/recovery.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories = new Set<string>();
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (!value || typeof value !== "object") return value;
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(Object.keys(record).sort().map(key => [key, stableValue(record[key])]));
+}
+
+function orchestrationEventHash(event: object): string {
+  const unsigned = Object.fromEntries(Object.entries(event).filter(([key]) => key !== "eventHash"));
+  return `sha256:${createHash("sha256").update(JSON.stringify(stableValue(unsigned)), "utf8").digest("hex")}`;
+}
 
 async function git(directory: string, ...args: string[]): Promise<void> {
   await execFileAsync("git", ["-C", directory, ...args], { encoding: "utf8" });
@@ -131,6 +145,17 @@ test("handoff redacts reservation tokens from expire argv", async () => {
 
 test("handoff derives focus, current evidence, blockers, gates, and legal transitions from canonical state", async () => {
   const { directory } = await project();
+  const canonical = await readOrchestration(directory);
+  canonical.state.concurrency = { maxConcurrentSubagents: 4 };
+  const lastEvent = canonical.events.at(-1);
+  assert.ok(lastEvent);
+  lastEvent.state.concurrency = { maxConcurrentSubagents: 4 };
+  lastEvent.eventHash = orchestrationEventHash(lastEvent);
+  canonical.state.lastEvent.hash = lastEvent.eventHash;
+  await writeFile(path.join(directory, ORCHESTRATION_STATE_PATH), `${JSON.stringify(canonical.state, null, 2)}\n`);
+  await writeFile(path.join(directory, ORCHESTRATION_EVENTS_PATH), `${canonical.events.map(event => JSON.stringify(event)).join("\n")}\n`);
+  await writeFile(path.join(directory, ORCHESTRATION_STATUS_PATH), renderStatusMarkdown(canonical.state));
+
   await add(directory, "T-ACTIVE");
   await activate(directory, "T-ACTIVE");
 

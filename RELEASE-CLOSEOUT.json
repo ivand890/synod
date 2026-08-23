@@ -1,65 +1,23 @@
 {
   "schemaVersion": 1,
   "package": "@ivand890/synod",
-  "version": "0.11.0",
-  "tag": "v0.11.0",
+  "version": "0.12.0",
+  "tag": "v0.12.0",
   "sourcePreparation": {
-    "status": "closed",
-    "tagSha": "a120f958f7bd86bf4efeebbf1dd8f88019da1ab8",
+    "status": "prepared",
     "mainAncestorRequired": true,
     "localPackageSmoke": {
       "artifact": "local tarball",
       "command": "pnpm test:package",
-      "status": "passed",
-      "version": "0.11.0"
+      "status": "pending",
+      "version": "0.12.0"
     }
   },
   "publicVerification": {
-    "status": "verified",
-    "tagSha": "a120f958f7bd86bf4efeebbf1dd8f88019da1ab8",
-    "npm": {
-      "package": "@ivand890/synod",
-      "version": "0.11.0",
-      "gitHead": "a120f958f7bd86bf4efeebbf1dd8f88019da1ab8",
-      "latest": "0.11.0"
-    },
-    "githubRelease": {
-      "tag": "v0.11.0",
-      "url": "https://github.com/ivand890/synod/releases/tag/v0.11.0",
-      "publishedAt": "2026-08-18T18:25:08Z",
-      "isDraft": false,
-      "isPrerelease": false,
-      "isImmutable": true,
-      "isLatest": true
-    },
-    "registryInstalledPackage": {
-      "spec": "@ivand890/synod@0.11.0",
-      "dist": {
-        "integrity": "sha512-ilqxLExPly9TqUQhErcK5DOball/DmTQEG9ISpirtcAxTC6nhH4G298lg/cAz4A74lSLnz6Gc9Jk/zkOif0NUQ==",
-        "attestations": {
-          "url": "https://registry.npmjs.org/-/npm/v1/attestations/@ivand890%2fsynod@0.11.0",
-          "provenance": {
-            "predicateType": "https://slsa.dev/provenance/v1"
-          }
-        }
-      },
-      "consumerCommand": "pnpm add --ignore-scripts --save-exact @ivand890/synod@0.11.0",
-      "verification": {
-        "command": "pnpm exec synod --version",
-        "status": "passed",
-        "version": "0.11.0"
-      },
-      "status": "passed",
-      "version": "0.11.0"
-    },
-    "publicCli": {
-      "command": "pnpm dlx @ivand890/synod@0.11.0 --version",
-      "status": "passed",
-      "version": "0.11.0"
-    }
+    "status": "pending"
   },
   "documentation": {
-    "status": "verified",
+    "status": "pending",
     "paths": [
       "README.md",
       "ROADMAP.md",

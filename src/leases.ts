@@ -6,6 +6,7 @@ import {
 } from "./checkpoint.js";
 import { ERROR_CODES, SynodError } from "./errors.js";
 import { isRecord } from "./validation.js";
+import type { DelegationRole } from "./profiles.js";
 
 export const LEASE_BASELINES_PATH = ".synod/lease-baselines.json";
 export const LEASE_BASELINES_SCHEMA_VERSION = 1;
@@ -51,7 +52,9 @@ export interface TaskLeaseReservation {
   taskId: string;
   taskRevision: number;
   executor: string;
+  role?: DelegationRole;
   scopes: LeaseScope[];
+  observer?: true;
   reservedAt: string;
   expiresAt: string;
   ttlSeconds: number;
@@ -66,7 +69,9 @@ export interface TaskLease {
   taskRevision: number;
   ownerThread: string;
   executor: string;
+  role?: DelegationRole;
   scopes: LeaseScope[];
+  observer?: true;
   acquiredAt: string;
   heartbeatAt: string;
   expiresAt: string;
@@ -234,14 +239,21 @@ export function normalizeLeaseScopes({
   write?: unknown[];
   readTree?: unknown[];
   writeTree?: unknown[];
-}): LeaseScope[] {
+}, { observer = false }: { observer?: boolean } = {}): LeaseScope[] {
   const scopes = [
     ...read.map(value => ({ path: normalizeLeaseScopePath(value), access: "read" as const, kind: "file" as const })),
     ...write.map(value => ({ path: normalizeLeaseScopePath(value), access: "write" as const, kind: "file" as const })),
     ...readTree.map(value => ({ path: normalizeLeaseScopePath(value), access: "read" as const, kind: "tree" as const })),
     ...writeTree.map(value => ({ path: normalizeLeaseScopePath(value), access: "write" as const, kind: "tree" as const }))
   ];
-  if (!scopes.some(scope => scope.access === "write")) {
+  if (observer === true) {
+    if (scopes.some(scope => scope.access === "write")) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "An observer lease cannot contain write scopes.");
+    }
+    if (scopes.length === 0) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "An observer lease requires at least one read scope.");
+    }
+  } else if (!scopes.some(scope => scope.access === "write")) {
     throw new SynodError(ERROR_CODES.LEASE_INVALID, "A writer lease requires at least one write scope.");
   }
   const spellings = new Map<string, string>();
@@ -278,6 +290,58 @@ export function normalizeLeaseScopes({
   );
 }
 
+/**
+ * Normalize the additive task-level implementer plan into the same canonical
+ * scope representation used by runtime leases. Task plans describe the
+ * implementer delegate.start lane and therefore require at least one writer
+ * scope; read scopes may accompany those writer scopes. Read-only observer
+ * and reviewer/verifier lanes continue to use runtime lease normalization.
+ */
+export function normalizePlannedLeaseScopes(value: unknown): LeaseScope[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, "A planned delegation requires at least one scope.");
+  }
+  const lanes: {
+    read: unknown[];
+    write: unknown[];
+    readTree: unknown[];
+    writeTree: unknown[];
+  } = { read: [], write: [], readTree: [], writeTree: [] };
+  for (const scope of value) {
+    if (!isRecord(scope)
+      || (scope.access !== "read" && scope.access !== "write")
+      || (scope.kind !== "file" && scope.kind !== "tree")
+      || typeof scope.path !== "string") {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "Planned delegation scopes must use the canonical path/access/kind shape.", {
+        details: { scope }
+      });
+    }
+    if (scope.access === "read" && scope.kind === "file") lanes.read.push(scope.path);
+    else if (scope.access === "write" && scope.kind === "file") lanes.write.push(scope.path);
+    else if (scope.access === "read" && scope.kind === "tree") lanes.readTree.push(scope.path);
+    else lanes.writeTree.push(scope.path);
+  }
+  return normalizeLeaseScopes(lanes);
+}
+
+export function isPlannedLeaseScopes(value: unknown): value is LeaseScope[] {
+  try {
+    const normalized = normalizePlannedLeaseScopes(value);
+    return Array.isArray(value)
+      && value.length === normalized.length
+      && value.every((scope, index) => {
+        const candidate = normalized[index];
+        return isRecord(scope)
+          && candidate !== undefined
+          && scope.path === candidate.path
+          && scope.access === candidate.access
+          && scope.kind === candidate.kind;
+      });
+  } catch {
+    return false;
+  }
+}
+
 export function leaseScopesOverlap(left: LeaseScope, right: LeaseScope): boolean {
   if (left.access !== "write" || right.access !== "write") return false;
   const leftPath = left.path.normalize("NFC").toLowerCase();
@@ -308,6 +372,16 @@ export function isLeaseScope(value: unknown): value is LeaseScope {
     })();
 }
 
+function hasValidObserverScopes(value: { observer?: unknown; scopes: LeaseScope[] }): boolean {
+  if (value.observer === undefined) return value.scopes.some(scope => scope.access === "write");
+  if (value.observer !== true) return false;
+  return value.scopes.length > 0 && value.scopes.every(scope => scope.access === "read");
+}
+
+function isDelegationRole(value: unknown): value is DelegationRole {
+  return value === "implementer" || value === "reviewer" || value === "verifier";
+}
+
 export function isTaskLease(value: unknown): value is TaskLease {
   return isRecord(value)
     && isUuid(value.id)
@@ -319,10 +393,13 @@ export function isTaskLease(value: unknown): value is TaskLease {
     && value.ownerThread.length > 0
     && typeof value.executor === "string"
     && value.executor.length > 0
+    && (value.role === undefined || isDelegationRole(value.role))
     && Array.isArray(value.scopes)
     && value.scopes.length > 0
     && value.scopes.every(isLeaseScope)
-    && value.scopes.some(scope => scope.access === "write")
+    && (value.role === undefined || value.role === "implementer"
+      || (value.observer === true && value.scopes.every(scope => scope.access === "read")))
+    && hasValidObserverScopes({ ...value, scopes: value.scopes })
     && validIsoTimestamp(value.acquiredAt)
     && validIsoTimestamp(value.heartbeatAt)
     && validIsoTimestamp(value.expiresAt)
@@ -360,10 +437,13 @@ export function isTaskLeaseReservation(value: unknown): value is TaskLeaseReserv
     && isNonNegativeInteger(value.taskRevision)
     && typeof value.executor === "string"
     && value.executor.length > 0
+    && (value.role === undefined || isDelegationRole(value.role))
     && Array.isArray(value.scopes)
     && value.scopes.length > 0
     && value.scopes.every(isLeaseScope)
-    && value.scopes.some(scope => scope.access === "write")
+    && (value.role === undefined || value.role === "implementer"
+      || (value.observer === true && value.scopes.every(scope => scope.access === "read")))
+    && hasValidObserverScopes({ ...value, scopes: value.scopes })
     && validIsoTimestamp(value.reservedAt)
     && validIsoTimestamp(value.expiresAt)
     && isPositiveInteger(value.ttlSeconds)

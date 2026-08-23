@@ -132,7 +132,7 @@ test("spawns, initializes, probes, and resolves App Server responses", async () 
 
   assert.deepEqual(calls, [{
     command: "custom-codex",
-    args: ["app-server"],
+    args: ["app-server", "--disable", "multi_agent_v2"],
     options: { stdio: ["pipe", "pipe", "pipe"], cwd: "/tmp/project" }
   }]);
   assert.deepEqual(response, { value: 42 });
@@ -144,7 +144,26 @@ test("spawns, initializes, probes, and resolves App Server responses", async () 
   assert.equal(diagnostics.appServer.capabilities.initialize, true);
   assert.equal(diagnostics.appServer.capabilities.threadList, true);
   assert.equal(diagnostics.appServer.capabilities.modelList, true);
+  assert.deepEqual(diagnostics.appServer.launchedArgv, ["custom-codex", "app-server", "--disable", "multi_agent_v2"]);
   assert.deepEqual(child.signals, ["SIGTERM"]);
+});
+
+test("passes explicit App Server arguments and records the exact argv", async () => {
+  const child = respondingChild();
+  const calls: string[][] = [];
+  const client = new CodexAppServerClient({
+    codexBin: "custom-codex",
+    appServerArgs: ["--enable", "experimental_api"],
+    spawnProcess(command, args) {
+      calls.push([command, ...args]);
+      return child;
+    }
+  });
+
+  await client.start();
+  assert.deepEqual(calls, [["custom-codex", "app-server", "--enable", "experimental_api"]]);
+  assert.deepEqual(client.getDiagnostics().appServer.launchedArgv, calls[0]);
+  await client.close();
 });
 
 test("distinguishes Codex Desktop from Codex CLI user agents", async () => {
@@ -338,4 +357,16 @@ test("synchronous App Server spawn failures use a stable code", async () => {
   });
 
   await assert.rejects(client.start(), error => error instanceof SynodError && error.code === ERROR_CODES.APP_SERVER_SPAWN_FAILED);
+});
+
+test("post-spawn stdio failures close the owned child", async () => {
+  const child = new FakeChild();
+  Object.defineProperty(child, "stderr", { value: undefined });
+  const client = new CodexAppServerClient({ spawnProcess: () => child });
+
+  await assert.rejects(
+    client.start(),
+    error => error instanceof SynodError && error.code === ERROR_CODES.APP_SERVER_SPAWN_FAILED
+  );
+  assert.deepEqual(child.signals, ["SIGTERM"]);
 });

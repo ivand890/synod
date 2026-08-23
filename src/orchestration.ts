@@ -23,6 +23,7 @@ import { readLocalRuntimeDescriptor } from "./local-runtime.js";
 import { readManifest } from "./manifest.js";
 import { generatedConfigMarker, removeAgentsBlocks } from "./templates.js";
 import { errorCode, errorMessage, isRecord, parseJson } from "./validation.js";
+import { isDelegationRole, type DelegationRole } from "./profiles.js";
 import {
   CHECKPOINT_SNAPSHOT_PATH,
   addCommittedCheckpointChanges,
@@ -54,6 +55,7 @@ import {
   isCorrectionPolicy,
   isEndedTaskLease,
   isLeaseBaselineReference,
+  isPlannedLeaseScopes,
   isTaskLease,
   isTaskLeaseReservation,
   isTaskProposalReference,
@@ -62,6 +64,7 @@ import {
   leaseScopesOverlap,
   normalizeLeaseScopePath,
   normalizeLeaseScopes,
+  normalizePlannedLeaseScopes,
   parseLeaseDuration,
   retainLeaseBaselinesLedger,
   serializeLeaseBaselinesLedger,
@@ -71,6 +74,7 @@ import {
   type LeaseBaseline,
   type LeaseBaselinesLedger,
   type LeaseBaselineReference,
+  type LeaseScope,
   type TaskLease,
   type TaskLeaseReservation,
   TASK_PROPOSAL_PATH_STATES_VERSION,
@@ -132,6 +136,20 @@ export const TASK_STATES = Object.freeze([
 
 export type TaskState = typeof TASK_STATES[number];
 export type EvidenceKind = "delivery" | "correction" | "acceptance" | "verification";
+export type ApprovalDecision = "approved" | "rejected";
+
+export interface TaskApprovalRecord {
+  event: BudgetMutationIdentity;
+  role: Exclude<DelegationRole, "implementer">;
+  decision: ApprovalDecision;
+  ownerThread: string;
+  revision: number;
+  proposalBundleId: string;
+  evidence: string[];
+  actor: string;
+  recordedAt: string;
+  consumedAt?: string;
+}
 
 export interface GitCheckpoint {
   capturedAt: string;
@@ -223,9 +241,23 @@ export interface OrchestrationTask {
   correctionRound: number;
   correctionPolicy: CorrectionPolicy;
   leaseGeneration: number;
+  /**
+   * Optional additive scheduler intent. Legacy tasks omit this field and
+   * remain readable/actionable, but only tasks with a valid writer lane are
+   * eligible for parallel writer guidance.
+   */
+  plannedScopes?: LeaseScope[];
   lease?: TaskLease;
   leaseReservation?: TaskLeaseReservation;
   proposal?: TaskProposalReference;
+  /**
+   * Durable opt-in for the typed reviewer/verifier lane. Legacy tasks may
+   * omit this marker and remain readable, but approval transitions must not
+   * infer the lane from incidental approval arrays or lease roles.
+   */
+  approvalPolicy?: "typed";
+  /** Typed reviewer/verifier decisions. Legacy tasks may omit this field. */
+  approvals?: TaskApprovalRecord[];
   acceptance: {
     criteria: string[];
     status: "pending" | "accepted";
@@ -265,6 +297,12 @@ export interface OrchestrationLastEvent {
   hash: string;
 }
 
+export interface ConcurrencyPolicy {
+  maxConcurrentSubagents: number;
+}
+
+export const CONCURRENCY_POLICY_DEFAULTS = { maxConcurrentSubagents: 3 } as const;
+
 export interface OrchestrationStateCore {
   schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
   templateVersion: string;
@@ -276,6 +314,7 @@ export interface OrchestrationStateCore {
   tasks: Record<string, OrchestrationTask>;
   evidenceCounter: number;
   rotation?: ProjectRotation;
+  concurrency?: ConcurrencyPolicy;
 }
 
 export interface OrchestrationState extends OrchestrationStateCore {
@@ -603,7 +642,19 @@ export function legalTaskTransitions(
 }
 
 function guidanceArgv(operation: string, taskId: string, args: Record<string, unknown> = {}): string[] {
-  if (operation === "delegate.start") return ["delegate", "start", taskId];
+  if (operation === "delegate.start") {
+    const lane = (key: "write" | "writeTree" | "read" | "readTree", flag: string) => {
+      const values = Array.isArray(args[key]) ? args[key] : [];
+      return values.flatMap(value => [flag, String(value)]);
+    };
+    return [
+      "delegate", "start", taskId,
+      ...lane("write", "--write"),
+      ...lane("writeTree", "--write-tree"),
+      ...lane("read", "--read"),
+      ...lane("readTree", "--read-tree")
+    ];
+  }
   if (operation === "delegate.complete") return ["delegate", "complete", taskId];
   if (operation === "wait.task") return ["wait", "--task", taskId];
   if (operation === "proposal.submit") return ["proposal", "submit", taskId];
@@ -714,6 +765,79 @@ function preferredTransition(state: TaskState): TaskState | undefined {
   return undefined;
 }
 
+interface ParallelTaskBatch {
+  taskIds: string[];
+  actions: TaskGuidanceAction[];
+}
+
+function plannedWriterScopes(task: OrchestrationTask): LeaseScope[] {
+  return task.plannedScopes?.filter(scope => scope.access === "write") || [];
+}
+
+function plannedScopesConflict(left: readonly LeaseScope[], right: readonly LeaseScope[]): boolean {
+  return left.some(scope => right.some(candidate => leaseScopesOverlap(scope, candidate)));
+}
+
+function proposalPathsForScheduling(task: OrchestrationTask): string[] {
+  const current = task.proposal && proposalReservesPaths(task) ? task.proposal.ownedPaths : [];
+  const recovery = task.recovery?.status === "PENDING" ? task.recovery.proposal?.ownedPaths || [] : [];
+  return [...new Set([...current, ...recovery])];
+}
+
+function plannedScopesHitProposal(scopes: readonly LeaseScope[], paths: readonly string[]): boolean {
+  return scopes.some(scope => paths.some(candidate => leaseScopeCoversPath(scope, candidate)));
+}
+
+async function parallelReadyBatches(
+  targetDirectory: string,
+  state: OrchestrationState,
+  guidanceTasks: readonly { id: string; actions: TaskGuidanceAction[] }[]
+): Promise<ParallelTaskBatch[]> {
+  const availableSlots = concurrencyStatus(state).availableSlots;
+  if (availableSlots <= 0) return [];
+
+  const activeWriterScopes = taskList(state).flatMap(task => {
+    const authority = task.leaseReservation || task.lease;
+    if (!authority || authority.observer === true) return [];
+    return authority.scopes.filter(scope => scope.access === "write");
+  });
+  const sealedProposalPaths = taskList(state).flatMap(proposalPathsForScheduling);
+  const candidates = guidanceTasks
+    .map(guidance => ({ guidance, task: state.tasks[guidance.id]! }))
+    .filter(({ guidance, task }) => task.state === "READY"
+      && task.lease === undefined
+      && task.leaseReservation === undefined
+      && task.recovery?.status !== "PENDING"
+      && task.dependsOn.every(dependency => state.tasks[dependency]?.state === "DONE")
+      && guidance.actions.some(action => action.operation === "delegate.start")
+      && plannedWriterScopes(task).length > 0);
+  // guidanceTasks already follows the canonical taskOrder. Preserve that
+  // order so the scheduler's deterministic winner agrees with the ordinary
+  // recommendedTaskId and never promotes a lexical-ID successor.
+  const selected: Array<{ task: OrchestrationTask; action: TaskGuidanceAction }> = [];
+  for (const candidate of candidates) {
+    if (selected.length >= availableSlots) break;
+    const scopes = plannedWriterScopes(candidate.task);
+    try {
+      await validateLeaseScopeFilesystemPaths(targetDirectory, candidate.task.plannedScopes || []);
+    } catch {
+      // A plan whose filesystem identity drifted after task creation is not a
+      // safe scheduler candidate. The ordinary per-task action remains
+      // available and the eventual reservation will report the typed fence.
+      continue;
+    }
+    if (plannedScopesConflict(scopes, activeWriterScopes)
+      || plannedScopesHitProposal(scopes, sealedProposalPaths)) continue;
+    if (selected.some(item => plannedScopesConflict(scopes, plannedWriterScopes(item.task)))) continue;
+    const action = candidate.guidance.actions.find(item => item.operation === "delegate.start");
+    if (!action) continue;
+    selected.push({ task: candidate.task, action });
+  }
+  return selected.length === 0
+    ? []
+    : [{ taskIds: selected.map(item => item.task.id), actions: selected.map(item => item.action) }];
+}
+
 export async function nextTaskGuidance(
   { directory = "." }: { directory?: string } = {},
   { clock = () => Date.now() }: { clock?: () => number } = {}
@@ -759,12 +883,13 @@ export async function nextTaskGuidance(
         : legalTransitions;
       const transitionActions = orderedTransitions.flatMap(to => {
         if (leaseActivationReady && to === "ACTIVE") {
+          const planned = task.plannedScopes || [];
           return [guidanceAction("delegate.start", {
             taskId: task.id,
-            write: [],
-            writeTree: [],
-            read: [],
-            readTree: []
+            write: planned.filter(scope => scope.access === "write" && scope.kind === "file").map(scope => scope.path),
+            writeTree: planned.filter(scope => scope.access === "write" && scope.kind === "tree").map(scope => scope.path),
+            read: planned.filter(scope => scope.access === "read" && scope.kind === "file").map(scope => scope.path),
+            readTree: planned.filter(scope => scope.access === "read" && scope.kind === "tree").map(scope => scope.path)
           }, ["write-scope"])];
         }
         if (task.state === "ACTIVE" && to === "REVIEW") {
@@ -867,6 +992,7 @@ export async function nextTaskGuidance(
         state: task.state,
         revision: task.revision,
         dependsOn: [...task.dependsOn],
+        ...(task.plannedScopes === undefined ? {} : { plannedScopes: structuredClone(task.plannedScopes) }),
         incompleteDependencies,
         correction: structuredClone(task.correctionPolicy),
         budget: task.budget ? {
@@ -923,9 +1049,12 @@ export async function nextTaskGuidance(
         actions
       };
     });
+  const parallelBatches = await parallelReadyBatches(targetDirectory, canonical.state, tasks);
   return {
     recommendedTaskId: tasks.find(task => task.actions.length > 0)?.id || null,
     tasks,
+    parallelBatches,
+    concurrency: concurrencyStatus(canonical.state),
     lastEvent: canonical.state.lastEvent
   };
 }
@@ -1567,6 +1696,7 @@ export function renderStatusMarkdown(
         `- Revision: ${task.revision}`,
         `- Correction round: ${task.correctionRound}`,
         `- Correction policy: ${task.correctionPolicy.used}/${task.correctionPolicy.limit} used; ${task.correctionPolicy.overrides.length} override(s)`,
+        `- Planned delegation scopes: ${task.plannedScopes && task.plannedScopes.length > 0 ? task.plannedScopes.map(scope => `${scope.access} ${scope.kind} ${markdownCell(scope.path)}`).join(", ") : "—"}`,
         `- Token budget: ${task.budget ? `${task.budget.thresholdStatus}; policy r${task.budget.policy.revision}; soft ${task.budget.policy.softTotalTokens ?? "—"}; hard ${effectiveHardTotalTokens(task.budget) ?? "—"}; session ${markdownCell(task.budget.policy.rootSessionId)}; ${task.budget.observations.length} observation(s); ${task.budget.decisions.length} decision(s)` : "—"}`,
         `- Writer lease: ${task.lease ? `${task.lease.id} generation ${task.lease.generation}; owner ${markdownCell(task.lease.ownerThread)}; expires ${task.lease.expiresAt}` : task.preLease ? "migration required before further progress" : "—"}`,
         `- Writer reservation: ${task.leaseReservation ? `${task.leaseReservation.id} generation ${task.leaseReservation.generation}; write authorized no; expires ${task.leaseReservation.expiresAt}` : "—"}`,
@@ -1837,6 +1967,45 @@ function isNonNegativeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && typeof value === "number" && value >= 0;
 }
 
+export function isConcurrencyPolicy(value: unknown): value is ConcurrencyPolicy {
+  return isRecord(value)
+    && Object.keys(value).length === 1
+    && typeof value.maxConcurrentSubagents === "number"
+    && Number.isSafeInteger(value.maxConcurrentSubagents)
+    && value.maxConcurrentSubagents > 0;
+}
+
+export function concurrencyPolicy(state: Pick<OrchestrationStateCore, "concurrency">): ConcurrencyPolicy {
+  if (state.concurrency === undefined) {
+    return { maxConcurrentSubagents: CONCURRENCY_POLICY_DEFAULTS.maxConcurrentSubagents };
+  }
+  return structuredClone(state.concurrency);
+}
+
+export interface ConcurrencyStatus {
+  limit: number;
+  activeWriters: number;
+  activeReaders: number;
+  availableSlots: number;
+}
+
+function isObserverAuthority(task: Pick<OrchestrationTask, "lease" | "leaseReservation">): boolean {
+  return task.lease?.observer === true || task.leaseReservation?.observer === true;
+}
+
+export function concurrencyStatus(state: OrchestrationStateCore): ConcurrencyStatus {
+  const policy = concurrencyPolicy(state);
+  const authorities = taskList(state).filter(task => task.lease || task.leaseReservation);
+  const activeWriters = authorities.filter(task => !isObserverAuthority(task)).length;
+  const activeReaders = authorities.filter(isObserverAuthority).length;
+  return {
+    limit: policy.maxConcurrentSubagents,
+    activeWriters,
+    activeReaders,
+    availableSlots: Math.max(policy.maxConcurrentSubagents - activeWriters, 0)
+  };
+}
+
 function isCheckpointSnapshotReference(value: unknown): value is CheckpointSnapshotReference {
   return isRecord(value)
     && value.path === CHECKPOINT_SNAPSHOT_PATH
@@ -1956,9 +2125,46 @@ function isTaskSplit(value: unknown): value is NonNullable<OrchestrationTask["sp
     && typeof value.recordedAt === "string";
 }
 
+function isApprovalRole(value: unknown): value is Exclude<DelegationRole, "implementer"> {
+  return value === "reviewer" || value === "verifier";
+}
+
+function isApprovalDecision(value: unknown): value is ApprovalDecision {
+  return value === "approved" || value === "rejected";
+}
+
+function isTaskApprovalRecord(value: unknown): value is TaskApprovalRecord {
+  return isRecord(value)
+    && isRecord(value.event)
+    && isNonNegativeInteger(value.event.sequence)
+    && value.event.sequence > 0
+    && typeof value.event.id === "string"
+    && value.event.id.length > 0
+    && (value.event.previousHash === null || (typeof value.event.previousHash === "string" && value.event.previousHash.length > 0))
+    && isApprovalRole(value.role)
+    && isApprovalDecision(value.decision)
+    && typeof value.ownerThread === "string"
+    && value.ownerThread.trim().length > 0
+    && isNonNegativeInteger(value.revision)
+    && typeof value.proposalBundleId === "string"
+    && value.proposalBundleId.trim().length > 0
+    && isStringArray(value.evidence)
+    && value.evidence.length > 0
+    && value.evidence.every(item => item.trim().length > 0)
+    && typeof value.actor === "string"
+    && value.actor.trim().length > 0
+    && typeof value.recordedAt === "string"
+    && Number.isFinite(Date.parse(value.recordedAt))
+    && (value.consumedAt === undefined
+      || (typeof value.consumedAt === "string"
+        && Number.isFinite(Date.parse(value.consumedAt))
+        && Date.parse(value.consumedAt) >= Date.parse(value.recordedAt)));
+}
+
 function isOrchestrationTask(value: unknown): value is OrchestrationTask {
   if (!isRecord(value) || !isRecord(value.acceptance) || !isRecord(value.verification)) return false;
   const correctionHistory = value.correctionHistory;
+  const approvals = value.approvals;
   return typeof value.id === "string"
     && typeof value.objective === "string"
     && value.objective.length > 0
@@ -1971,9 +2177,14 @@ function isOrchestrationTask(value: unknown): value is OrchestrationTask {
     && isCorrectionPolicy(value.correctionPolicy)
     && value.correctionPolicy.used === value.correctionRound
     && isNonNegativeInteger(value.leaseGeneration)
+    && (value.plannedScopes === undefined || isPlannedLeaseScopes(value.plannedScopes))
     && (value.lease === undefined || isTaskLease(value.lease))
     && (value.leaseReservation === undefined || isTaskLeaseReservation(value.leaseReservation))
     && (value.proposal === undefined || isTaskProposalReference(value.proposal))
+    && (value.approvalPolicy === undefined || value.approvalPolicy === "typed")
+    && (approvals === undefined || (Array.isArray(approvals)
+      && approvals.every(isTaskApprovalRecord)
+      && approvals.every((item, index) => index === 0 || item.event.sequence > approvals[index - 1]!.event.sequence)))
     && (value.recovery === undefined || isTaskRecovery(value.recovery))
     && (value.recoveryHistory === undefined || (Array.isArray(value.recoveryHistory)
       && value.recoveryHistory.every(item => isTaskRecovery(item) && item.status !== "PENDING")))
@@ -2191,7 +2402,8 @@ function isOrchestrationStateCoreShape(value: unknown): value is OrchestrationSt
     && isRecord(value.tasks)
     && Object.values(value.tasks).every(isOrchestrationTask)
     && isNonNegativeInteger(value.evidenceCounter)
-    && (value.rotation === undefined || isProjectRotation(value.rotation));
+    && (value.rotation === undefined || isProjectRotation(value.rotation))
+    && (value.concurrency === undefined || isConcurrencyPolicy(value.concurrency));
 }
 
 function isOrchestrationStateShape(value: unknown): value is OrchestrationState {
@@ -2209,7 +2421,43 @@ function validateEvidence(item: TaskEvidence, task: OrchestrationTask): void {
   }
 }
 
-export function validateOrchestrationState(value: unknown): OrchestrationState {
+function validateApprovalLaneScopes(
+  task: OrchestrationTask,
+  lease: Pick<TaskLease | TaskLeaseReservation, "role" | "observer" | "scopes">
+): void {
+  const role = lease.role;
+  if (role !== "reviewer" && role !== "verifier") return;
+  const proposal = task.proposal;
+  if (!proposal || proposal.status !== "SEALED" || proposal.revision !== task.revision) {
+    invalidState(`Task ${task.id} ${role} authority is missing its exact sealed proposal.`, {
+      taskId: task.id,
+      role,
+      revision: task.revision,
+      proposal: proposal ?? null
+    });
+  }
+  const expected = [...proposal.ownedPaths].sort(compareCheckpointPaths);
+  const actual = lease.scopes
+    .filter(scope => scope.access === "read" && scope.kind === "file")
+    .map(scope => scope.path)
+    .sort(compareCheckpointPaths);
+  if (lease.observer !== true
+    || lease.scopes.some(scope => scope.access !== "read" || scope.kind !== "file")
+    || actual.length !== expected.length
+    || actual.some((item, index) => item !== expected[index])) {
+    invalidState(`Task ${task.id} ${role} authority must exactly cover proposal-owned read-file scopes.`, {
+      taskId: task.id,
+      role,
+      expectedPaths: expected,
+      actualScopes: lease.scopes
+    });
+  }
+}
+
+export function validateOrchestrationState(
+  value: unknown,
+  options: { pendingEventSequence?: number } = {}
+): OrchestrationState {
   if (!isRecord(value)) invalidState("Synod state must be a JSON object.");
   if (value.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION) {
     invalidState(`Unsupported orchestration state schema: ${value.schemaVersion}`, { supported: ORCHESTRATION_SCHEMA_VERSION });
@@ -2302,6 +2550,20 @@ export function validateOrchestrationState(value: unknown): OrchestrationState {
     if (task.lease && task.leaseReservation) {
       invalidState(`Task ${id} cannot hold both a lease reservation and an active writer lease.`, { taskId: id });
     }
+    if (task.lease?.role === "reviewer" && task.state !== "REVIEW") {
+      invalidState(`Task ${id} reviewer lease is not bound to REVIEW.`, { taskId: id, state: task.state });
+    }
+    if (task.lease?.role === "verifier" && task.state !== "ACCEPTED") {
+      invalidState(`Task ${id} verifier lease is not bound to ACCEPTED.`, { taskId: id, state: task.state });
+    }
+    if (task.leaseReservation?.role === "reviewer" && task.state !== "REVIEW") {
+      invalidState(`Task ${id} reviewer reservation is not bound to REVIEW.`, { taskId: id, state: task.state });
+    }
+    if (task.leaseReservation?.role === "verifier" && task.state !== "ACCEPTED") {
+      invalidState(`Task ${id} verifier reservation is not bound to ACCEPTED.`, { taskId: id, state: task.state });
+    }
+    if (task.lease) validateApprovalLaneScopes(task, task.lease);
+    if (task.leaseReservation) validateApprovalLaneScopes(task, task.leaseReservation);
     if (task.proposal && (
       task.proposal.revision !== task.revision
       || task.proposal.baseRevision + 1 !== task.revision
@@ -2408,6 +2670,25 @@ export function validateOrchestrationState(value: unknown): OrchestrationState {
       }
       allEvidenceIds.add(evidenceId);
       maximumEvidenceCounter = Math.max(maximumEvidenceCounter, Number(evidenceId.slice(2)));
+    }
+    if (task.approvals) {
+      const approvalKeys = new Set<string>();
+      const approvalEvents = new Set<string>();
+      for (const approval of task.approvals) {
+        const key = `${approval.role}:${approval.revision}:${approval.proposalBundleId}`;
+        const eventKey = `${approval.event.sequence}:${approval.event.id}`;
+        if (approvalKeys.has(key) || approvalEvents.has(eventKey)
+          || (approval.event.sequence > state.lastEvent.sequence && approval.event.sequence !== options.pendingEventSequence)) {
+          invalidState(`Task ${id} contains duplicate or stale approval records.`, { taskId: id, key, event: approval.event });
+        }
+        if (!task.proposal
+          || approval.revision !== task.revision
+          || approval.proposalBundleId !== task.proposal.bundleId) {
+          invalidState(`Task ${id} approval does not match its current proposal bundle.`, { taskId: id, approval });
+        }
+        approvalKeys.add(key);
+        approvalEvents.add(eventKey);
+      }
     }
     if (task.acceptance.status === "pending" && (task.acceptance.revision !== null || task.acceptance.evidenceIds.length > 0)) {
       invalidState(`Task ${id} has evidence on pending acceptance.`, { taskId: id });
@@ -2672,6 +2953,33 @@ function validateEventLog(events: unknown[]): OrchestrationEvent[] {
             || decisionEvent.type !== "task.budget-decided") {
             throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "A task budget decision identity is not canonical.", {
               details: { taskId: task.id, sequence: decision.event.sequence }
+            });
+          }
+        }
+      }
+      for (const task of Object.values(event.state.tasks)) {
+        for (const approval of task.approvals || []) {
+          const approvalEvent = bySequence.get(approval.event.sequence);
+          if (!approvalEvent
+            || approvalEvent.id !== approval.event.id
+            || approvalEvent.previousHash !== approval.event.previousHash
+            || approvalEvent.type !== "task.approval-recorded"
+            || approvalEvent.taskId !== task.id
+            || approvalEvent.actor !== approval.actor
+            || approvalEvent.timestamp !== approval.recordedAt
+            || approvalEvent.revision !== approval.revision
+            || !isRecord(approvalEvent.payload.approval)
+            || approvalEvent.payload.approval.role !== approval.role
+            || approvalEvent.payload.approval.decision !== approval.decision
+            || approvalEvent.payload.approval.ownerThread !== approval.ownerThread
+            || approvalEvent.payload.approval.revision !== approval.revision
+            || approvalEvent.payload.approval.proposalBundleId !== approval.proposalBundleId
+            || approvalEvent.payload.approval.actor !== approval.actor
+            || approvalEvent.payload.approval.recordedAt !== approval.recordedAt
+            || stableStringify(approvalEvent.payload.approval.evidence) !== stableStringify(approval.evidence)
+            || stableStringify(approvalEvent.payload.approval.event) !== stableStringify(approval.event)) {
+            throw new SynodError(ERROR_CODES.EVENT_LOG_INVALID, "A task approval identity is not canonical.", {
+              details: { taskId: task.id, event: approval.event }
             });
           }
         }
@@ -3507,7 +3815,7 @@ async function commitMutation<Result extends Record<string, unknown>>(
     if (reducerResult.leaseBaselines) {
       draft.leaseBaselines = leaseBaselinesReference(reducerResult.leaseBaselines);
     }
-    validateOrchestrationState(draft);
+    validateOrchestrationState(draft, { pendingEventSequence: mutationIdentity.sequence });
 
     const eventMetadata: EventMetadata = {
       ...metadata,
@@ -3639,6 +3947,12 @@ export interface AddTaskOptions {
   acceptance?: unknown[];
   verification?: unknown[];
   dependsOn?: unknown[];
+  /** Canonical planned scopes, useful to API callers that already have lanes. */
+  plannedScopes?: unknown[];
+  plannedRead?: unknown[];
+  plannedWrite?: unknown[];
+  plannedReadTree?: unknown[];
+  plannedWriteTree?: unknown[];
   correctionLimit?: number;
   actor?: string;
 }
@@ -3651,6 +3965,11 @@ export async function addTask({
   acceptance = [],
   verification = [],
   dependsOn = [],
+  plannedScopes,
+  plannedRead = [],
+  plannedWrite = [],
+  plannedReadTree = [],
+  plannedWriteTree = [],
   correctionLimit = 2,
   actor = "supervisor"
 }: AddTaskOptions = {}, dependencies: OrchestrationDependencies = {}) {
@@ -3666,9 +3985,23 @@ export async function addTask({
   const criteria = normalizedList(acceptance, "acceptance criterion");
   const commands = normalizedList(verification, "verification command");
   const dependenciesList = [...new Set(dependsOn.map(value => String(value).trim().toUpperCase()).filter(Boolean))];
+  const laneValues = [...plannedRead, ...plannedWrite, ...plannedReadTree, ...plannedWriteTree];
+  if (plannedScopes !== undefined && laneValues.length > 0) {
+    throw new SynodError(ERROR_CODES.TASK_INVALID, "Task planned scopes must use either canonical scopes or explicit lane options, not both.");
+  }
+  const normalizedPlannedScopes = plannedScopes !== undefined
+    ? normalizePlannedLeaseScopes(plannedScopes)
+    : laneValues.length > 0
+      ? normalizeLeaseScopes({
+          read: plannedRead,
+          write: plannedWrite,
+          readTree: plannedReadTree,
+          writeTree: plannedWriteTree
+        })
+      : undefined;
   const targetDirectory = path.resolve(directory);
 
-  return commitMutation(targetDirectory, "task.created", { actor, taskId }, (state, context) => {
+  return commitMutation(targetDirectory, "task.created", { actor, taskId }, async (state, context) => {
     if (state.tasks[taskId]) throw new SynodError(ERROR_CODES.TASK_EXISTS, `Task ${taskId} already exists.`, { details: { taskId } });
     for (const dependency of dependenciesList) {
       if (!state.tasks[dependency] || dependency === taskId) {
@@ -3677,6 +4010,7 @@ export async function addTask({
         });
       }
     }
+    if (normalizedPlannedScopes) await validateLeaseScopeFilesystemPaths(targetDirectory, normalizedPlannedScopes);
     const task: OrchestrationTask = {
       id: taskId,
       objective: taskObjective,
@@ -3687,6 +4021,7 @@ export async function addTask({
       correctionRound: 0,
       correctionPolicy: { limit: correctionLimit, used: 0, overrides: [] },
       leaseGeneration: 0,
+      ...(normalizedPlannedScopes === undefined ? {} : { plannedScopes: normalizedPlannedScopes }),
       acceptance: { criteria, status: "pending", revision: null, evidenceIds: [] },
       verification: { commands, status: "pending", revision: null, evidenceIds: [] },
       evidence: [],
@@ -5249,7 +5584,7 @@ function requireLeaseReservationIdentity(
   return reservation;
 }
 
-function assertReservationEligible(task: OrchestrationTask): void {
+function assertReservationEligible(task: OrchestrationTask, role?: DelegationRole): void {
   if (!["READY", "REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)) {
     throw new SynodError(ERROR_CODES.LEASE_INVALID, `Task ${task.id} cannot reserve a writer lease from ${task.state}.`, {
       details: { taskId: task.id, state: task.state }
@@ -5260,12 +5595,86 @@ function assertReservationEligible(task: OrchestrationTask): void {
       details: { taskId: task.id, leaseId: task.recovery.endedLease.id, generation: task.recovery.endedLease.generation }
     });
   }
+  if (role === "reviewer" || role === "verifier") return;
   if (["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)
     && task.correctionPolicy.used >= task.correctionPolicy.limit) {
     throw new SynodError(ERROR_CODES.CORRECTION_EXHAUSTED, `Task ${task.id} has exhausted its correction allowance.`, {
       details: { taskId: task.id, used: task.correctionPolicy.used, limit: task.correctionPolicy.limit }
     });
   }
+}
+
+function approvalRoleState(role: Exclude<DelegationRole, "implementer">): TaskState {
+  return role === "reviewer" ? "REVIEW" : "ACCEPTED";
+}
+
+function approvalProposal(task: OrchestrationTask, role: Exclude<DelegationRole, "implementer">): TaskProposalReference {
+  if (task.state !== approvalRoleState(role)) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${role} delegation is only valid from ${approvalRoleState(role)}.`, {
+      details: { taskId: task.id, role, state: task.state }
+    });
+  }
+  if (!task.proposal || task.proposal.revision !== task.revision || task.proposal.status !== "SEALED") {
+    throw new SynodError(ERROR_CODES.PROPOSAL_REQUIRED, `${role} delegation requires the current sealed proposal.`, {
+      details: { taskId: task.id, role, revision: task.revision, proposal: task.proposal ?? null }
+    });
+  }
+  return task.proposal;
+}
+
+function assertApprovalScopes(
+  task: OrchestrationTask,
+  role: Exclude<DelegationRole, "implementer">,
+  scopes: TaskLeaseReservation["scopes"]
+): TaskProposalReference {
+  const proposal = approvalProposal(task, role);
+  const actual = scopes
+    .filter(scope => scope.access === "read" && scope.kind === "file")
+    .map(scope => scope.path)
+    .sort(compareCheckpointPaths);
+  const expected = [...proposal.ownedPaths].sort(compareCheckpointPaths);
+  if (scopes.some(scope => scope.access !== "read" || scope.kind !== "file")
+    || actual.length !== expected.length
+    || actual.some((item, index) => item !== expected[index])) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${role} delegation scopes must exactly cover the sealed proposal-owned paths.`, {
+      details: { taskId: task.id, role, expectedPaths: expected, actualScopes: scopes }
+    });
+  }
+  return proposal;
+}
+
+function activeApproval(
+  task: OrchestrationTask,
+  role: Exclude<DelegationRole, "implementer">,
+  revision: number,
+  proposalBundleId: string
+): TaskApprovalRecord | undefined {
+  return task.approvals?.find(item => item.role === role
+    && item.decision === "approved"
+    && item.revision === revision
+    && item.proposalBundleId === proposalBundleId
+    && item.consumedAt === undefined);
+}
+
+function requireApproval(
+  task: OrchestrationTask,
+  role: Exclude<DelegationRole, "implementer">,
+  revision: number
+): TaskApprovalRecord {
+  const proposal = task.proposal;
+  const approval = proposal ? activeApproval(task, role, revision, proposal.bundleId) : undefined;
+  if (!approval) {
+    throw new SynodError(ERROR_CODES.APPROVAL_REQUIRED, `Task ${task.id} requires an approved ${role} record for revision ${revision}.`, {
+      details: {
+        taskId: task.id,
+        role,
+        revision,
+        proposalBundleId: proposal?.bundleId ?? null,
+        approvals: task.approvals ?? null
+      }
+    });
+  }
+  return approval;
 }
 
 function reservationScopeConflicts(
@@ -5295,6 +5704,30 @@ function reservationScopeConflicts(
         details: { taskId, conflictingTaskId: other.id, paths: [...new Set(collisions.map(scope => scope.path))] }
       });
     }
+  }
+}
+
+function concurrentWriterTaskIds(state: OrchestrationState, taskId?: string): string[] {
+  return taskList(state)
+    .filter(other => other.id !== taskId
+      && !isObserverAuthority(other)
+      && (other.lease || other.leaseReservation))
+    .map(other => other.id)
+    .sort();
+}
+
+function assertConcurrencyCapacity(state: OrchestrationState, taskId: string): void {
+  const policy = concurrencyPolicy(state);
+  const conflictingTaskIds = concurrentWriterTaskIds(state, taskId);
+  if (conflictingTaskIds.length >= policy.maxConcurrentSubagents) {
+    throw new SynodError(ERROR_CODES.CONCURRENCY_EXCEEDED, `Task ${taskId} writer reservation exceeds the concurrent subagent limit.`, {
+      details: {
+        taskId,
+        limit: policy.maxConcurrentSubagents,
+        active: conflictingTaskIds.length,
+        conflictingTaskIds
+      }
+    });
   }
 }
 
@@ -5328,6 +5761,8 @@ export interface ReserveLeaseOptions {
   write?: unknown[];
   readTree?: unknown[];
   writeTree?: unknown[];
+  observer?: boolean;
+  role?: DelegationRole;
   reservationTtlSeconds?: number;
   actor?: string;
 }
@@ -5339,6 +5774,8 @@ export async function reserveTaskLease({
   write = [],
   readTree = [],
   writeTree = [],
+  observer,
+  role,
   reservationTtlSeconds = DEFAULT_LEASE_RESERVATION_TTL_SECONDS,
   actor = "supervisor"
 }: ReserveLeaseOptions = {}, dependencies: OrchestrationDependencies = {}) {
@@ -5353,7 +5790,20 @@ export async function reserveTaskLease({
       }
     });
   }
-  const scopes = normalizeLeaseScopes({ read, write, readTree, writeTree });
+  if (observer !== undefined && observer !== true) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, "Observer mode must be requested with a true observer flag.");
+  }
+  if (role !== undefined && !isDelegationRole(role)) {
+    throw new SynodError(ERROR_CODES.DELEGATION_ROLE_INVALID, `Unsupported delegation role: ${String(role)}.`, {
+      details: { role, allowed: ["implementer", "reviewer", "verifier"] }
+    });
+  }
+  const approvalRole = role === "reviewer" || role === "verifier" ? role : undefined;
+  const observerRequested = approvalRole !== undefined || observer === true;
+  if (observerRequested && (write.length > 0 || writeTree.length > 0)) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, "An observer lease cannot contain write scopes.");
+  }
+  const scopes = normalizeLeaseScopes({ read, write, readTree, writeTree }, { observer: observerRequested });
   const targetDirectory = path.resolve(directory);
   return commitMutation(targetDirectory, "lease.reserved", { actor, taskId }, async (state, context) => {
     if (!context.snapshot.available || !context.snapshot.head) {
@@ -5364,8 +5814,9 @@ export async function reserveTaskLease({
     await validateLeaseScopeFilesystemPaths(targetDirectory, scopes);
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
-    assertBudgetAllowsExecution(task, "writer lease reservation");
-    assertReservationEligible(task);
+    assertBudgetAllowsExecution(task, observerRequested ? "observer lease reservation" : "writer lease reservation");
+    assertReservationEligible(task, role);
+    if (approvalRole) assertApprovalScopes(task, approvalRole, scopes);
     if (task.lease || task.leaseReservation) {
       throw new SynodError(ERROR_CODES.LEASE_CONFLICT, `Task ${taskId} already has writer authority reserved.`, {
         details: {
@@ -5375,6 +5826,7 @@ export async function reserveTaskLease({
         }
       });
     }
+    if (!observerRequested) assertConcurrencyCapacity(state, taskId);
     reservationScopeConflicts(state, taskId, scopes);
     if (!context.acknowledgedSnapshot) {
       throw new SynodError(ERROR_CODES.CHECKPOINT_SNAPSHOT_INVALID, "A writer reservation requires an acknowledged checkpoint snapshot.", {
@@ -5405,7 +5857,11 @@ export async function reserveTaskLease({
         }
       });
     }
-    task.leaseGeneration += 1;
+    // Reviewer/verifier observers must not consume the writer generation that
+    // identifies the sealed proposal. Their lease is an independent,
+    // read-only observation of that exact delivery, so it reuses the current
+    // task generation while writer reservations continue to advance it.
+    if (!approvalRole) task.leaseGeneration += 1;
     const reservation: TaskLeaseReservation = {
       id: randomUUID(),
       token: randomUUID(),
@@ -5413,7 +5869,9 @@ export async function reserveTaskLease({
       taskId,
       taskRevision: task.revision,
       executor: task.executor,
+      ...(role === undefined ? {} : { role }),
       scopes,
+      ...(observerRequested ? { observer: true as const } : {}),
       reservedAt: context.timestamp,
       expiresAt: leaseDeadline(context.timestamp, ttl),
       ttlSeconds: ttl,
@@ -5427,6 +5885,13 @@ export async function reserveTaskLease({
       },
       status: "RESERVED"
     };
+    if (approvalRole) {
+      // This marker is the durable policy boundary. It survives observer
+      // lease release/cancellation and prevents lifecycle transitions from
+      // inferring approval requirements from incidental runtime state.
+      task.approvalPolicy = "typed";
+      if (task.approvals === undefined) task.approvals = [];
+    }
     task.leaseReservation = reservation;
     task.updatedAt = context.timestamp;
     const baseline: LeaseBaseline = {
@@ -5516,7 +5981,14 @@ export async function bindTaskLease({
     const reservation = requireLeaseReservationIdentity(task, {
       reservationToken, leaseId, generation, revision, expectedReservedAt, baselineHash
     });
-    assertReservationEligible(task);
+    assertReservationEligible(task, reservation.role);
+    const approvalRole = reservation.role === "reviewer" || reservation.role === "verifier" ? reservation.role : undefined;
+    if (approvalRole && reservation.observer !== true) {
+      throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${approvalRole} reservations must be observer-only.`, {
+        details: { taskId, role: approvalRole, reservation }
+      });
+    }
+    if (approvalRole) assertApprovalScopes(task, approvalRole, reservation.scopes);
     if (Date.parse(context.timestamp) >= Date.parse(reservation.expiresAt)) {
       throw new SynodError(ERROR_CODES.LEASE_RESERVATION_STALE, "The writer reservation expired before owner binding.", {
         details: { taskId, expiresAt: reservation.expiresAt, observedAt: context.timestamp }
@@ -5540,13 +6012,14 @@ export async function bindTaskLease({
       }
     }
     const fromState = task.state;
-    const references = ["REVIEW", "ACCEPTED", "VERIFIED"].includes(fromState)
+    const observerLease = reservation.observer === true;
+    const references = !observerLease && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(fromState)
       ? requireEvidence(task, "ACTIVE", evidence)
       : [];
     const createdEvidence = references.length > 0
       ? recordEvidence(state, task, "correction", task.revision, references, actor, context)
       : [];
-    if (["REVIEW", "ACCEPTED", "VERIFIED"].includes(fromState)) {
+    if (!observerLease && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(fromState)) {
       task.correctionRound += 1;
       task.correctionPolicy.used += 1;
       resetAcceptanceAndVerification(task);
@@ -5559,7 +6032,9 @@ export async function bindTaskLease({
       taskRevision: reservation.taskRevision,
       ownerThread: owner,
       executor: reservation.executor,
+      ...(reservation.role === undefined ? {} : { role: reservation.role }),
       scopes: reservation.scopes,
+      ...(reservation.observer === true ? { observer: true as const } : {}),
       acquiredAt: context.timestamp,
       heartbeatAt: context.timestamp,
       expiresAt: leaseDeadline(context.timestamp, ttl),
@@ -5570,15 +6045,17 @@ export async function bindTaskLease({
     };
     delete task.leaseReservation;
     task.lease = lease;
-    task.state = "ACTIVE";
-    delete task.preLease;
-    delete task.blocker;
-    delete task.blockedFrom;
+    if (!observerLease) {
+      task.state = "ACTIVE";
+      delete task.preLease;
+      delete task.blocker;
+      delete task.blockedFrom;
+    }
     task.updatedAt = context.timestamp;
     return {
       metadata: {
         fromState,
-        toState: "ACTIVE",
+        ...(observerLease ? {} : { toState: "ACTIVE" as const }),
         revision: task.revision,
         payload: {
           leaseId: lease.id,
@@ -5588,10 +6065,11 @@ export async function bindTaskLease({
           acquiredAt: lease.acquiredAt,
           baselineHash: lease.baseline.snapshotContentHash,
           evidenceIds: createdEvidence.map(item => item.id),
-          writeAuthorized: true
+          writeAuthorized: !observerLease,
+          ...(reservation.role === undefined ? {} : { role: reservation.role })
         }
       },
-      result: { task, lease, writeAuthorized: true as const, evidence: createdEvidence }
+      result: { task, lease, writeAuthorized: !observerLease as false | true, evidence: createdEvidence }
     };
   }, dependencies);
 }
@@ -5667,6 +6145,7 @@ export interface AcquireLeaseOptions {
   write?: unknown[];
   readTree?: unknown[];
   writeTree?: unknown[];
+  observer?: boolean;
   ttlSeconds?: number;
   heartbeatIntervalSeconds?: number;
   actor?: string;
@@ -5680,6 +6159,7 @@ export async function acquireTaskLease({
   write = [],
   readTree = [],
   writeTree = [],
+  observer,
   ttlSeconds = DEFAULT_LEASE_TTL_SECONDS,
   heartbeatIntervalSeconds = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
   actor = "supervisor"
@@ -5689,6 +6169,13 @@ export async function acquireTaskLease({
   const ttl = parseLeaseDuration(ttlSeconds, "ttlSeconds");
   const heartbeat = parseLeaseDuration(heartbeatIntervalSeconds, "heartbeatIntervalSeconds");
   if (!owner) throw new SynodError(ERROR_CODES.LEASE_INVALID, "A writer lease requires --owner-thread.");
+  if (observer !== undefined && observer !== true) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, "Observer mode must be requested with a true observer flag.");
+  }
+  const observerRequested = observer === true;
+  if (observerRequested && (write.length > 0 || writeTree.length > 0)) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, "An observer lease cannot contain write scopes.");
+  }
   if (ttl < MIN_LEASE_TTL_SECONDS || ttl > MAX_LEASE_TTL_SECONDS || heartbeat >= ttl) {
     throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease heartbeat/expiry policy is outside the supported bounds.", {
       details: {
@@ -5699,18 +6186,18 @@ export async function acquireTaskLease({
       }
     });
   }
-  const scopes = normalizeLeaseScopes({ read, write, readTree, writeTree });
+  const scopes = normalizeLeaseScopes({ read, write, readTree, writeTree }, { observer: observerRequested });
   const targetDirectory = path.resolve(directory);
   return commitMutation(targetDirectory, "lease.acquired", { actor, taskId }, async (state, context) => {
     if (!context.snapshot.available || !context.snapshot.head) {
-      throw new SynodError(ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE, "A writer lease requires an exact Git HEAD and worktree snapshot.", {
+      throw new SynodError(ERROR_CODES.CHECKPOINT_BASE_UNAVAILABLE, `A ${observerRequested ? "observer" : "writer"} lease requires an exact Git HEAD and worktree snapshot.`, {
         details: { taskId, branch: context.snapshot.branch, head: context.snapshot.head }
       });
     }
     await validateLeaseScopeFilesystemPaths(targetDirectory, scopes);
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
-    assertBudgetAllowsExecution(task, "writer lease acquisition");
+    assertBudgetAllowsExecution(task, observerRequested ? "observer lease acquisition" : "writer lease acquisition");
     const eligible = task.state === "READY"
       || (task.state === "ACTIVE" && task.preLease)
       || ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)
@@ -5719,7 +6206,7 @@ export async function acquireTaskLease({
         || (task.preLease && leaseMigrationState(task.blockedFrom))
       ));
     if (!eligible) {
-      throw new SynodError(ERROR_CODES.LEASE_INVALID, `Task ${taskId} cannot acquire a writer lease from ${task.state}.`, {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, `Task ${taskId} cannot acquire an ${observerRequested ? "observer" : "writer"} lease from ${task.state}.`, {
         details: { taskId, state: task.state }
       });
     }
@@ -5745,6 +6232,7 @@ export async function acquireTaskLease({
         details: { taskId, leaseId: task.leaseReservation.id, generation: task.leaseReservation.generation }
       });
     }
+    if (!observerRequested) assertConcurrencyCapacity(state, taskId);
     for (const other of taskList(state)) {
       const leaseCollisions = other.lease
         ? scopes.filter(scope => other.lease?.scopes.some(existing => leaseScopesOverlap(scope, existing)))
@@ -5805,6 +6293,7 @@ export async function acquireTaskLease({
       ownerThread: owner,
       executor: task.executor,
       scopes,
+      ...(observerRequested ? { observer: true as const } : {}),
       acquiredAt: context.timestamp,
       heartbeatAt: context.timestamp,
       expiresAt: leaseDeadline(context.timestamp, ttl),
@@ -6262,7 +6751,112 @@ function recordEvidence(
 function resetAcceptanceAndVerification(task: OrchestrationTask): void {
   task.acceptance = { ...task.acceptance, status: "pending", revision: null, evidenceIds: [] };
   task.verification = { ...task.verification, status: "pending", revision: null, evidenceIds: [] };
+  if (task.approvals !== undefined) task.approvals = [];
 }
+
+export interface RecordTaskApprovalOptions {
+  directory?: string;
+  id?: string;
+  role?: Exclude<DelegationRole, "implementer">;
+  decision?: ApprovalDecision;
+  revision?: number;
+  proposalBundleId?: string;
+  ownerThread?: string;
+  evidence?: unknown[];
+  actor?: string;
+}
+
+/** Record one exact, append-only reviewer or verifier decision. */
+export async function recordTaskApproval({
+  directory = ".",
+  id,
+  role,
+  decision,
+  revision,
+  proposalBundleId,
+  ownerThread,
+  evidence = [],
+  actor = "supervisor"
+}: RecordTaskApprovalOptions = {}, dependencies: OrchestrationDependencies = {}) {
+  const taskId = taskIdValue(id);
+  const approvalRole = role === "reviewer" || role === "verifier" ? role : undefined;
+  const choice = decision === "approved" || decision === "rejected" ? decision : undefined;
+  const owner = typeof ownerThread === "string" ? ownerThread.trim() : "";
+  const principal = typeof actor === "string" ? actor.trim() : "";
+  const requestedBundle = typeof proposalBundleId === "string" ? proposalBundleId.trim() : "";
+  const validEvidence = Array.isArray(evidence)
+    && evidence.length > 0
+    && evidence.every(value => typeof value === "string" && value.trim().length > 0);
+  const references = validEvidence
+    ? [...new Set(evidence.map(value => (value as string).trim()))]
+    : [];
+  if (!approvalRole || !choice || !owner || !principal || !Number.isSafeInteger(revision) || revision! < 0
+    || !requestedBundle || references.length === 0) {
+    throw new SynodError(ERROR_CODES.APPROVAL_INVALID, "Approval requires role, decision, exact revision, proposal bundle, owner thread, actor, and evidence.", {
+      details: { taskId, role: role ?? null, decision: decision ?? null, revision: revision ?? null }
+    });
+  }
+  const targetDirectory = path.resolve(directory);
+  return commitMutation(targetDirectory, "task.approval-recorded", { actor: principal, taskId }, (state, context) => {
+    const task = state.tasks[taskId];
+    if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
+    requireExactTaskRevision(task, revision, "approval");
+    const proposal = approvalProposal(task, approvalRole);
+    const bundleId = requestedBundle;
+    if (bundleId !== proposal.bundleId) {
+      throw new SynodError(ERROR_CODES.APPROVAL_STALE, `Task ${taskId} approval proposal bundle is stale.`, {
+        details: { taskId, role: approvalRole, revision, expectedProposalBundleId: proposal.bundleId, actualProposalBundleId: bundleId }
+      });
+    }
+    if (!task.lease) {
+      throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} approval requires its bound observer lease.`, {
+        details: { taskId, role: approvalRole, ownerThread: owner }
+      });
+    }
+    if (task.lease.observer !== true || task.lease.role !== approvalRole || task.lease.ownerThread !== owner) {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} approval owner does not match its observer lease.`, {
+        details: { taskId, role: approvalRole, ownerThread: owner, lease: task.lease }
+      });
+    }
+    if (Date.parse(context.timestamp) >= Date.parse(task.lease.expiresAt)) {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${taskId} approval observer lease has expired.`, {
+        details: { taskId, leaseId: task.lease.id, expiresAt: task.lease.expiresAt }
+      });
+    }
+    const existing = task.approvals || [];
+    const duplicate = existing.find(item => item.role === approvalRole
+      && item.revision === revision
+      && item.proposalBundleId === bundleId);
+    if (duplicate) {
+      throw new SynodError(ERROR_CODES.APPROVAL_CONFLICT, `Task ${taskId} already has a ${approvalRole} approval for this revision and proposal.`, {
+        details: { taskId, role: approvalRole, revision, proposalBundleId: bundleId, existing: duplicate }
+      });
+    }
+    const approval: TaskApprovalRecord = {
+      event: context.event,
+      role: approvalRole,
+      decision: choice,
+      ownerThread: owner,
+      revision,
+      proposalBundleId: bundleId,
+      evidence: references,
+      actor: principal,
+      recordedAt: context.timestamp
+    };
+    task.approvalPolicy = "typed";
+    task.approvals = [...existing, approval];
+    task.updatedAt = context.timestamp;
+    return {
+      metadata: {
+        revision,
+        payload: { approval }
+      },
+      result: { task, approval }
+    };
+  }, dependencies);
+}
+
+export const recordApproval = recordTaskApproval;
 
 export interface TransitionTaskOptions {
   directory?: string;
@@ -6331,6 +6925,25 @@ export async function transitionTask({
     }
     requireRevision(task, targetState, revision);
     const references = requireEvidence(task, targetState, evidence);
+    const reviewerTransition = task.state === "REVIEW" && targetState === "ACCEPTED";
+    const verifierTransition = task.state === "ACCEPTED" && targetState === "VERIFIED";
+    const typedApprovalState = task.approvals !== undefined
+      || task.lease?.role === "reviewer"
+      || task.lease?.role === "verifier";
+    if ((reviewerTransition || verifierTransition)
+      && task.approvalPolicy !== "typed"
+      && typedApprovalState) {
+      throw new SynodError(ERROR_CODES.APPROVAL_REQUIRED, `Task ${task.id} has typed approval data without a durable approval policy.`, {
+        details: { taskId: task.id, targetState, revision, approvalPolicy: task.approvalPolicy ?? null }
+      });
+    }
+    const approvalLane = task.approvalPolicy === "typed";
+    const reviewerApproval = reviewerTransition && approvalLane
+      ? requireApproval(task, "reviewer", revision)
+      : undefined;
+    const verifierApproval = verifierTransition && approvalLane
+      ? requireApproval(task, "verifier", revision)
+      : undefined;
     if (["BLOCKED", "SUPERSEDED"].includes(targetState) && !String(reason || "").trim()) {
       throw new SynodError(ERROR_CODES.TRANSITION_INVALID, `${targetState} requires --reason.`, {
         details: { taskId, targetState }
@@ -6358,7 +6971,13 @@ export async function transitionTask({
         details: { taskId, leaseId: task.lease.id, generation: task.lease.generation, expiresAt: task.lease.expiresAt }
       });
     }
-    if (["ACCEPTED", "VERIFIED", "DONE"].includes(targetState) && task.lease) {
+    const approvalLease = task.lease
+      && task.lease.observer === true
+      && ((task.lease.role === "reviewer" && targetState === "ACCEPTED")
+        || (task.lease.role === "verifier" && targetState === "VERIFIED"))
+      ? task.lease
+      : undefined;
+    if (["ACCEPTED", "VERIFIED", "DONE"].includes(targetState) && task.lease && !approvalLease) {
       throw new SynodError(ERROR_CODES.LEASE_CONFLICT, `Task ${taskId} must release its reserved writer lease before ${targetState}.`, {
         details: { taskId, leaseId: task.lease.id, generation: task.lease.generation }
       });
@@ -6367,9 +6986,15 @@ export async function transitionTask({
     const fromState = task.state;
     const deliveredLease = fromState === "ACTIVE" && targetState === "REVIEW" ? task.lease : undefined;
     const releasedLease = deliveredLease
+      || approvalLease
       || (targetState === "BLOCKED" && fromState !== "ACTIVE" ? task.lease : undefined);
     if (fromState === "ACTIVE" && targetState === "REVIEW" && !deliveredLease) {
       throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} cannot deliver without its active writer lease.`, {
+        details: { taskId, revision }
+      });
+    }
+    if (deliveredLease && deliveredLease.observer === true) {
+      throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} cannot deliver under an observer lease; a writer lease is required.`, {
         details: { taskId, revision }
       });
     }
@@ -6400,6 +7025,7 @@ export async function transitionTask({
         evidenceIds: createdEvidence.map(item => item.id)
       };
       task.verification = { ...task.verification, status: "pending", revision: null, evidenceIds: [] };
+      if (reviewerApproval) reviewerApproval.consumedAt = context.timestamp;
     }
     if (fromState === "ACCEPTED" && targetState === "VERIFIED") {
       if (task.acceptance.status !== "accepted" || task.acceptance.revision !== revision) {
@@ -6413,6 +7039,7 @@ export async function transitionTask({
         revision,
         evidenceIds: createdEvidence.map(item => item.id)
       };
+      if (verifierApproval) verifierApproval.consumedAt = context.timestamp;
     }
     if (targetState === "DONE" && (
       task.acceptance.status !== "accepted" || task.acceptance.revision !== revision
@@ -6480,6 +7107,11 @@ export async function submitTaskProposal({
   if (task.state !== "ACTIVE" || !task.lease || task.lease.status !== "ACTIVE") {
     throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} requires an active bound writer lease before proposal submission.`, {
       details: { taskId, state: task.state, hasLease: Boolean(task.lease) }
+    });
+  }
+  if (task.lease.observer === true) {
+    throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} proposal submission requires a writer lease; observer leases are read-only.`, {
+      details: { taskId, state: task.state, leaseId: task.lease.id }
     });
   }
   return transitionTask({

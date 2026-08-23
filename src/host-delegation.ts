@@ -15,7 +15,7 @@ import {
   type ReserveLeaseOptions
 } from "./orchestration.js";
 import type { OrchestrationDependencies } from "./orchestration.js";
-import type { LeaseScope, TaskLease, TaskLeaseReservation } from "./leases.js";
+import { normalizeLeaseScopePath, type LeaseScope, type TaskLease, type TaskLeaseReservation } from "./leases.js";
 import {
   waitForThreads,
   type HostWaitAdapter,
@@ -24,6 +24,7 @@ import {
   type WaitReport
 } from "./wait.js";
 import { isRecord } from "./validation.js";
+import { isDelegationRole, type DelegationRole } from "./profiles.js";
 
 /** The opaque identity returned by the host. Synod never derives or rewrites it. */
 export type HostOwnerIdentifier = string;
@@ -40,8 +41,18 @@ export interface HostDelegationReservationFence {
 export interface HostDelegationReadOnlyContract {
   taskId: string;
   taskRevision: number;
+  role?: DelegationRole;
+  objective: string;
+  acceptance: ReadonlyArray<string>;
+  verification: ReadonlyArray<string>;
   scopes: ReadonlyArray<LeaseScope>;
   writeAuthorized: false;
+  /** Worker-only execution guidance; canonical proposal mutations stay supervisor-owned. */
+  proposalGuidance: string;
+  /** Exact sealed proposal context supplied to reviewer/verifier lanes. */
+  proposalBundleId?: string;
+  proposalRevision?: number;
+  ownedPaths?: ReadonlyArray<string>;
   instruction: "analysis may begin; writes, worktrees, and implementation commands wait for bind authorization";
 }
 
@@ -51,6 +62,7 @@ export interface HostDelegationSpawnRequest {
   reservation: TaskLeaseReservation;
   reservationFence: HostDelegationReservationFence;
   writeAuthorized: false;
+  role?: DelegationRole;
   readOnlyContract: HostDelegationReadOnlyContract;
   /** Alias retained for adapters that call this handoff the initial contract. */
   initialContract: HostDelegationReadOnlyContract;
@@ -80,7 +92,8 @@ export interface HostDelegationAuthorizeRequest {
   taskId: string;
   directory: string;
   ownerThread: HostOwnerIdentifier;
-  writeAuthorized: true;
+  writeAuthorized: boolean;
+  role?: DelegationRole;
   reservation: TaskLeaseReservation;
   lease: TaskLease;
   leaseFence: HostDelegationLeaseFence;
@@ -190,6 +203,7 @@ export interface HostDelegationResult {
   reservationFence: HostDelegationReservationFence;
   spawn: HostDelegationSpawnResult;
   ownerThread: HostOwnerIdentifier;
+  role: DelegationRole;
   lease: TaskLease;
   leaseFence: HostDelegationLeaseFence;
   authorization: HostAuthorizationReceipt;
@@ -200,9 +214,102 @@ export interface HostDelegationResult {
 }
 
 function taskIdentifier(options: HostDelegationOptions): string {
-  const id = String(options.id || options.taskId || "").trim();
+  const id = String(options.id || options.taskId || "").trim().toUpperCase();
   if (!id) throw new SynodError(ERROR_CODES.TASK_INVALID, "Host delegation requires a task ID.");
   return id;
+}
+
+interface PreparedDelegationReservation {
+  role: DelegationRole;
+  read: unknown[];
+  write: unknown[];
+  readTree: unknown[];
+  writeTree: unknown[];
+  observer?: true;
+}
+
+function sortedPaths(values: unknown[]): string[] {
+  return values.map(value => normalizeLeaseScopePath(value)).sort((left, right) => left.localeCompare(right));
+}
+
+function roleProposalGuidance(role: DelegationRole): string {
+  return role === "implementer"
+    ? "Worker may implement and run the listed verification only after bind; do not accept, verify, checkpoint, or mutate canonical Synod state. Report the exact changed paths and verification result so the supervisor can seal the exact proposal."
+    : `${role} may inspect only the exact sealed proposal and owned paths after bind; never write files, request write authorization, submit delivery, accept, verify, checkpoint, or mutate canonical Synod state. Report the decision and evidence to the supervisor.`;
+}
+
+function approvalNextCommand(
+  taskId: string,
+  role: Exclude<DelegationRole, "implementer">,
+  revision: number,
+  proposalBundleId: string,
+  ownerThread: string
+): HostNextCommand {
+  return {
+    operation: "task.approval",
+    argv: [
+      "task", "approve", taskId,
+      "--role", role,
+      "--revision", String(revision),
+      "--proposal-bundle-id", proposalBundleId,
+      "--owner-thread", ownerThread
+    ],
+    requirements: ["decision", "evidence", "exact-sealed-proposal"]
+  };
+}
+
+/** Validate role/state/scope before the first durable reservation mutation. */
+async function prepareDelegationReservation(
+  id: string,
+  options: HostDelegationOptions,
+  dependencies: HostDelegationDependencies
+): Promise<PreparedDelegationReservation> {
+  const role = options.role ?? "implementer";
+  if (!isDelegationRole(role)) {
+    throw new SynodError(ERROR_CODES.DELEGATION_ROLE_INVALID, `Unsupported delegation role: ${String(role)}.`, {
+      details: { role, allowed: ["implementer", "reviewer", "verifier"] }
+    });
+  }
+  if (role === "implementer") {
+    return {
+      role,
+      read: options.read || [],
+      write: options.write || [],
+      readTree: options.readTree || [],
+      writeTree: options.writeTree || []
+    };
+  }
+  if ((options.write || []).length > 0 || (options.writeTree || []).length > 0 || (options.readTree || []).length > 0) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${role} delegation accepts only exact read file scopes.`, {
+      details: { role, write: options.write || [], writeTree: options.writeTree || [], readTree: options.readTree || [] }
+    });
+  }
+  const read = dependencies.read || readOrchestration;
+  const canonical = await read(path.resolve(options.directory || "."));
+  const task = canonical.state.tasks[id];
+  if (!task) {
+    throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${id} does not exist.`, { details: { taskId: id } });
+  }
+  const expectedState = role === "reviewer" ? "REVIEW" : "ACCEPTED";
+  if (task.state !== expectedState) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${role} delegation is only valid from ${expectedState}.`, {
+      details: { taskId: id, role, state: task.state }
+    });
+  }
+  const proposal = task.proposal;
+  if (!proposal || proposal.status !== "SEALED" || proposal.revision !== task.revision) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_REQUIRED, `${role} delegation requires the current sealed proposal.`, {
+      details: { taskId: id, role, revision: task.revision, proposal: proposal ?? null }
+    });
+  }
+  const expected = sortedPaths(proposal.ownedPaths);
+  const requested = (options.read || []).length > 0 ? sortedPaths(options.read || []) : expected;
+  if (requested.length !== expected.length || requested.some((item, index) => item !== expected[index])) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${role} delegation read scopes must exactly cover proposal-owned paths.`, {
+      details: { taskId: id, role, expectedPaths: expected, requestedPaths: requested }
+    });
+  }
+  return { role, read: requested, write: [], readTree: [], writeTree: [], observer: true };
 }
 
 function reservationFence(reservation: TaskLeaseReservation): HostDelegationReservationFence {
@@ -228,6 +335,7 @@ function leaseFence(lease: TaskLease): HostDelegationLeaseFence {
 
 function ownerFromSpawn(value: HostDelegationSpawnResult): HostOwnerIdentifier | undefined {
   if (typeof value === "string") return value.trim() || undefined;
+  if (!value || typeof value !== "object") return undefined;
   for (const key of ["ownerThread", "ownerId", "owner", "threadId"] as const) {
     const candidate = value[key];
     if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
@@ -257,6 +365,114 @@ function authorizationReceipt(value: unknown): HostAuthorizationReceipt {
 function conciseError(error: unknown): { code: string; message: string } {
   const value = asSynodError(error);
   return { code: value.code, message: value.message };
+}
+
+/** Exactly one child-loss mode. Unknown or conflicting values fail closed. */
+export const CHILD_LOSS_MODES = Object.freeze([
+  "spawn-not-invoked",
+  "spawn-invoked-no-owner",
+  "child-dead-lease-live",
+  "wait-never-woke"
+] as const);
+
+export type ChildLossMode = typeof CHILD_LOSS_MODES[number];
+
+const CHILD_LOSS_MODE_SET: ReadonlySet<string> = new Set(CHILD_LOSS_MODES);
+
+export function isChildLossMode(value: unknown): value is ChildLossMode {
+  return typeof value === "string" && CHILD_LOSS_MODE_SET.has(value);
+}
+
+function childLossDetail(error: unknown): unknown {
+  if (!(error instanceof SynodError) || !isRecord(error.details) || !Object.hasOwn(error.details, "childLoss")) {
+    return undefined;
+  }
+  return error.details.childLoss;
+}
+
+export function childLossFrom(error: unknown): ChildLossMode | undefined {
+  const value = childLossDetail(error);
+  return isChildLossMode(value) ? value : undefined;
+}
+
+export function unclassifiedChildLossError(value: unknown, cause?: unknown): SynodError {
+  return new SynodError(ERROR_CODES.HOST_ADAPTER_INVALID, "child loss was not classified.", {
+    ...(cause === undefined ? {} : { cause }),
+    details: { childLoss: value }
+  });
+}
+
+export function withChildLoss(
+  error: unknown,
+  mode: ChildLossMode,
+  fallbackCode: typeof ERROR_CODES[keyof typeof ERROR_CODES] = ERROR_CODES.INTERNAL
+): SynodError {
+  if (!isChildLossMode(mode)) return unclassifiedChildLossError(mode, error);
+  const existing = childLossDetail(error);
+  if (existing !== undefined && (!isChildLossMode(existing) || existing !== mode)) {
+    return unclassifiedChildLossError(existing, error);
+  }
+  return withErrorDetails(asSynodError(error, fallbackCode), { childLoss: mode });
+}
+
+export function classifyChildLoss(
+  error: unknown,
+  mode: ChildLossMode,
+  fallbackCode: typeof ERROR_CODES[keyof typeof ERROR_CODES] = ERROR_CODES.INTERNAL
+): SynodError {
+  const existing = childLossDetail(error);
+  if (existing !== undefined && !isChildLossMode(existing)) return unclassifiedChildLossError(existing, error);
+  if (isChildLossMode(existing)) return asSynodError(error, fallbackCode);
+  return withChildLoss(error, mode, fallbackCode);
+}
+
+function classifyPostBindChildLoss(error: unknown): SynodError {
+  const existing = childLossDetail(error);
+  if (existing !== undefined && !isChildLossMode(existing)) return unclassifiedChildLossError(existing, error);
+  const failure = asSynodError(error);
+  if (isChildLossMode(existing)) return failure;
+  if (failure.code === ERROR_CODES.APP_SERVER_TIMEOUT || failure.code === ERROR_CODES.WAIT_INVALID) {
+    return withChildLoss(failure, "wait-never-woke");
+  }
+  if (
+    failure.code === ERROR_CODES.APP_SERVER_EXITED
+    || failure.code === ERROR_CODES.APP_SERVER_NOT_RUNNING
+    || failure.code === ERROR_CODES.APP_SERVER_SPAWN_FAILED
+  ) {
+    return withChildLoss(failure, "child-dead-lease-live");
+  }
+  if (failure.code === ERROR_CODES.HOST_OWNER_MISSING) {
+    return withChildLoss(failure, "spawn-invoked-no-owner");
+  }
+  return failure;
+}
+
+/**
+ * Once a host spawn has been invoked, release its transport before surfacing
+ * the canonical reservation/bind/authorization failure. A host close failure
+ * is diagnostic only and must never replace the primary failure.
+ */
+async function closeAdapterAfterSpawnFailure(
+  adapter: HostDelegationAdapter,
+  error: unknown,
+  fallbackCode: typeof ERROR_CODES[keyof typeof ERROR_CODES] = ERROR_CODES.INTERNAL
+): Promise<SynodError> {
+  const existing = childLossDetail(error);
+  const failure = existing !== undefined && !isChildLossMode(existing)
+    ? unclassifiedChildLossError(existing, error)
+    : asSynodError(error, fallbackCode);
+  try {
+    await adapter.close?.();
+  } catch (closeError) {
+    failure.details = {
+      ...(isRecord(failure.details) ? failure.details : {}),
+      hostAdapterClose: {
+        status: "failed",
+        error: conciseError(closeError)
+      }
+    };
+  }
+  return failure;
 }
 
 async function cancelReservationAfterFailure(
@@ -353,9 +569,9 @@ async function expireReservationAfterFailure(
 }
 
 type HostSpawnOutcome =
-  | { status: "success"; value: HostDelegationSpawnResult }
-  | { status: "failure"; error: unknown }
-  | { status: "timeout" };
+  | { status: "success"; value: HostDelegationSpawnResult; invoked: true }
+  | { status: "failure"; error: unknown; invoked: true }
+  | { status: "timeout"; invoked: boolean };
 
 type ReservationDeadlineOutcome = "expired" | "aborted";
 
@@ -402,9 +618,10 @@ function spawnBoundedByReservation(
   clock: () => number = () => Date.now()
 ): Promise<HostSpawnOutcome> {
   const remainingMs = Date.parse(expiresAt) - clock();
-  if (!Number.isFinite(remainingMs) || remainingMs <= 0) return Promise.resolve({ status: "timeout" });
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) return Promise.resolve({ status: "timeout", invoked: false });
   return new Promise(resolve => {
     let settled = false;
+    let invoked = false;
     let timer: ReturnType<typeof setTimeout>;
     const armDeadline = () => {
       timer = setTimeout(() => {
@@ -415,22 +632,25 @@ function spawnBoundedByReservation(
           return;
         }
         settled = true;
-        resolve({ status: "timeout" });
+        resolve({ status: "timeout", invoked });
       }, Math.min(Math.max(0, Date.parse(expiresAt) - clock()), 2_147_483_647));
     };
     armDeadline();
     Promise.resolve()
-      .then(() => adapter.spawn(request))
+      .then(() => {
+        invoked = true;
+        return adapter.spawn(request);
+      })
       .then(value => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        resolve({ status: "success", value });
+        resolve({ status: "success", value, invoked: true });
       }, error => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        resolve({ status: "failure", error });
+        resolve({ status: "failure", error, invoked: true });
       });
   });
 }
@@ -466,24 +686,48 @@ export async function startHostDelegation(
     throw new SynodError(ERROR_CODES.HOST_ADAPTER_INVALID, "The injected host adapter must expose spawn and authorize methods.");
   }
   const id = taskIdentifier(options);
+  const prepared = await prepareDelegationReservation(id, options, dependencies);
   const reserve = dependencies.reserve || reserveTaskLease;
   const reserved = await reserve({
     id,
     directory: options.directory || ".",
-    read: options.read || [],
-    write: options.write || [],
-    readTree: options.readTree || [],
-    writeTree: options.writeTree || [],
+    role: prepared.role,
+    read: prepared.read,
+    write: prepared.write,
+    readTree: prepared.readTree,
+    writeTree: prepared.writeTree,
+    ...(prepared.observer ? { observer: true } : {}),
     ...(options.reservationTtlSeconds === undefined ? {} : { reservationTtlSeconds: options.reservationTtlSeconds }),
     ...(options.actor === undefined ? {} : { actor: options.actor })
   }, dependencies);
   const reservation = reserved.reservation;
+  if (prepared.role !== "implementer"
+    && (reservation.role !== prepared.role || reservation.observer !== true)) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${prepared.role} reservation was not preserved as an observer-only role lane.`, {
+      details: { role: prepared.role, reservation }
+    });
+  }
+  if (prepared.role !== "implementer" && !reserved.task.proposal) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_REQUIRED, `${prepared.role} delegation requires the exact sealed proposal in the reservation result.`, {
+      details: { taskId: id, role: prepared.role }
+    });
+  }
   const reservedFence = reservationFence(reservation);
   const readOnlyContract: HostDelegationReadOnlyContract = {
     taskId: id,
     taskRevision: reservation.taskRevision,
+    role: prepared.role,
+    objective: typeof reserved.task.objective === "string" ? reserved.task.objective : "",
+    acceptance: reserved.task.acceptance?.criteria || [],
+    verification: reserved.task.verification?.commands || [],
     scopes: reservation.scopes,
     writeAuthorized: false,
+    proposalGuidance: roleProposalGuidance(prepared.role),
+    ...(prepared.role !== "implementer" && reserved.task.proposal ? {
+      proposalBundleId: reserved.task.proposal.bundleId,
+      proposalRevision: reserved.task.proposal.revision,
+      ownedPaths: [...reserved.task.proposal.ownedPaths]
+    } : {}),
     instruction: "analysis may begin; writes, worktrees, and implementation commands wait for bind authorization"
   };
   const clock = () => {
@@ -496,17 +740,41 @@ export async function startHostDelegation(
     reservation,
     reservationFence: reservedFence,
     writeAuthorized: false,
+    role: prepared.role,
     readOnlyContract,
     initialContract: readOnlyContract,
     contract: readOnlyContract
   };
   const spawnOutcome = await spawnBoundedByReservation(adapter, spawnRequest, reservation.expiresAt, clock);
   if (spawnOutcome.status === "failure") {
-    return cancelReservationAfterFailure(spawnOutcome.error, ERROR_CODES.HOST_SPAWN_FAILED, "spawn", reservation, options, dependencies);
+    const failure = await closeAdapterAfterSpawnFailure(
+      adapter,
+      classifyChildLoss(spawnOutcome.error, "spawn-invoked-no-owner", ERROR_CODES.HOST_SPAWN_FAILED),
+      ERROR_CODES.HOST_SPAWN_FAILED
+    );
+    return cancelReservationAfterFailure(failure, ERROR_CODES.HOST_SPAWN_FAILED, "spawn", reservation, options, dependencies);
   }
   if (spawnOutcome.status === "timeout") {
+    const timeoutError = withChildLoss(
+      new SynodError(
+        ERROR_CODES.HOST_SPAWN_TIMEOUT,
+        "Host spawn did not return an owner before the reservation expired."
+      ),
+      spawnOutcome.invoked ? "spawn-invoked-no-owner" : "spawn-not-invoked"
+    );
+    if (spawnOutcome.invoked) {
+      const failure = await closeAdapterAfterSpawnFailure(adapter, timeoutError);
+      return expireReservationAfterFailure(
+        failure,
+        ERROR_CODES.HOST_SPAWN_TIMEOUT,
+        "spawn-timeout",
+        reservation,
+        options,
+        dependencies
+      );
+    }
     return expireReservationAfterFailure(
-      new SynodError(ERROR_CODES.HOST_SPAWN_TIMEOUT, "Host spawn did not return an owner before the reservation expired."),
+      timeoutError,
       ERROR_CODES.HOST_SPAWN_TIMEOUT,
       "spawn-timeout",
       reservation,
@@ -519,7 +787,7 @@ export async function startHostDelegation(
   if (!ownerThread) {
     const deadlineOutcome = await waitUntilReservationExpiry(reservation.expiresAt, clock, options.signal);
     if (deadlineOutcome === "aborted") {
-      const failure = new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Host spawn returned no opaque owner identifier before the reservation expired.", {
+      const failure = withChildLoss(new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Host spawn returned no opaque owner identifier before the reservation expired.", {
         details: {
           phase: "missing-owner",
           reservation: {
@@ -536,11 +804,18 @@ export async function startHostDelegation(
             reason: "waiting for the reservation deadline was aborted"
           }
         }
-      });
-      throw failure;
+      }), "spawn-invoked-no-owner");
+      throw await closeAdapterAfterSpawnFailure(adapter, failure);
     }
+    const failure = await closeAdapterAfterSpawnFailure(
+      adapter,
+      withChildLoss(
+        new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Host spawn returned no opaque owner identifier."),
+        "spawn-invoked-no-owner"
+      )
+    );
     return expireReservationAfterFailure(
-      new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Host spawn returned no opaque owner identifier."),
+      failure,
       ERROR_CODES.HOST_OWNER_MISSING,
       "missing-owner",
       reservation,
@@ -549,8 +824,15 @@ export async function startHostDelegation(
     );
   }
   if (clock() >= Date.parse(reservation.expiresAt)) {
+    const failure = await closeAdapterAfterSpawnFailure(
+      adapter,
+      withChildLoss(
+        new SynodError(ERROR_CODES.HOST_SPAWN_TIMEOUT, "Host spawn returned an owner after the reservation expired."),
+        "spawn-invoked-no-owner"
+      )
+    );
     return expireReservationAfterFailure(
-      new SynodError(ERROR_CODES.HOST_SPAWN_TIMEOUT, "Host spawn returned an owner after the reservation expired."),
+      failure,
       ERROR_CODES.HOST_SPAWN_TIMEOUT,
       "spawn-timeout",
       reservation,
@@ -572,7 +854,8 @@ export async function startHostDelegation(
       ...(options.actor === undefined ? {} : { actor: options.actor })
     }, dependencies);
   } catch (error) {
-    return cancelReservationAfterFailure(error, ERROR_CODES.LEASE_STALE, "bind", reservation, options, dependencies);
+    const failure = await closeAdapterAfterSpawnFailure(adapter, error, ERROR_CODES.LEASE_STALE);
+    return cancelReservationAfterFailure(failure, ERROR_CODES.LEASE_STALE, "bind", reservation, options, dependencies);
   }
   let authorization: HostAuthorizationReceipt;
   try {
@@ -580,7 +863,8 @@ export async function startHostDelegation(
       taskId: id,
       directory: options.directory || ".",
       ownerThread,
-      writeAuthorized: true,
+      writeAuthorized: prepared.role === "implementer",
+      role: prepared.role,
       reservation,
       lease: bound.lease,
       leaseFence: leaseFence(bound.lease)
@@ -589,12 +873,40 @@ export async function startHostDelegation(
     if (authorization.status === "failed" || authorization.status === "rejected" || authorization.status === "denied") {
       throw authorizationFailure(authorization, { task: bound.task, lease: bound.lease, ownerThread });
     }
+    if (prepared.role !== "implementer" && bound.task.proposal) {
+      authorization = {
+        ...authorization,
+        approvalRequired: true,
+        nextCommand: approvalNextCommand(
+          id,
+          prepared.role,
+          bound.task.proposal.revision,
+          bound.task.proposal.bundleId,
+          ownerThread
+        )
+      };
+    }
   } catch (error) {
-    if (error instanceof SynodError && error.code === ERROR_CODES.HOST_AUTHORIZATION_FAILED) throw error;
-    throw withErrorDetails(
-      authorizationFailure(error, { task: bound.task, lease: bound.lease, ownerThread }),
-      { cause: conciseError(error) }
-    );
+    const classified = classifyPostBindChildLoss(error);
+    if (childLossFrom(classified)) {
+      throw await closeAdapterAfterSpawnFailure(adapter, withErrorDetails(classified, {
+        taskId: bound.task.id,
+        lease: bound.lease,
+        ownerThread,
+        recovery: {
+          status: "lease-bound-awaiting-authorization",
+          action: "preserve-bound-lease",
+          next: "supervisor must inspect the host and use the exact active lease fence for recovery"
+        }
+      }));
+    }
+    const failure = classified instanceof SynodError && classified.code === ERROR_CODES.HOST_AUTHORIZATION_FAILED
+      ? classified
+      : withErrorDetails(
+        authorizationFailure(classified, { task: bound.task, lease: bound.lease, ownerThread }),
+        { cause: conciseError(classified) }
+      );
+    throw await closeAdapterAfterSpawnFailure(adapter, failure);
   }
   const result: HostDelegationResult = {
     directory: options.directory || ".",
@@ -603,6 +915,7 @@ export async function startHostDelegation(
     reservationFence: reservedFence,
     spawn: spawned,
     ownerThread,
+    role: prepared.role,
     lease: bound.lease,
     leaseFence: leaseFence(bound.lease),
     authorization,
@@ -611,9 +924,13 @@ export async function startHostDelegation(
   };
   if (options.wait) {
     const waitOptions = typeof options.wait === "object" ? options.wait : {};
-    const waited = await waitForHostDelegation(result, adapter, waitOptions, dependencies);
-    result.wait = waited.report;
-    result.liveness = waited.liveness;
+    try {
+      const waited = await waitForHostDelegation(result, adapter, waitOptions, dependencies);
+      result.wait = waited.report;
+      result.liveness = waited.liveness;
+    } catch (error) {
+      throw await closeAdapterAfterSpawnFailure(adapter, classifyPostBindChildLoss(error));
+    }
   }
   return result;
 }
@@ -735,12 +1052,16 @@ export async function waitForHostDelegation(
       },
       finalFence: fence
     };
+    const childLoss = report.timedOut && report.wakeCount === 0
+      ? { childLoss: "wait-never-woke" as const }
+      : {};
     return {
       report: {
         ...report,
         diagnostics: {
           ...report.diagnostics,
-          hostLiveness: diagnostics
+          hostLiveness: diagnostics,
+          ...childLoss
         }
       },
       liveness: diagnostics
@@ -788,6 +1109,27 @@ export function probeCodexHostAdapter(
     reason: "host-only-not-found",
     constructedAppServer: false
   };
+}
+
+export type SelectedHostDelegation =
+  | { path: "injected" | "cli-app-server"; adapter: HostDelegationAdapter }
+  | { path: "handoff" };
+
+/**
+ * Injected adapters win. Desktop stays Path B and never constructs an App Server.
+ * CLI without an injection uses the Synod-owned App Server adapter.
+ */
+export function selectHostDelegationAdapter(options: {
+  adapter?: HostDelegationAdapter;
+  runtime: Pick<ResolvedCodexRuntime, "surface" | "resolved" | "executableSource">;
+  createCliAdapter: () => HostDelegationAdapter;
+}): SelectedHostDelegation {
+  if (options.adapter) return { path: "injected", adapter: options.adapter };
+  if (options.runtime.surface === "desktop") return { path: "handoff" };
+  if (options.runtime.surface === "cli") {
+    return { path: "cli-app-server", adapter: options.createCliAdapter() };
+  }
+  return { path: "handoff" };
 }
 
 export function resolveHostDelegationAdapter(
@@ -844,13 +1186,29 @@ export function delegateCompleteCommand(
 
 function readOnlyContractFor(
   taskId: string,
-  reservation: TaskLeaseReservation
+  reservation: TaskLeaseReservation,
+  task: {
+    objective: string;
+    acceptance: { criteria: ReadonlyArray<string> };
+    verification: { commands: ReadonlyArray<string> };
+    proposal?: { bundleId: string; revision: number; ownedPaths: ReadonlyArray<string> };
+  }
 ): HostDelegationReadOnlyContract {
   return {
     taskId,
     taskRevision: reservation.taskRevision,
+    ...(reservation.role === undefined ? {} : { role: reservation.role }),
+    objective: typeof task.objective === "string" ? task.objective : "",
+    acceptance: task.acceptance?.criteria || [],
+    verification: task.verification?.commands || [],
     scopes: reservation.scopes,
     writeAuthorized: false,
+    proposalGuidance: roleProposalGuidance(reservation.role ?? "implementer"),
+    ...((reservation.role === "reviewer" || reservation.role === "verifier") && task.proposal ? {
+      proposalBundleId: task.proposal.bundleId,
+      proposalRevision: task.proposal.revision,
+      ownedPaths: [...task.proposal.ownedPaths]
+    } : {}),
     instruction: "analysis may begin; writes, worktrees, and implementation commands wait for bind authorization"
   };
 }
@@ -867,18 +1225,32 @@ export async function startHostDelegationHandoff(
     );
   }
   const id = taskIdentifier(options);
+  const prepared = await prepareDelegationReservation(id, options, dependencies);
   const reserve = dependencies.reserve || reserveTaskLease;
   const reserved = await reserve({
     id,
     directory: options.directory || ".",
-    read: options.read || [],
-    write: options.write || [],
-    readTree: options.readTree || [],
-    writeTree: options.writeTree || [],
+    role: prepared.role,
+    read: prepared.read,
+    write: prepared.write,
+    readTree: prepared.readTree,
+    writeTree: prepared.writeTree,
+    ...(prepared.observer ? { observer: true } : {}),
     ...(options.reservationTtlSeconds === undefined ? {} : { reservationTtlSeconds: options.reservationTtlSeconds }),
     ...(options.actor === undefined ? {} : { actor: options.actor })
   }, dependencies);
   const reservation = reserved.reservation;
+  if (prepared.role !== "implementer"
+    && (reservation.role !== prepared.role || reservation.observer !== true)) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${prepared.role} reservation was not preserved as an observer-only role lane.`, {
+      details: { role: prepared.role, reservation }
+    });
+  }
+  if (prepared.role !== "implementer" && !reserved.task.proposal) {
+    throw new SynodError(ERROR_CODES.PROPOSAL_REQUIRED, `${prepared.role} delegation requires the exact sealed proposal in the reservation result.`, {
+      details: { taskId: id, role: prepared.role }
+    });
+  }
   const reservedFence = reservationFence(reservation);
   const runtime = dependencies.hostRuntimeResolver?.() || resolveCodexRuntime();
   return {
@@ -886,7 +1258,7 @@ export async function startHostDelegationHandoff(
     task: reserved.task,
     reservation,
     reservationFence: reservedFence,
-    readOnlyContract: readOnlyContractFor(id, reservation),
+    readOnlyContract: readOnlyContractFor(id, reservation, reserved.task),
     hostSpawnRequired: true,
     nextCommand: delegateCompleteCommand(id, reservedFence, evidenceReferences(options.evidence)),
     probe: probeCodexHostAdapter(runtime)
@@ -945,7 +1317,11 @@ export async function completeHostDelegation(
         taskId: id,
         directory: targetDirectory,
         ownerThread,
-        writeAuthorized: true,
+        // Reservations from the pre-role API omit role and are legacy
+        // implementer leases. Only explicit reviewer/verifier roles are
+        // observer-only at this boundary.
+        writeAuthorized: reservation.role === undefined || reservation.role === "implementer",
+        ...(reservation.role === undefined ? {} : { role: reservation.role }),
         reservation,
         lease: bound.lease,
         leaseFence: leaseFence(bound.lease)
@@ -964,6 +1340,19 @@ export async function completeHostDelegation(
   } else {
     authorization = { status: "accepted", hostNotificationRequired: true };
   }
+  if ((reservation.role === "reviewer" || reservation.role === "verifier") && bound.task.proposal) {
+    authorization = {
+      ...authorization,
+      approvalRequired: true,
+      nextCommand: approvalNextCommand(
+        id,
+        reservation.role,
+        bound.task.proposal.revision,
+        bound.task.proposal.bundleId,
+        ownerThread
+      )
+    };
+  }
   return {
     directory: targetDirectory,
     task: bound.task,
@@ -971,6 +1360,7 @@ export async function completeHostDelegation(
     reservationFence: reservedFence,
     spawn: ownerThread,
     ownerThread,
+    role: reservation.role ?? "implementer",
     lease: bound.lease,
     leaseFence: leaseFence(bound.lease),
     authorization,

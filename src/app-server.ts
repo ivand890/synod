@@ -54,6 +54,7 @@ export interface AppServerDiagnostics extends Record<string, unknown> {
   codexVersion?: string | null | undefined;
   codexUserAgent?: string | undefined;
   appServer: {
+    launchedArgv?: string[];
     platformFamily?: unknown;
     platformOs?: unknown;
     capabilities: {
@@ -132,6 +133,7 @@ export class CodexAppServerClient {
   private readonly shutdownTimeoutMs: number;
   private readonly forceKillTimeoutMs: number;
   private readonly cwd: string | undefined;
+  private readonly appServerArgs: string[];
   private readonly spawnProcess: SpawnAppServer;
   private nextId: number;
   private readonly pending: Map<number, PendingRequest>;
@@ -151,6 +153,7 @@ export class CodexAppServerClient {
     requestTimeoutMs = DEFAULT_TIMEOUT_MS,
     shutdownTimeoutMs = DEFAULT_SHUTDOWN_TIMEOUT_MS,
     forceKillTimeoutMs = DEFAULT_FORCE_KILL_TIMEOUT_MS,
+    appServerArgs = ["--disable", "multi_agent_v2"],
     spawnProcess = (command, args, options) => spawn(command, args, options)
   }: {
     codexBin?: string;
@@ -158,6 +161,8 @@ export class CodexAppServerClient {
     requestTimeoutMs?: number;
     shutdownTimeoutMs?: number;
     forceKillTimeoutMs?: number;
+    /** Additional arguments passed after the required `app-server` command. */
+    appServerArgs?: readonly string[];
     spawnProcess?: SpawnAppServer;
   } = {}) {
     this.codexBin = codexBin;
@@ -165,6 +170,7 @@ export class CodexAppServerClient {
     this.shutdownTimeoutMs = shutdownTimeoutMs;
     this.forceKillTimeoutMs = forceKillTimeoutMs;
     this.cwd = cwd;
+    this.appServerArgs = [...appServerArgs];
     this.spawnProcess = spawnProcess;
     this.nextId = 1;
     this.pending = new Map();
@@ -194,8 +200,15 @@ export class CodexAppServerClient {
   async start() {
     if (this.child) return;
 
+    // Keep the experimental collaboration feature explicitly disabled. The
+    // CLI runner is a Synod-owned single-thread execution plane; inheriting a
+    // user's global Codex feature configuration would otherwise make its
+    // authority and sandbox behavior non-deterministic.
+    const args = ["app-server", ...this.appServerArgs];
+    this.diagnostics.appServer.launchedArgv = [this.codexBin, ...args];
+
     try {
-      this.child = this.spawnProcess(this.codexBin, ["app-server"], {
+      this.child = this.spawnProcess(this.codexBin, args, {
         stdio: ["pipe", "pipe", "pipe"],
         ...(this.cwd ? { cwd: this.cwd } : {})
       });
@@ -209,7 +222,9 @@ export class CodexAppServerClient {
 
     const child = this.child;
     if (!child?.stdin || !child?.stdout || !child?.stderr) {
-      this.child = undefined;
+      // A child was created, so this is still a post-spawn failure. Reuse the
+      // bounded cleanup path instead of abandoning a process with partial I/O.
+      await this.close().catch(() => undefined);
       throw new SynodError(
         ERROR_CODES.APP_SERVER_SPAWN_FAILED,
         "Codex App Server did not expose the required stdio streams.",
@@ -217,63 +232,70 @@ export class CodexAppServerClient {
       );
     }
 
-    this.exitInfo = undefined;
-    this.fatalError = undefined;
-    this.eventListenerFailureWarned = false;
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      this.stderr = `${this.stderr}${chunk}`.slice(-4_096);
-    });
-    child.stdin.on("error", (error: Error) => {
-      this.fail(new SynodError(
-        ERROR_CODES.APP_SERVER_PROTOCOL_ERROR,
-        `Codex App Server stdin failed: ${error.message}`,
-        { cause: error }
-      ));
-    });
+    try {
+      this.exitInfo = undefined;
+      this.fatalError = undefined;
+      this.eventListenerFailureWarned = false;
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: Buffer | string) => {
+        this.stderr = `${this.stderr}${chunk}`.slice(-4_096);
+      });
+      child.stdin.on("error", (error: Error) => {
+        this.fail(new SynodError(
+          ERROR_CODES.APP_SERVER_PROTOCOL_ERROR,
+          `Codex App Server stdin failed: ${error.message}`,
+          { cause: error }
+        ));
+      });
 
-    this.lines = readline.createInterface({ input: child.stdout });
-    this.lines.on("line", (line: string) => this.handleLine(line));
-    child.on("error", (error: Error) => {
-      this.fail(new SynodError(
-        ERROR_CODES.APP_SERVER_SPAWN_FAILED,
-        `Codex App Server failed to start: ${error.message}`,
-        { cause: error, details: { codexBin: this.codexBin } }
-      ));
-    });
-    child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
-      this.exitInfo = { code, signal };
-      const detail = this.stderr.trim();
-      this.fail(new SynodError(
-        ERROR_CODES.APP_SERVER_EXITED,
-        `Codex App Server exited with ${signal ? `signal ${signal}` : `code ${code}`}.${detail ? ` ${detail}` : ""}`,
-        { details: { code, signal } }
-      ));
-    });
+      this.lines = readline.createInterface({ input: child.stdout });
+      this.lines.on("line", (line: string) => this.handleLine(line));
+      child.on("error", (error: Error) => {
+        this.fail(new SynodError(
+          ERROR_CODES.APP_SERVER_SPAWN_FAILED,
+          `Codex App Server failed to start: ${error.message}`,
+          { cause: error, details: { codexBin: this.codexBin } }
+        ));
+      });
+      child.on("exit", (code: number | null, signal: NodeJS.Signals | null) => {
+        this.exitInfo = { code, signal };
+        const detail = this.stderr.trim();
+        this.fail(new SynodError(
+          ERROR_CODES.APP_SERVER_EXITED,
+          `Codex App Server exited with ${signal ? `signal ${signal}` : `code ${code}`}.${detail ? ` ${detail}` : ""}`,
+          { details: { code, signal } }
+        ));
+      });
 
-    const initialized = await this.request("initialize", {
-      clientInfo: {
-        name: "synod_cli",
-        title: "Synod CLI",
-        version: packageVersion
-      },
-      capabilities: { experimentalApi: true }
-    });
-    if (!isInitializeResponse(initialized)) {
-      throw new SynodError(
-        ERROR_CODES.APP_SERVER_UNSUPPORTED,
-        "Codex App Server returned an invalid initialize response."
-      );
+      const initialized = await this.request("initialize", {
+        clientInfo: {
+          name: "synod_cli",
+          title: "Synod CLI",
+          version: packageVersion
+        },
+        capabilities: { experimentalApi: true }
+      });
+      if (!isInitializeResponse(initialized)) {
+        throw new SynodError(
+          ERROR_CODES.APP_SERVER_UNSUPPORTED,
+          "Codex App Server returned an invalid initialize response."
+        );
+      }
+
+      this.diagnostics.codexHome = typeof initialized.codexHome === "string" ? initialized.codexHome : null;
+      this.diagnostics.codexSurface = codexSurfaceFrom(initialized.userAgent);
+      this.diagnostics.codexUserAgent = initialized.userAgent;
+      this.diagnostics.codexVersion = codexVersionFrom(initialized.userAgent) || null;
+      this.diagnostics.appServer.platformFamily = initialized.platformFamily;
+      this.diagnostics.appServer.platformOs = initialized.platformOs;
+      this.diagnostics.appServer.capabilities.initialize = true;
+      this.notify("initialized", {});
+    } catch (error) {
+      // Setup and initialization are post-spawn protocol work. Close the child before
+      // exposing the failure so callers cannot retain a half-open runner.
+      await this.close().catch(() => undefined);
+      throw error;
     }
-
-    this.diagnostics.codexHome = typeof initialized.codexHome === "string" ? initialized.codexHome : null;
-    this.diagnostics.codexSurface = codexSurfaceFrom(initialized.userAgent);
-    this.diagnostics.codexUserAgent = initialized.userAgent;
-    this.diagnostics.codexVersion = codexVersionFrom(initialized.userAgent) || null;
-    this.diagnostics.appServer.platformFamily = initialized.platformFamily;
-    this.diagnostics.appServer.platformOs = initialized.platformOs;
-    this.diagnostics.appServer.capabilities.initialize = true;
-    this.notify("initialized", {});
   }
 
   async probeCapabilities(): Promise<AppServerDiagnostics["appServer"]["capabilities"]> {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluateProfile, getProfile, listProfiles } from "../src/profiles.js";
+import { ERROR_CODES } from "../src/errors.js";
+import { evaluateProfile, getProfile, listProfiles, resolveDelegationProfile, resolveImplementerProfile } from "../src/profiles.js";
 import type { ModelCapability } from "../src/profiles.js";
 
 function model(id: string, efforts: string[]): ModelCapability {
@@ -16,6 +17,45 @@ test("keeps the GPT-5.6 spawn fallback separate from Luna role overrides", () =>
   assert.deepEqual(profile.defaultSubagent, { model: "gpt-5.6-terra", effort: "max" });
   assert.deepEqual(profile.roles.implementer, { model: "gpt-5.6-luna", effort: "max" });
   assert.deepEqual(profile.roles.mechanical, { model: "gpt-5.6-luna", effort: "medium" });
+});
+
+test("resolves the installed implementer role without a model or effort override", () => {
+  assert.deepEqual(resolveImplementerProfile("synod-5.6"), {
+    profile: "synod-5.6",
+    model: "gpt-5.6-luna",
+    effort: "max"
+  });
+  assert.deepEqual(resolveImplementerProfile("portable"), {
+    profile: "portable",
+    model: "gpt-5.5",
+    effort: "high"
+  });
+});
+
+test("resolves reviewer and verifier lanes from the installed profile", () => {
+  assert.deepEqual(resolveDelegationProfile("synod-5.6", "reviewer"), {
+    profile: "synod-5.6",
+    role: "reviewer",
+    model: "gpt-5.6-terra",
+    effort: "high"
+  });
+  assert.deepEqual(resolveDelegationProfile("portable", "verifier"), {
+    profile: "portable",
+    role: "verifier",
+    model: "gpt-5.5",
+    effort: "high"
+  });
+});
+
+test("fails with a typed profile error for missing, invalid, or unsupported profiles", () => {
+  for (const profile of [undefined, "", "portable ", "not-a-profile"]) {
+    assert.throws(
+      () => resolveImplementerProfile(profile),
+      error => error instanceof Error
+        && "code" in error
+        && (error as Error & { code?: string }).code === ERROR_CODES.PROFILE_NOT_FOUND
+    );
+  }
 });
 
 test("evaluates the global subagent fallback as a profile capability", () => {

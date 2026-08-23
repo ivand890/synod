@@ -9,6 +9,7 @@ import { checkProject, initProject, uninstallProject, upgradeProject } from "./l
 import type { LifecycleDependencies, LifecycleResult } from "./lifecycle.js";
 import { packageVersion } from "./package.js";
 import { listProfiles } from "./profiles.js";
+import { readManifest } from "./manifest.js";
 import { collectUsage, formatUsageReport } from "./usage.js";
 import {
   addTask,
@@ -20,6 +21,7 @@ import {
   formatOrchestrationStatus,
   heartbeatTaskLease,
   recordCheckpoint,
+  recordTaskApproval,
   recordTaskCorrection,
   recoverTaskLease,
   releaseTaskLease,
@@ -48,7 +50,7 @@ import { isRecord } from "./validation.js";
 import { exportRecoveryBundle, verifyRecoveryBundle } from "./recovery.js";
 import { restoreRecoveryBundle } from "./restore.js";
 import { formatHandoff, generateHandoff } from "./handoff.js";
-import { formatWaitReport, resolveWaitSelection, waitForThreads } from "./wait.js";
+import { formatWaitReport, resolveWaitSelection, waitForThreads, type WaitChildLoss } from "./wait.js";
 import type { ThreadStatusAdapter, WaitClient, WaitRuntime, WaitSelection } from "./wait.js";
 import { cleanupTaskWorktree, createTaskWorktree, integrateTaskWorktreeProposal, sealTaskWorktreeProposal, taskWorktreeStatus } from "./worktrees.js";
 import type { TaskWorktreeDependencies } from "./worktrees.js";
@@ -61,10 +63,13 @@ import {
   completeHostDelegation,
   isCodexHostOperator,
   resolveHostDelegationAdapter,
+  selectHostDelegationAdapter,
   startHostDelegation,
   startHostDelegationHandoff
 } from "./host-delegation.js";
 import type { HostDelegationAdapter } from "./host-delegation.js";
+import { createCliAppServerAdapter, disposeCliAppServerOwner, findCliAppServerWaitClient } from "./cli-app-server-adapter.js";
+import type { CliAppServerAdapterOptions } from "./cli-app-server-adapter.js";
 
 const HELP = `Synod ${packageVersion}
 
@@ -80,8 +85,9 @@ Usage:
   synod bundle export <destination> [--cwd <directory>] [--include-untracked] [--include-local-docs] [--json]
   synod bundle verify <bundle> [--json]
   synod bundle restore <bundle> --cwd <directory> [--include-local-docs] [--json]
-  synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--correction-limit <n>] [--cwd <directory>] [--json]
+  synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--planned-read <path>] [--planned-write <path>] [--planned-read-tree <path>] [--planned-write-tree <path>] [--correction-limit <n>] [--cwd <directory>] [--json]
   synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
+  synod task approve <task-id> --role <reviewer|verifier> --decision <approved|rejected> --revision <n> --proposal-bundle-id <bundle> --owner-thread <thread-id> --evidence <reference> [--actor <id>] [--cwd <directory>] [--json]
   synod task correct <task-id> --revision <n> --reason <text> --evidence <reference> [--actor <id>] [--cwd <directory>] [--json]
   synod task override <task-id> --additional-rounds <n> --approver <id> --reference <ref> --reason <text> --evidence <ref> [--cwd <directory>] [--json]
   synod task split <task-id> --replacement <task-id> --replacement <task-id> --reason <text> --evidence <ref> [--cwd <directory>] [--json]
@@ -118,7 +124,7 @@ Usage:
   synod profiles [--json]
   synod usage [--session <thread-id>] [--cwd <directory>] [--since-event <sequence|id> | --since-checkpoint | --task <task-id>] [--until-event <sequence|id>] [--price-file <path>] [--by-model] [--json]
   synod wait (--task <task-id> | --thread <thread-id>) [--task <task-id>] [--thread <thread-id>] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
-  synod delegate start <task-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--actor <id>] [--evidence <reference>] [--reservation-ttl-seconds <n>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--wait] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
+  synod delegate start <task-id> [--role <implementer|reviewer|verifier>] [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--actor <id>] [--evidence <reference>] [--reservation-ttl-seconds <n>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--wait] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
   synod delegate complete <task-id> --owner-thread <thread-id> [--actor <id>] [--evidence <reference>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
   synod --help
   synod --version
@@ -174,10 +180,20 @@ Options:
   --owner-thread
               Bind a writer lease to one opaque Codex thread ID.
   --write     Add a repository-relative writer scope to a lease.
-  --read      Add a repository-relative read scope to a lease.
+  --read      Add a repository-relative read scope to a lease;
+              lease acquire/reserve with only read scopes acquires an
+              observer lease that never conflicts and never submits proposals.
   --write-tree
               Add a repository-relative writer scope covering a directory tree.
   --read-tree Add a repository-relative read scope covering a directory tree.
+  --planned-read
+              Add a read-file lane to a task's persisted delegation plan.
+  --planned-write
+              Add a write-file lane to a task's persisted delegation plan.
+  --planned-read-tree
+              Add a read-tree lane to a task's persisted delegation plan.
+  --planned-write-tree
+              Add a write-tree lane to a task's persisted delegation plan.
   --explain   Include a read-only path-level delta from the acknowledged checkpoint.
   --active-only
               Show operationally open, nonterminal tasks only.
@@ -191,6 +207,7 @@ Options:
               generated STATUS.md and other ignored files remain excluded.
   Delegate start options:
     --actor <id>                   Record the supervisor or host actor identity.
+    --role <role>                  Select implementer, reviewer, or verifier (default implementer).
     --evidence <reference>         Attach scoped evidence to a correction bind.
     --reservation-ttl-seconds <n>  Bound the pre-bind reservation lifetime.
     --ttl-seconds <n>              Bound the post-bind writer lease lifetime.
@@ -219,6 +236,7 @@ export interface CliDependencies extends LifecycleDependencies, OrchestrationDep
   hostWaitAdapter?: import("./wait.js").HostWaitAdapter;
   hostDelegationAdapter?: HostDelegationAdapter;
   hostDelegationAdapterFactory?: () => HostDelegationAdapter;
+  cliAppServerAdapterFactory?: (options?: CliAppServerAdapterOptions) => HostDelegationAdapter;
   hostRuntimeResolver?: () => import("./codex-runtime.js").ResolvedCodexRuntime;
   hostAdapterEnv?: NodeJS.ProcessEnv;
   waitRuntimeResolver?: () => WaitRuntime;
@@ -269,7 +287,14 @@ function observedOwnerStopped(
 
 function waitRecoveryNextCommand(
   selection: WaitSelection,
-  report: { incomplete: boolean; timedOut: boolean; aborted: boolean; hostWaitRequired: boolean; statuses: Array<{ threadId: string; status: { type: string } }> }
+  report: {
+    incomplete: boolean;
+    timedOut: boolean;
+    aborted: boolean;
+    hostWaitRequired: boolean;
+    childLoss?: WaitChildLoss;
+    statuses: Array<{ threadId: string; status: { type: string } }>;
+  }
 ): Record<string, unknown> | undefined {
   const selected = selection.tasks.find(task => observedOwnerStopped(report, task.ownerThread));
   if (!selected) return undefined;
@@ -292,8 +317,28 @@ function waitRecoveryNextCommand(
       expectedHeartbeatAt: selected.expectedHeartbeatAt,
       ownerThread: selected.ownerThread
     },
+    childLoss: report.childLoss,
     requirements: []
   };
+}
+
+function canonicalOwnerThreadForDisposal(result: unknown, action: string, decision: unknown): string | undefined {
+  if (!isRecord(result)) return undefined;
+  if (action === "revoke") {
+    const lease = isRecord(result.lease) ? result.lease : undefined;
+    return typeof lease?.ownerThread === "string" && lease.ownerThread.trim() ? lease.ownerThread : undefined;
+  }
+  if (action !== "recover" || decision === "resume") return undefined;
+  const task = isRecord(result.task) ? result.task : undefined;
+  const recovery = isRecord(result.recovery)
+    ? result.recovery
+    : task && isRecord(task.recovery)
+      ? task.recovery
+      : undefined;
+  const recordedDecision = recovery && isRecord(recovery.decision) ? recovery.decision : undefined;
+  return typeof recordedDecision?.priorOwnerThread === "string" && recordedDecision.priorOwnerThread.trim()
+    ? recordedDecision.priorOwnerThread
+    : undefined;
 }
 
 function printLifecycleResult(command: string, result: LifecycleResult, output: CliOutput): void {
@@ -507,7 +552,7 @@ export async function run(
     if (command === "delegate") {
       const options = parseDelegateArgs(args.slice(1));
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      const adapter = resolveHostDelegationAdapter({
+      const injectedAdapter = resolveHostDelegationAdapter({
         ...(dependencies.hostDelegationAdapter ? { hostDelegationAdapter: dependencies.hostDelegationAdapter } : {}),
         ...(dependencies.hostDelegationAdapterFactory
           ? { hostDelegationAdapterFactory: dependencies.hostDelegationAdapterFactory }
@@ -522,7 +567,7 @@ export async function run(
           actor: options.actor,
           ownerThread: options.ownerThread,
           evidence: options.evidence,
-          ...(adapter ? { adapter } : {}),
+          ...(injectedAdapter ? { adapter: injectedAdapter } : {}),
           ...(options.ttlSeconds === undefined ? {} : { ttlSeconds: options.ttlSeconds }),
           ...(options.heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds: options.heartbeatIntervalSeconds })
         }, hostDependencies);
@@ -547,8 +592,35 @@ export async function run(
         }
         return 0;
       }
-      if (!adapter) {
-        const runtime = dependencies.hostRuntimeResolver?.() || resolveCodexRuntime();
+      const runtime = dependencies.hostRuntimeResolver?.() || resolveCodexRuntime();
+      if (!injectedAdapter && runtime.surface === "cli" && options.wait) {
+        throw new SynodError(
+          ERROR_CODES.HOST_ADAPTER_INVALID,
+          "CLI App Server Path A does not treat App Server events as wait --task."
+        );
+      }
+      let installedProfile: string | undefined;
+      if (!injectedAdapter && runtime.surface === "cli") {
+        const manifest = await readManifest(options.cwd || ".");
+        installedProfile = manifest?.schemaVersion === 1 ? undefined : manifest?.profile;
+      }
+      const selected = selectHostDelegationAdapter({
+        ...(injectedAdapter ? { adapter: injectedAdapter } : {}),
+        runtime,
+        createCliAdapter: () => dependencies.cliAppServerAdapterFactory?.({
+          runtime,
+          ...(installedProfile === undefined ? {} : { profile: installedProfile }),
+          ...(options.role === undefined ? {} : { role: options.role }),
+          ...(options.cwd === undefined ? {} : { directory: options.cwd })
+        })
+          ?? createCliAppServerAdapter({
+            runtime,
+            ...(installedProfile === undefined ? {} : { profile: installedProfile }),
+            ...(options.role === undefined ? {} : { role: options.role }),
+            ...(options.cwd === undefined ? {} : { directory: options.cwd })
+          })
+      });
+      if (selected.path === "handoff") {
         if (!isCodexHostOperator(runtime)) {
           throw new SynodError(ERROR_CODES.HOST_ADAPTER_REQUIRED, "Host delegation requires an injected host adapter.");
         }
@@ -556,6 +628,7 @@ export async function run(
           id: options.id,
           directory: options.cwd,
           actor: options.actor,
+          ...(options.role === undefined ? {} : { role: options.role }),
           read: options.read,
           write: options.write,
           readTree: options.readTree,
@@ -583,10 +656,12 @@ export async function run(
         }
         return 1;
       }
+      const adapter = selected.adapter;
       const result = await startHostDelegation({
         id: options.id,
         directory: options.cwd,
         actor: options.actor,
+        ...(options.role === undefined ? {} : { role: options.role }),
         read: options.read,
         write: options.write,
         readTree: options.readTree,
@@ -605,6 +680,9 @@ export async function run(
         ownerThread: result.ownerThread,
         lease: result.lease,
         authorization: result.authorization,
+        ...(isRecord(result.authorization) && (result.authorization.proposalRequired === true || result.authorization.approvalRequired === true)
+          ? { nextCommand: result.authorization.nextCommand }
+          : {}),
         ...(result.wait ? { wait: result.wait } : {}),
         ...(result.liveness ? { liveness: result.liveness } : {}),
         checkpoint: result.bind.state.checkpoint,
@@ -614,10 +692,10 @@ export async function run(
         const diagnostics = result.wait?.diagnostics || {};
         printJsonEnvelope(successEnvelope("delegate", data, { diagnostics } ), output, view);
       } else {
-        output.log(`Delegated ${result.task.id} to ${result.ownerThread}; write authorized ${result.authorization.status}.`);
+        output.log(`Delegated ${result.task.id} to ${result.ownerThread}; write authorized ${result.authorization.status}${result.authorization.proposalRequired === true ? "; canonical proposal still required." : result.authorization.approvalRequired === true ? "; typed approval record still required." : "."}`);
         if (result.wait) output.log(formatWaitReport(result.wait));
       }
-      return result.wait?.incomplete ? 1 : 0;
+      return result.wait?.incomplete || result.authorization.proposalRequired === true || result.authorization.approvalRequired === true ? 1 : 0;
     }
 
     if (command === "wait") {
@@ -636,12 +714,29 @@ export async function run(
             : {}),
           ...(dependencies.hostAdapterEnv ? { env: dependencies.hostAdapterEnv } : {})
         }, dependencies.hostAdapterEnv ?? process.env, { allowUnsupportedChannel: true });
-      const report = await waitForThreads({ ...options, threadIds: selection.threadIds }, {
-        ...(dependencies.waitClientFactory ? { clientFactory: dependencies.waitClientFactory } : {}),
-        ...(dependencies.waitAdapterFactory ? { adapterFactory: dependencies.waitAdapterFactory } : {}),
-        ...(resolvedHostAdapter ? { hostAdapter: resolvedHostAdapter } : {}),
-        ...(dependencies.waitRuntimeResolver ? { runtimeResolver: dependencies.waitRuntimeResolver } : {})
-      });
+      // A CLI Path A delegate keeps its owning App Server behind a private,
+      // exact-thread local endpoint. Connect only for a single task/thread
+      // wait when no injected authority supersedes that session.
+      const retainedWaitClient = !resolvedHostAdapter
+        && !dependencies.waitAdapterFactory
+        && !dependencies.waitClientFactory
+        && selection.threadIds.length === 1
+        ? findCliAppServerWaitClient(options.cwd, selection.threadIds[0]!)
+        : undefined;
+      const waitClientFactory = dependencies.waitClientFactory
+        || (retainedWaitClient ? () => retainedWaitClient : undefined);
+      let report: Awaited<ReturnType<typeof waitForThreads>>;
+      try {
+        report = await waitForThreads({ ...options, threadIds: selection.threadIds }, {
+          ...(waitClientFactory ? { clientFactory: waitClientFactory } : {}),
+          ...(dependencies.waitAdapterFactory ? { adapterFactory: dependencies.waitAdapterFactory } : {}),
+          ...(resolvedHostAdapter ? { hostAdapter: resolvedHostAdapter } : {}),
+          ...(dependencies.waitRuntimeResolver ? { runtimeResolver: dependencies.waitRuntimeResolver } : {})
+        });
+      } catch (error) {
+        await retainedWaitClient?.close();
+        throw error;
+      }
       const nextCommand = waitRecoveryNextCommand(selection, report);
       if (options.json) {
         const { warnings, diagnostics, ...data } = report;
@@ -778,6 +873,11 @@ export async function run(
           output.log(`Transitioned ${result.task.id} to ${result.task.state} at revision ${result.task.revision}.`);
           for (const item of result.evidence) output.log(`Recorded evidence ${item.id}: ${item.kind} @ revision ${item.revision}.`);
         }
+      } else if (options.action === "approve") {
+        const result = await recordTaskApproval(options, dependencies);
+        const data = { task: result.task, approval: result.approval, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
+        if (options.json) printJsonEnvelope(successEnvelope("task", { action: "approve", ...data }), output, view);
+        else output.log(`Recorded ${result.approval.role} ${result.approval.decision} approval for ${result.task.id} revision ${result.approval.revision}.`);
       } else if (options.action === "correct") {
         const result = await recordTaskCorrection(options, dependencies);
         const data = { task: result.task, correction: result.correction, evidence: result.evidence, checkpoint: result.state.checkpoint, lastEvent: result.state.lastEvent };
@@ -832,10 +932,16 @@ export async function run(
               : options.action === "revoke"
                 ? await revokeTaskLease(options, dependencies)
                 : await recoverTaskLease(options, dependencies);
+      const ownerThread = canonicalOwnerThreadForDisposal(result, options.action, "decision" in options ? options.decision : undefined);
+      const ownerCleanup = ownerThread
+        ? await disposeCliAppServerOwner(options.directory, ownerThread)
+        : undefined;
+      const activationWriteAuthorized = "writeAuthorized" in result ? result.writeAuthorized : true;
       const data = {
         action: options.action,
         task: result.task,
         ...("lease" in result ? { lease: result.lease } : { reservation: result.reservation }),
+        ...(ownerCleanup ? { ownerCleanup: { ownerThread, ...ownerCleanup } } : {}),
         ...("writeAuthorized" in result ? { writeAuthorized: result.writeAuthorized } : {}),
         ...(options.action === "bind" && "lease" in result ? {
           activation: {
@@ -846,13 +952,26 @@ export async function run(
             ownerThread: result.lease.ownerThread,
             boundAt: result.lease.acquiredAt,
             event: result.state.lastEvent,
-            writeAuthorized: true,
+            writeAuthorized: activationWriteAuthorized,
             supervisorNotification: { status: "required-not-observed" as const },
-            followUp: {
-              operation: "wait",
-              arguments: { taskIds: [result.task.id] },
-              requirements: []
-            }
+            followUp: activationWriteAuthorized
+              ? {
+                  operation: "wait",
+                  arguments: { taskIds: [result.task.id] },
+                  requirements: []
+                }
+              : {
+                  operation: "lease.release",
+                  arguments: {
+                    taskId: result.task.id,
+                    leaseId: result.lease.id,
+                    generation: result.lease.generation,
+                    revision: result.lease.taskRevision,
+                    expectedHeartbeatAt: result.lease.heartbeatAt,
+                    ownerThread: result.lease.ownerThread
+                  },
+                  requirements: []
+                }
           }
         } : {}),
         ...("evidence" in result ? { evidence: result.evidence } : {}),

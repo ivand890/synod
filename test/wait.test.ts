@@ -56,7 +56,7 @@ class FakeAdapter implements ThreadStatusAdapter {
   }
   async close() { this.closed += 1; }
   getWarnings() { return []; }
-  getDiagnostics() { return { fake: true, closed: this.closed }; }
+  getDiagnostics(): Record<string, unknown> { return { fake: true, closed: this.closed }; }
 }
 
 class ReceiverReadCursorHost {
@@ -360,6 +360,45 @@ test("poll fallback is bounded and observable", async () => {
   assert.equal(report.incomplete, false);
 });
 
+test("an unproven systemError is authority-lost, not child death", async () => {
+  const adapter = new FakeAdapter({
+    reads: [{ statuses: [{ threadId: "thread:unknown", status: { type: "systemError" } }] }]
+  });
+
+  const report = await waitForThreads({ threadIds: ["thread:unknown"], timeoutMs: 100 }, {
+    adapterFactory: () => adapter
+  });
+
+  assert.deepEqual(report.statuses, [{ threadId: "thread:unknown", status: { type: "notLoaded" } }]);
+  assert.equal(report.childLoss, undefined);
+  assert.equal(report.lossCause, "authority-lost");
+  assert.equal(report.waitAuthority, "unknown");
+  assert.equal(report.hostWaitRequired, true);
+});
+
+test("only direct exact-thread child termination evidence yields child loss", async () => {
+  const adapter = new FakeAdapter({
+    reads: [{ statuses: [{ threadId: "thread:dead", status: { type: "systemError" } }] }]
+  });
+  adapter.getDiagnostics = () => ({
+    waitLoss: {
+      cause: "child-terminated",
+      authority: "appServer",
+      threadId: "thread:dead",
+      directEvidence: true
+    }
+  });
+
+  const report = await waitForThreads({ threadIds: ["thread:dead"], timeoutMs: 100 }, {
+    adapterFactory: () => adapter
+  });
+
+  assert.deepEqual(report.statuses, [{ threadId: "thread:dead", status: { type: "systemError" } }]);
+  assert.equal(report.childLoss, "child-dead-lease-live");
+  assert.equal(report.lossCause, "child-terminated");
+  assert.equal(report.waitAuthority, "appServer");
+});
+
 test("a successfully read unloaded thread requires attention instead of claiming completion", async () => {
   const adapter = new FakeAdapter({
     notification: true,
@@ -478,6 +517,8 @@ test("the overall deadline bounds an initial status read", async () => {
   });
 
   assert.equal(report.timedOut, true);
+  assert.equal(report.lossCause, "wait-timeout");
+  assert.equal(report.waitAuthority, "unknown");
   assert.equal(report.incomplete, true);
   assert.deepEqual(report.statuses, [{ threadId: "thread:a", status: { type: "notLoaded" } }]);
   assert.equal(closed, 1);
