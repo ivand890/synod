@@ -372,11 +372,13 @@ The release also ships bounded delegation and independent approval surfaces;
 future protocol holes return to `v0.12.x` patches rather than opening a new
 feature series.
 
-Status: delivered and publicly verified in `v0.12.0`. The release adds a
-validated concurrency policy and CLI App Server runner, zero-write observer
-leases, typed reviewer/verifier approval lanes, and bounded parallel
-delegation; these surfaces are covered by the release's regression and
-installed-package evidence.
+Status: delivered and publicly verified for the `v0.12.0` package and its
+bounded delegation/approval surfaces. The package includes a validated
+concurrency policy and CLI App Server runner, zero-write observer
+leases, typed reviewer/verifier approval lanes, and bounded parallel delegation.
+The broader independent-proof milestone remains in progress, pending the
+SYN-120–SYN-123 pilots, recovery drill, usage evidence, adversarial checks, and
+release gate below.
 
 | ID | Outcome | Depends on | Acceptance gate |
 |---|---|---|---|
