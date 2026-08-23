@@ -249,11 +249,13 @@ class DetachedRunnerOwner {
         newline = buffered.indexOf("\n");
         if (!line.trim()) continue;
         chain = chain.then(async () => {
+          let requestId = -1;
           try {
             const request: unknown = JSON.parse(line);
+            if (isRecord(request) && typeof request.id === "number") requestId = request.id;
             await this.handleControl(socket, request);
           } catch (error) {
-            writeLine(socket, { id: -1, ok: false, error: errorRecord(error) } satisfies ControlResponse);
+            writeLine(socket, { id: requestId, ok: false, error: errorRecord(error) } satisfies ControlResponse);
           }
         });
       }

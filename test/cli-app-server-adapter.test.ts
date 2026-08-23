@@ -12,6 +12,7 @@ import {
   findCliAppServerWaitClient,
   type CliAppServerClient
 } from "../src/cli-app-server-adapter.js";
+import { createCliAppServerRunnerClient } from "../src/cli-app-server-runner.js";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
 import { isRecord } from "../src/validation.js";
 import { selectHostDelegationAdapter } from "../src/host-delegation.js";
@@ -1184,6 +1185,42 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
     await adapter.close?.();
     assert.equal(findCliAppServerWaitClient(directory, threadId), undefined);
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("production runner forwards App Server RPC rejection to the originating request", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-runner-rpc-error-"));
+  const fakeCodex = path.join(directory, "fake-codex.mjs");
+  await writeFile(fakeCodex, `#!/usr/bin/env node
+import readline from "node:readline";
+const reply = (id, result) => process.stdout.write(JSON.stringify({ id, result }) + "\\n");
+const reject = id => process.stdout.write(JSON.stringify({ id, error: { code: "FAKE_RPC_REJECTION", message: "thread start rejected by fake App Server" } }) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", line => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.148.0", codexHome: "/tmp" });
+  else if (message.method === "thread/start") reject(message.id);
+});
+`, "utf8");
+  await chmod(fakeCodex, 0o755);
+  const client = createCliAppServerRunnerClient({
+    codexBin: fakeCodex,
+    directory,
+    requestTimeoutMs: 1_000
+  });
+  try {
+    await client.start();
+    await assert.rejects(
+      client.request("thread/start"),
+      error => error instanceof SynodError
+        && error.code === ERROR_CODES.APP_SERVER_PROTOCOL_ERROR
+        && error.message === "thread start rejected by fake App Server"
+        && isRecord(error.details)
+        && error.details.method === "thread/start"
+        && error.details.rpcCode === "FAKE_RPC_REJECTION"
+    );
+  } finally {
+    await client.close();
     await rm(directory, { recursive: true, force: true });
   }
 });
