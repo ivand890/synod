@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
 import test from "node:test";
+import os from "node:os";
+import path from "node:path";
 import {
   completeHostDelegation,
   isCodexHostOperator,
@@ -787,32 +790,37 @@ test("host wait timeout without a wake classifies wait-never-woke", async () => 
 });
 
 test("PATH CLI delegate --wait does not treat App Server events as wait --task", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-delegate-cli-wait-unmanaged-"));
   const messages: string[] = [];
   let spawned = 0;
-  const adapter: HostDelegationAdapter = {
-    async spawn() {
-      spawned += 1;
-      return { ownerId: "thread-from-appserver" };
-    },
-    async authorize() { return { status: "authorized" }; },
-    async wait() { throw new Error("must not treat App Server events as wait --task"); }
-  };
-  const status = await run(["delegate", "start", "T-HOST", "--wait", "--json"], {
-    log: value => messages.push(String(value)),
-    warn() {},
-    error() {}
-  }, {
-    hostRuntimeResolver: () => ({
-      surface: "cli",
-      executable: "codex",
-      executableSource: "PATH",
-      resolved: true
-    }),
-    cliAppServerAdapterFactory: () => adapter
-  });
-  const envelope = JSON.parse(messages[0]!);
-  assert.equal(status, 1);
-  assert.equal(envelope.ok, false);
-  assert.equal(envelope.error.code, ERROR_CODES.HOST_ADAPTER_INVALID);
-  assert.equal(spawned, 0);
+  try {
+    const adapter: HostDelegationAdapter = {
+      async spawn() {
+        spawned += 1;
+        return { ownerId: "thread-from-appserver" };
+      },
+      async authorize() { return { status: "authorized" }; },
+      async wait() { throw new Error("must not treat App Server events as wait --task"); }
+    };
+    const status = await run(["delegate", "start", "T-HOST", "--wait", "--cwd", directory, "--json"], {
+      log: value => messages.push(String(value)),
+      warn() {},
+      error() {}
+    }, {
+      hostRuntimeResolver: () => ({
+        surface: "cli",
+        executable: "codex",
+        executableSource: "PATH",
+        resolved: true
+      }),
+      cliAppServerAdapterFactory: () => adapter
+    });
+    const envelope = JSON.parse(messages[0]!);
+    assert.equal(status, 1);
+    assert.equal(envelope.ok, false);
+    assert.equal(envelope.error.code, ERROR_CODES.HOST_ADAPTER_INVALID);
+    assert.equal(spawned, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

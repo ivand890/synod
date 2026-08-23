@@ -593,6 +593,12 @@ export async function run(
         return 0;
       }
       const runtime = dependencies.hostRuntimeResolver?.() || resolveCodexRuntime();
+      if (!injectedAdapter && runtime.surface === "cli" && options.wait) {
+        throw new SynodError(
+          ERROR_CODES.HOST_ADAPTER_INVALID,
+          "CLI App Server Path A does not treat App Server events as wait --task."
+        );
+      }
       let installedProfile: string | undefined;
       if (!injectedAdapter && runtime.surface === "cli") {
         const manifest = await readManifest(options.cwd || ".");
@@ -614,12 +620,6 @@ export async function run(
             ...(options.cwd === undefined ? {} : { directory: options.cwd })
           })
       });
-      if (selected.path === "cli-app-server" && options.wait) {
-        throw new SynodError(
-          ERROR_CODES.HOST_ADAPTER_INVALID,
-          "CLI App Server Path A does not treat App Server events as wait --task."
-        );
-      }
       if (selected.path === "handoff") {
         if (!isCodexHostOperator(runtime)) {
           throw new SynodError(ERROR_CODES.HOST_ADAPTER_REQUIRED, "Host delegation requires an injected host adapter.");
