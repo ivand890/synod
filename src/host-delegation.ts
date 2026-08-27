@@ -1385,12 +1385,19 @@ function evidenceReferences(value: unknown[] | undefined): string[] {
 export function delegateCompleteCommand(
   taskId: string,
   fence: HostDelegationReservationFence,
-  evidence: readonly string[] = []
+  evidence: readonly string[] = [],
+  evidenceRequired = false
 ): HostNextCommand {
+  const missingEvidence = evidenceRequired && evidence.length === 0;
   return {
     operation: "delegate.complete",
-    argv: ["delegate", "complete", taskId, ...evidence.flatMap(reference => ["--evidence", reference])],
-    requirements: ["owner-thread"],
+    argv: [
+      "delegate", "complete", taskId,
+      ...evidence.flatMap(reference => ["--evidence", reference]),
+      ...(missingEvidence ? ["--evidence"] : []),
+      "--owner-thread"
+    ],
+    requirements: ["owner-thread", ...(missingEvidence ? ["evidence"] : [])],
     fence
   };
 }
@@ -1464,6 +1471,9 @@ export async function startHostDelegationHandoff(
   }
   const reservedFence = reservationFence(reservation);
   const runtime = dependencies.hostRuntimeResolver?.() || resolveCodexRuntime();
+  const evidence = evidenceReferences(options.evidence);
+  const correctionEvidenceRequired = prepared.role === "implementer"
+    && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(reserved.task.state);
   return {
     directory: options.directory || ".",
     task: reserved.task,
@@ -1471,7 +1481,7 @@ export async function startHostDelegationHandoff(
     reservationFence: reservedFence,
     readOnlyContract: readOnlyContractFor(id, reservation, reserved.task),
     hostSpawnRequired: true,
-    nextCommand: delegateCompleteCommand(id, reservedFence, evidenceReferences(options.evidence)),
+    nextCommand: delegateCompleteCommand(id, reservedFence, evidence, correctionEvidenceRequired),
     probe: probeCodexHostAdapter(runtime)
   };
 }

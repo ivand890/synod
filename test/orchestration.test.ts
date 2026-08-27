@@ -98,7 +98,7 @@ test("task-next guidance advertises fence resolution instead of rejected transit
   assert.deepEqual(reservedTask.legalTransitions, []);
   assert.equal(reservedTask.constraints.reservationRequiresBind, true);
   assert.equal(reservedTask.actions[0]?.operation, "delegate.complete");
-  assert.deepEqual(reservedTask.actions[0]?.argv, ["delegate", "complete", "T-RESERVED"]);
+  assert.deepEqual(reservedTask.actions[0]?.argv, ["delegate", "complete", "T-RESERVED", "--owner-thread"]);
   assert.deepEqual(reservedTask.actions[0]?.requirements, ["owner-thread"]);
   assert.equal((reservedTask.actions[0] as { fence?: { leaseId?: string } }).fence?.leaseId, reserved.reservation.id);
   assert.deepEqual(expiredReservationTask.legalTransitions, []);
@@ -134,6 +134,9 @@ test("task-next guidance advertises fence resolution instead of rejected transit
     ["lease.recover", "supersede"]
   ]);
   assert.ok(pending.actions[0]?.argv?.includes("--decision"));
+  assert.ok(pending.actions[0]?.argv?.includes("--reason"));
+  assert.ok(pending.actions[1]?.argv?.includes("--owner-thread"));
+  assert.ok(pending.actions[1]?.argv?.includes("--reason"));
   assert.deepEqual(pending.actions[0]?.requirements, ["reason"]);
   assert.deepEqual(pending.actions[1]?.requirements, ["owner-thread", "reason"]);
 });
@@ -142,6 +145,7 @@ test("task-next guidance reserves no-lease activation and fences correction evid
   const directory = await temporaryProject();
   await initializeGitHead(directory);
   await mkdir(path.join(directory, "src"), { recursive: true });
+  await addDefaultTask(directory, { id: "T-PLANNED" });
   const states = [
     { id: "T-READY", state: "READY" as const },
     { id: "T-REVIEW", state: "REVIEW" as const },
@@ -167,6 +171,15 @@ test("task-next guidance reserves no-lease activation and fences correction evid
   }
 
   const withoutReservations = await nextTaskGuidance({ directory });
+  const plannedTask = withoutReservations.tasks.find(candidate => candidate.id === "T-PLANNED");
+  assert.ok(plannedTask);
+  assert.deepEqual(plannedTask.actions[0]?.arguments, {
+    taskId: "T-PLANNED",
+    to: "READY",
+    revision: 0
+  });
+  assert.deepEqual(plannedTask.actions[0]?.requirements, []);
+  assert.deepEqual(plannedTask.actions[0]?.argv, ["task", "transition", "T-PLANNED", "READY", "--revision", "0"]);
   for (const entry of states) {
     const task = withoutReservations.tasks.find(candidate => candidate.id === entry.id);
     assert.ok(task);
@@ -186,6 +199,13 @@ test("task-next guidance reserves no-lease activation and fences correction evid
       assert.deepEqual(task.actions[0]?.argv, ["delegate", "start", entry.id]);
     } else {
       assert.equal((task.actions[0]?.arguments as { to?: string }).to, entry.state === "REVIEW" ? "ACCEPTED" : entry.state === "ACCEPTED" ? "VERIFIED" : "DONE");
+      if (entry.state === "VERIFIED") {
+        assert.equal(Object.hasOwn(task.actions[0]?.arguments || {}, "evidence"), false);
+        assert.equal(task.actions[0]?.argv.includes("--evidence"), false);
+      } else {
+        assert.deepEqual(task.actions[0]?.requirements, ["evidence"]);
+        assert.equal(task.actions[0]?.argv.at(-1), "--evidence");
+      }
     }
   }
 
@@ -199,8 +219,8 @@ test("task-next guidance reserves no-lease activation and fences correction evid
   assert.ok(correctionTask);
   assert.equal(correctionTask.actions[0]?.operation, "delegate.complete");
   assert.deepEqual(correctionTask.actions[0]?.requirements, ["owner-thread", "evidence"]);
-  assert.deepEqual(correctionTask.actions[0]?.arguments, { taskId: "T-REVIEW" });
-  assert.deepEqual(correctionTask.actions[0]?.argv, ["delegate", "complete", "T-REVIEW"]);
+  assert.deepEqual(correctionTask.actions[0]?.arguments, { taskId: "T-REVIEW", evidence: [] });
+  assert.deepEqual(correctionTask.actions[0]?.argv, ["delegate", "complete", "T-REVIEW", "--evidence", "--owner-thread"]);
   assert.deepEqual((correctionTask.actions[0] as { fence?: Record<string, unknown> }).fence, {
     reservationToken: reserved.reservation.token,
     leaseId: reserved.reservation.id,
@@ -883,7 +903,8 @@ test("ACTIVE supervisor corrections consume rounds and retain scoped evidence be
     reason: null,
     evidence: []
   });
-  assert.deepEqual(correctionAction?.requirements, ["revision", "reason", "evidence"]);
+  assert.deepEqual(correctionAction?.requirements, ["reason", "evidence"]);
+  assert.deepEqual(correctionAction?.argv, ["task", "correct", "T-001", "--revision", "0", "--reason", "--evidence"]);
 
   const beforeStale = await readOrchestration(directory);
   await assert.rejects(

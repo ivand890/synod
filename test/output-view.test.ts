@@ -177,7 +177,7 @@ test("summary lease mutation keeps the exact next-operation fence", () => {
   }) as Record<string, unknown>;
   const next = reservation.nextOperation as Record<string, unknown>;
   assert.equal(next.operation, "delegate.complete");
-  assert.deepEqual(next.argv, ["delegate", "complete", "T-RESERVE"]);
+  assert.deepEqual(next.argv, ["delegate", "complete", "T-RESERVE", "--owner-thread"]);
   assert.deepEqual(next.fence, {
     reservationToken: "token-1",
     leaseId: "lease-1",
@@ -186,6 +186,27 @@ test("summary lease mutation keeps the exact next-operation fence", () => {
     expectedReservedAt: "2026-08-14T00:00:00.000Z",
     baselineHash: "sha256:baseline"
   });
+
+  const correction = projectSummary("lease", {
+    action: "reserve",
+    task: { id: "T-CORRECTION", state: "REVIEW", revision: 2 },
+    reservation: {
+      id: "lease-correction",
+      token: "token-correction",
+      generation: 3,
+      taskId: "T-CORRECTION",
+      taskRevision: 2,
+      role: "implementer",
+      observer: false,
+      reservedAt: "2026-08-14T00:00:00.000Z",
+      baseline: { snapshotContentHash: "sha256:correction-baseline" },
+      status: "RESERVED"
+    }
+  }) as Record<string, unknown>;
+  assert.deepEqual((correction.nextOperation as Record<string, unknown>).argv, [
+    "delegate", "complete", "T-CORRECTION", "--evidence", "--owner-thread"
+  ]);
+  assert.deepEqual((correction.nextOperation as Record<string, unknown>).requirements, ["owner-thread", "evidence"]);
 
   const active = projectSummary("lease", {
     action: "heartbeat",
@@ -245,7 +266,7 @@ test("summary proposal submission exposes the exact acceptance action without a 
   assert.deepEqual(summary.nextOperation, {
     operation: "task.transition",
     arguments: { taskId: "T-PROPOSAL", to: "ACCEPTED", revision: 3, evidence: [] },
-    argv: ["task", "transition", "T-PROPOSAL", "ACCEPTED", "--revision", "3"],
+    argv: ["task", "transition", "T-PROPOSAL", "ACCEPTED", "--revision", "3", "--evidence"],
     requirements: ["evidence"]
   });
   assert.equal(Object.hasOwn(summary.nextOperation as Record<string, unknown>, "fence"), false);

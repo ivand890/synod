@@ -21,6 +21,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   requires waking the exact host worker with `followup_task` after bind. README
   and PRODUCT no longer claim the CLI reserves, spawns, binds, and authorizes
   writers.
+- `task next` argv now includes the CLI flags the supervisor must fill
+  (`--evidence`, `--reason`, `--owner-thread`). `requirements[]` names those
+  values and no longer stands in for flags the CLI would reject. Host completion
+  guidance also carries the evidence placeholder required for correction binds,
+  including lease-reserve summaries and the plain-text command displayed by
+  `delegate start`.
 
 ## [0.12.0] - 2026-08-23
 

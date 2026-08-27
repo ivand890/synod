@@ -363,12 +363,17 @@ function nextOperation(data: Record<string, unknown>): unknown {
   const reservation = isRecord(data.reservation) ? data.reservation : undefined;
   if (action === "reserve" && reservation) {
     const fence = reservationFence(reservation);
+    const correctionEvidenceRequired = reservation.observer !== true
+      && (reservation.role === undefined || reservation.role === "implementer")
+      && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(String(task?.state ?? ""));
     return {
       operation: "delegate.complete",
       ...(taskId ? { taskId } : {}),
-      argv: taskId ? ["delegate", "complete", taskId] : [],
+      argv: taskId
+        ? ["delegate", "complete", taskId, ...(correctionEvidenceRequired ? ["--evidence"] : []), "--owner-thread"]
+        : [],
       fence,
-      requirements: ["owner-thread"],
+      requirements: ["owner-thread", ...(correctionEvidenceRequired ? ["evidence"] : [])],
       alternatives: ["lease.cancel", "lease.expire"]
     };
   }
@@ -396,7 +401,8 @@ function nextOperation(data: Record<string, unknown>): unknown {
             "--generation", String(fence.generation ?? ""),
             "--revision", String(fence.revision ?? ""),
             "--expected-heartbeat-at", String(fence.expectedHeartbeatAt ?? ""),
-            "--decision", "resume"
+            "--decision", "resume",
+            "--reason"
           ]
         : [],
       fence,
@@ -484,7 +490,7 @@ function proposalNextOperation(value: Record<string, unknown>): unknown {
       revision,
       evidence: []
     },
-    argv: ["task", "transition", taskId, "ACCEPTED", "--revision", String(revision)],
+    argv: ["task", "transition", taskId, "ACCEPTED", "--revision", String(revision), "--evidence"],
     requirements: ["evidence"]
   };
 }

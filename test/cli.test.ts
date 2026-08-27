@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { WARNING_CODES, baseDiagnostics } from "../src/contracts.js";
 import { ERROR_CODES, asSynodError } from "../src/errors.js";
-import { run } from "../src/cli.js";
+import { formatHostHandoffCommand, run } from "../src/cli.js";
 import { findCliAppServerWaitClient } from "../src/cli-app-server-adapter.js";
 import { cliAppServerEndpointPaths } from "../src/cli-app-server-runner.js";
 import { parseDelegateArgs, parseLeaseArgs, parseProposalArgs, parseStatusArgs, parseTaskArgs, parseWorktreeArgs } from "../src/command-options.js";
@@ -371,6 +371,17 @@ test("delegate complete requires an owner thread and rejects unknown actions", (
     () => parseDelegateArgs(["begin", "T-001"]),
     error => error instanceof Error && (error as Error & { code?: string }).code === ERROR_CODES.UNEXPECTED_ARGUMENT
   );
+});
+
+test("plain host handoff commands render every missing required value", () => {
+  assert.equal(formatHostHandoffCommand({
+    argv: ["delegate", "complete", "T-REVIEW", "--evidence", "--owner-thread"],
+    requirements: ["owner-thread", "evidence"]
+  }), "synod delegate complete T-REVIEW --evidence <evidence> --owner-thread <owner-thread>");
+  assert.equal(formatHostHandoffCommand({
+    argv: ["delegate", "complete", "T-REVIEW", "--evidence", "correction round 2", "--owner-thread"],
+    requirements: ["owner-thread"]
+  }), "synod delegate complete T-REVIEW --evidence 'correction round 2' --owner-thread <owner-thread>");
 });
 
 test("CLI Path A binds a read-only observer thread UUID before a turn", async () => {
@@ -2249,7 +2260,7 @@ test("CLI proposal summary exposes the exact acceptance action after releasing i
     assert.deepEqual(summary.data.nextOperation, {
       operation: "task.transition",
       arguments: { taskId: "T-PROPOSAL", to: "ACCEPTED", revision: 1, evidence: [] },
-      argv: ["task", "transition", "T-PROPOSAL", "ACCEPTED", "--revision", "1"],
+      argv: ["task", "transition", "T-PROPOSAL", "ACCEPTED", "--revision", "1", "--evidence"],
       requirements: ["evidence"]
     });
     assert.equal(Object.hasOwn(summary.data.nextOperation, "fence"), false);
