@@ -495,7 +495,7 @@ test("PATH CLI writers fail closed without constructing Path A", async () => {
   }
 });
 
-test("Codex CLI writers return a host spawn handoff instead of Path A", async () => {
+test("Codex CLI writers with an executable override return a host spawn handoff instead of Path A", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-delegate-cli-writer-handoff-"));
   const { messages, output } = capturedOutput();
   let created = 0;
@@ -520,9 +520,10 @@ test("Codex CLI writers return a host spawn handoff instead of Path A", async ()
       {
         hostRuntimeResolver: () => ({
           surface: "cli",
-          executable: "codex",
-          executableSource: "cli-process",
-          resolved: true
+          executable: "/custom/codex",
+          executableSource: "SYNOD_CODEX_BIN",
+          resolved: true,
+          hostOperator: true
         }),
         cliAppServerAdapterFactory: () => {
           created += 1;

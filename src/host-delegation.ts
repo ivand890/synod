@@ -1300,9 +1300,10 @@ export async function waitForHostDelegation(
 }
 
 export function isCodexHostOperator(
-  runtime: Pick<ResolvedCodexRuntime, "surface" | "resolved" | "executableSource">
+  runtime: Pick<ResolvedCodexRuntime, "surface" | "resolved" | "executableSource" | "hostOperator">
 ): boolean {
   if (runtime.surface === "desktop") return true;
+  if (runtime.hostOperator !== undefined) return runtime.hostOperator;
   return runtime.resolved === true
     && (runtime.executableSource === "cli-process" || runtime.executableSource === "desktop-process");
 }

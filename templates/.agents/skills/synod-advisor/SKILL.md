@@ -26,7 +26,7 @@ On every step run `__SYNOD_COMMAND__ task next --json --view summary` and execut
 
 - READY: `delegate start` with the narrowest `--write` / `--read` scopes.
 - Writer `delegate start` without an injected adapter returns `hostSpawnRequired`. Call `spawn_agent` with the returned read-only contract, then `delegate complete --owner-thread <id>`. Desktop and Codex CLI writers stay host-owned. CLI Path A is read-only.
-- After `delegate complete` succeeds, if `hostNotificationRequired` is true, call `send_message` or `followup_task` for the exact returned `ownerThread` with explicit bind authorization before `wait --task`. A bind receipt does not prove the worker was notified.
+- After `delegate complete` succeeds, call `send_message` or `followup_task` for the exact returned `ownerThread` with explicit bind authorization before `wait --task`. This post-bind notification is required; a bind receipt does not prove the worker was notified.
 - On Desktop without an injected adapter, that incomplete host handoff is expected. Do not start a child App Server.
 - After bind: `wait --task <id>`. If `hostWaitRequired` is true, call `wait_agent` only for the exact `hostWaitThreadIds`. Keep `hostFallbackRequired` / `hostFallbackThreadIds` as compatibility aliases.
 - Submit with `proposal submit --evidence` only when there is an in-scope owned delta. Empty delivery fails closed: `task.correct` or recover. Do not implement the worker's task yourself.

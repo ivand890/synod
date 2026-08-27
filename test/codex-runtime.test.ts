@@ -13,7 +13,8 @@ test("uses the PATH Codex executable for CLI execution", () => {
     surface: "cli",
     executable: "/usr/local/bin/codex",
     executableSource: "PATH",
-    resolved: true
+    resolved: true,
+    hostOperator: false
   });
 });
 
@@ -34,7 +35,8 @@ test("uses the active Codex CLI process instead of another PATH installation", (
     surface: "cli",
     executable: "/opt/tools/codex-0.146/bin/codex",
     executableSource: "cli-process",
-    resolved: true
+    resolved: true,
+    hostOperator: true
   });
 });
 
@@ -54,7 +56,8 @@ test("uses the Codex process ancestor for Desktop execution", () => {
     surface: "desktop",
     executable: "/Applications/ChatGPT.app/Contents/Resources/codex",
     executableSource: "desktop-process",
-    resolved: true
+    resolved: true,
+    hostOperator: true
   });
 });
 
@@ -88,7 +91,8 @@ test("keeps an explicit executable override scoped to the detected surface", () 
     surface: "desktop",
     executable: "/custom/codex",
     executableSource: "SYNOD_CODEX_BIN",
-    resolved: true
+    resolved: true,
+    hostOperator: true
   });
 });
 
@@ -103,7 +107,8 @@ test("classifies an explicit Desktop executable without relying on process ances
     surface: "desktop",
     executable,
     executableSource: "SYNOD_CODEX_BIN",
-    resolved: true
+    resolved: true,
+    hostOperator: true
   });
 });
 
@@ -117,6 +122,23 @@ test("marks an unresolved Desktop executable instead of silently treating PATH a
     surface: "desktop",
     executable: "codex",
     executableSource: "PATH-fallback",
-    resolved: false
+    resolved: false,
+    hostOperator: true
   });
+});
+
+test("keeps host ancestry when SYNOD_CODEX_BIN selects the executable", () => {
+  const processes = new Map([
+    [30, { parentPid: 20, executable: "/bin/zsh" }],
+    [20, { parentPid: 10, executable: "/opt/tools/codex/bin/codex" }]
+  ]);
+  const result = resolveCodexRuntime({
+    env: { SYNOD_CODEX_BIN: "/custom/codex" },
+    platform: "darwin",
+    parentPid: 30,
+    inspect: pid => processes.get(pid)
+  });
+
+  assert.equal(result.executableSource, "SYNOD_CODEX_BIN");
+  assert.equal(result.hostOperator, true);
 });

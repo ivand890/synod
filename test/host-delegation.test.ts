@@ -758,6 +758,12 @@ test("Codex host-only probe never constructs an App Server", () => {
   assert.equal(isCodexHostOperator({ surface: "desktop", resolved: false, executableSource: "PATH-fallback" }), true);
   assert.equal(isCodexHostOperator({ surface: "cli", resolved: true, executableSource: "cli-process" }), true);
   assert.equal(isCodexHostOperator({ surface: "cli", resolved: true, executableSource: "PATH" }), false);
+  assert.equal(isCodexHostOperator({
+    surface: "cli",
+    resolved: true,
+    executableSource: "SYNOD_CODEX_BIN",
+    hostOperator: true
+  }), true);
 });
 
 test("Codex handoff reserves and complete binds the stored fence", async () => {
