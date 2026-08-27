@@ -1,4 +1,5 @@
 import { ERROR_CODES, SynodError } from "./errors.js";
+import { redactGuidanceAction } from "./output-view.js";
 import { formatCheckpointDelta } from "./checkpoint.js";
 import type { CheckpointDelta } from "./checkpoint.js";
 import {
@@ -259,25 +260,6 @@ export async function generateHandoff(
       nextCommand
     }
   };
-}
-
-function redactGuidanceAction(action: TaskGuidanceAction): TaskGuidanceAction {
-  const redacted = structuredClone(action);
-  const token = redacted.arguments.reservationToken;
-  if (isRecord(redacted.fence)) delete redacted.fence.reservationToken;
-  delete redacted.arguments.reservationToken;
-  const argv: string[] = [];
-  for (let index = 0; index < redacted.argv.length; index += 1) {
-    const item = redacted.argv[index];
-    if (item === "--reservation-token") {
-      index += 1;
-      continue;
-    }
-    if (typeof token === "string" && item === token) continue;
-    if (item !== undefined) argv.push(item);
-  }
-  redacted.argv = argv;
-  return redacted;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

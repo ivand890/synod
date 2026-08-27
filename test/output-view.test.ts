@@ -178,14 +178,15 @@ test("summary lease mutation keeps the exact next-operation fence", () => {
   const next = reservation.nextOperation as Record<string, unknown>;
   assert.equal(next.operation, "delegate.complete");
   assert.deepEqual(next.argv, ["delegate", "complete", "T-RESERVE", "--owner-thread"]);
+  assert.equal(Object.hasOwn(next.fence as object, "reservationToken"), false);
   assert.deepEqual(next.fence, {
-    reservationToken: "token-1",
     leaseId: "lease-1",
     generation: 1,
     revision: 0,
     expectedReservedAt: "2026-08-14T00:00:00.000Z",
     baselineHash: "sha256:baseline"
   });
+  assert.equal(Object.hasOwn(reservation.reservation as object, "token"), false);
 
   const correction = projectSummary("lease", {
     action: "reserve",
@@ -413,6 +414,8 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
   };
 
   assert.deepEqual(projectJsonEnvelope(envelope, "full"), envelope);
+  assert.equal((envelope.data.guidance.tasks[0]!.reservation as { token: string }).token, "reservation-token");
+  assert.equal((action.fence as { reservationToken: string }).reservationToken, "reservation-token");
   assert.deepEqual(envelope.data.guidance.concurrency, { limit: 3, activeWriters: 2, activeReaders: 0, availableSlots: 1 });
   assert.deepEqual(envelope.data.guidance.tasks[0]!.proposal?.pathStates, [
     { path: "src/guidance.ts", proposalAdded: true, gitTracked: true, staged: false, committed: true },
@@ -421,7 +424,18 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
   const summary = projectJsonEnvelope(envelope, "summary") as typeof envelope;
   const task = summary.data.guidance.tasks[0]!;
   assert.deepEqual(summary.data.guidance.concurrency, { limit: 3, activeWriters: 2, activeReaders: 0, availableSlots: 1 });
-  assert.deepEqual(summary.data.guidance.parallelBatches, [{ taskIds: ["T-GUIDANCE"], actions: [action] }]);
+  const redactedAction = {
+    ...action,
+    arguments: { taskId: "T-GUIDANCE" },
+    fence: {
+      leaseId: "lease-guidance",
+      generation: 2,
+      revision: 4,
+      expectedReservedAt: "2026-08-14T00:00:00.000Z",
+      baselineHash: "sha256:baseline"
+    }
+  };
+  assert.deepEqual(summary.data.guidance.parallelBatches, [{ taskIds: ["T-GUIDANCE"], actions: [redactedAction] }]);
   assert.equal(task.id, "T-GUIDANCE");
   assert.deepEqual(task.dependsOn, ["T-BASE"]);
   assert.deepEqual(task.incompleteDependencies, ["T-BASE"]);
@@ -430,7 +444,8 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
   assert.deepEqual(task.recovery, { status: "PENDING", priorGeneration: 1, priorOwnerThread: "thread:old" });
   assert.deepEqual(task.constraints, { reservationRequiresBind: true, recoveryDecisionRequired: true });
   assert.deepEqual(task.legalTransitions, ["ACTIVE", "BLOCKED"]);
-  assert.deepEqual(task.actions, [action]);
+  assert.deepEqual(task.actions, [redactedAction]);
+  assert.equal(Object.hasOwn(task.actions[0]!.fence as object, "reservationToken"), false);
   assert.equal(Object.hasOwn(task, "evidence"), false);
   assert.deepEqual(task.lease, {
     id: "lease-guidance",
@@ -443,7 +458,6 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
   });
   assert.deepEqual(task.reservation, {
     id: "reservation-guidance",
-    token: "reservation-token",
     generation: 2,
     taskId: "T-GUIDANCE",
     taskRevision: 4,
@@ -452,6 +466,7 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
     status: "RESERVED",
     baseline: { snapshotContentHash: "sha256:baseline", branch: "omit" }
   });
+  assert.equal(Object.hasOwn(task.reservation as object, "token"), false);
   assert.deepEqual(task.proposal, {
     path: ".synod/proposals/omit",
     bundleId: "sha256:proposal",
@@ -481,6 +496,13 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
         baselineHash: "sha256:expired-baseline",
         reason: null
       },
+      argv: [
+        "lease", "expire", "T-EXPIRED-RESERVATION",
+        "--reservation-token", "expired-reservation-token",
+        "--lease-id", "expired-reservation-lease",
+        "--reason"
+      ],
+      fence: { reservationToken: "expired-reservation-token", leaseId: "expired-reservation-lease" },
       requirements: ["reason"]
     },
     {
@@ -531,7 +553,30 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
     }
   }) as Record<string, unknown>;
   const fencedTasks = (fencedSummary.guidance as Record<string, unknown>).tasks as Array<Record<string, unknown>>;
-  assert.deepEqual(fencedTasks.map(task => task.actions), fencedActions.map(action => [action]));
+  const redactedExpire = {
+    ...fencedActions[0],
+    arguments: {
+      taskId: "T-EXPIRED-RESERVATION",
+      leaseId: "expired-reservation-lease",
+      generation: 3,
+      revision: 2,
+      expectedReservedAt: "2026-08-14T00:00:00.000Z",
+      baselineHash: "sha256:expired-baseline",
+      reason: null
+    },
+    argv: [
+      "lease", "expire", "T-EXPIRED-RESERVATION",
+      "--lease-id", "expired-reservation-lease",
+      "--reason"
+    ],
+    fence: { leaseId: "expired-reservation-lease" }
+  };
+  assert.deepEqual(fencedTasks.map(task => task.actions), [
+    [redactedExpire],
+    [fencedActions[1]],
+    [fencedActions[2]]
+  ]);
+  assert.equal(JSON.stringify(fencedSummary).includes("expired-reservation-token"), false);
 });
 
 test("summary wait selection retains task selector identity", () => {

@@ -2139,8 +2139,9 @@ test("CLI summary view keeps status and lease mutation fences while full stays d
     ], output);
     const reserved = JSON.parse(takeMessage(messages));
     assert.equal(reserveCode, 0);
+    assert.equal(Object.hasOwn(reserved.data.reservation, "token"), false);
+    assert.equal(Object.hasOwn(reserved.data.nextOperation.fence, "reservationToken"), false);
     assert.deepEqual(reserved.data.nextOperation.fence, {
-      reservationToken: reserved.data.reservation.token,
       leaseId: reserved.data.reservation.id,
       generation: reserved.data.reservation.generation,
       revision: reserved.data.reservation.taskRevision,
