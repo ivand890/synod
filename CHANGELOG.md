@@ -18,8 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - CLI Path A stays read-only. Writer leases without an injected adapter are
   host-owned Path B (`hostSpawnRequired` on Desktop and Codex CLI), including
   when `SYNOD_CODEX_BIN` selects the executable. Generated supervisor guidance
-  requires notifying the exact host worker after bind. README and PRODUCT no
-  longer claim the CLI reserves, spawns, binds, and authorizes writers.
+  requires waking the exact host worker with `followup_task` after bind. README
+  and PRODUCT no longer claim the CLI reserves, spawns, binds, and authorizes
+  writers.
 
 ## [0.12.0] - 2026-08-23
 
