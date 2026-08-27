@@ -1,6 +1,6 @@
 {
   "name": "@ivand890/synod",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "Install the Synod persistent advisor loop in Codex projects.",
   "type": "module",
   "bin": {
