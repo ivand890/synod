@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-08-27
+
 ### Fixed
 
 - Host delegation now uses a non-executing authorization preflight before bind
@@ -342,7 +344,8 @@ recovery (PR #39).
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/ivand890/synod/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/ivand890/synod/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/ivand890/synod/compare/v0.9.5...v0.11.0
 [0.9.5]: https://github.com/ivand890/synod/compare/v0.9.4...v0.9.5
