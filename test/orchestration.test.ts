@@ -145,6 +145,7 @@ test("task-next guidance reserves no-lease activation and fences correction evid
   const directory = await temporaryProject();
   await initializeGitHead(directory);
   await mkdir(path.join(directory, "src"), { recursive: true });
+  await addDefaultTask(directory, { id: "T-PLANNED" });
   const states = [
     { id: "T-READY", state: "READY" as const },
     { id: "T-REVIEW", state: "REVIEW" as const },
@@ -170,6 +171,15 @@ test("task-next guidance reserves no-lease activation and fences correction evid
   }
 
   const withoutReservations = await nextTaskGuidance({ directory });
+  const plannedTask = withoutReservations.tasks.find(candidate => candidate.id === "T-PLANNED");
+  assert.ok(plannedTask);
+  assert.deepEqual(plannedTask.actions[0]?.arguments, {
+    taskId: "T-PLANNED",
+    to: "READY",
+    revision: 0
+  });
+  assert.deepEqual(plannedTask.actions[0]?.requirements, []);
+  assert.deepEqual(plannedTask.actions[0]?.argv, ["task", "transition", "T-PLANNED", "READY", "--revision", "0"]);
   for (const entry of states) {
     const task = withoutReservations.tasks.find(candidate => candidate.id === entry.id);
     assert.ok(task);
@@ -189,6 +199,13 @@ test("task-next guidance reserves no-lease activation and fences correction evid
       assert.deepEqual(task.actions[0]?.argv, ["delegate", "start", entry.id]);
     } else {
       assert.equal((task.actions[0]?.arguments as { to?: string }).to, entry.state === "REVIEW" ? "ACCEPTED" : entry.state === "ACCEPTED" ? "VERIFIED" : "DONE");
+      if (entry.state === "VERIFIED") {
+        assert.equal(Object.hasOwn(task.actions[0]?.arguments || {}, "evidence"), false);
+        assert.equal(task.actions[0]?.argv.includes("--evidence"), false);
+      } else {
+        assert.deepEqual(task.actions[0]?.requirements, ["evidence"]);
+        assert.equal(task.actions[0]?.argv.at(-1), "--evidence");
+      }
     }
   }
 

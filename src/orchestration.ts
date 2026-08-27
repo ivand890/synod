@@ -923,18 +923,20 @@ export async function nextTaskGuidance(
           if (noInScopeDelta) return [];
           return [guidanceAction("proposal.submit", { taskId: task.id, evidence: [] }, ["evidence"])];
         }
+        const evidenceRequired = (task.state === "REVIEW" && to === "ACCEPTED")
+          || (task.state === "ACCEPTED" && to === "VERIFIED")
+          || (to === "ACTIVE" && correctionReady);
+        const reasonRequired = to === "BLOCKED" || to === "SUPERSEDED";
         return [guidanceAction("task.transition", {
           taskId: task.id,
           to,
           revision: task.revision,
-          evidence: [],
-          ...(to === "BLOCKED" || to === "SUPERSEDED" ? { reason: null } : {})
+          ...(evidenceRequired ? { evidence: [] } : {}),
+          ...(reasonRequired ? { reason: null } : {})
         }, [
           ...(to === "ACTIVE" && !task.lease ? ["active-writer-lease"] : []),
-          ...((task.state === "REVIEW" && to === "ACCEPTED")
-            || (task.state === "ACCEPTED" && to === "VERIFIED")
-            || (to === "ACTIVE" && correctionReady) ? ["evidence"] : []),
-          ...(["BLOCKED", "SUPERSEDED"].includes(to) ? ["reason"] : [])
+          ...(evidenceRequired ? ["evidence"] : []),
+          ...(reasonRequired ? ["reason"] : [])
         ])];
       });
       const reservationFenceArgs = task.leaseReservation
