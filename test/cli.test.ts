@@ -506,7 +506,8 @@ test("CLI delegate start on PATH CLI binds the App Server thread UUID before a t
             async authorize() {
               methods.push("authorize");
               return { status: "authorized" };
-            }
+            },
+            async close() {}
           };
         }
       }
@@ -2124,7 +2125,8 @@ test("wait uses the same host adapter resolver and does not request a host hando
           mode: "notification",
           wakeCount: 1
         };
-      }
+      },
+      async close() {}
     }),
     waitRuntimeResolver: () => ({
       surface: "desktop",

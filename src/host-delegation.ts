@@ -28,6 +28,8 @@ import {
 import { isRecord } from "./validation.js";
 import { isDelegationRole, type DelegationRole } from "./profiles.js";
 
+const DEFAULT_HOST_CLEANUP_TIMEOUT_MS = 5_000;
+
 /** The opaque identity returned by the host. Synod never derives or rewrites it. */
 export type HostOwnerIdentifier = string;
 
@@ -101,6 +103,8 @@ export interface HostDelegationAuthorizeRequest {
   /** Present only for the post-bind activation phase. */
   lease?: TaskLease;
   leaseFence?: HostDelegationLeaseFence;
+  /** Activation cancellation is mandatory; adapters must stop the operation before close resolves. */
+  signal?: AbortSignal;
 }
 
 export interface HostAuthorizationReceipt {
@@ -465,24 +469,48 @@ function classifyPostBindChildLoss(error: unknown): SynodError {
 async function closeAdapterAfterSpawnFailure(
   adapter: HostDelegationAdapter,
   error: unknown,
-  fallbackCode: typeof ERROR_CODES[keyof typeof ERROR_CODES] = ERROR_CODES.INTERNAL
+  fallbackCode: typeof ERROR_CODES[keyof typeof ERROR_CODES] = ERROR_CODES.INTERNAL,
+  dependencies: HostDelegationDependencies = {}
 ): Promise<SynodError> {
   const existing = childLossDetail(error);
   const failure = existing !== undefined && !isChildLossMode(existing)
     ? unclassifiedChildLossError(existing, error)
     : asSynodError(error, fallbackCode);
-  try {
-    await adapter.close?.();
-  } catch (closeError) {
+  const timeoutMs = dependencies.cleanupTimeoutMs ?? DEFAULT_HOST_CLEANUP_TIMEOUT_MS;
+  const schedule = dependencies.setTimeout || setTimeout;
+  const unschedule = dependencies.clearTimeout || clearTimeout;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const closeOutcome = await Promise.race([
+    Promise.resolve().then(() => adapter.close?.()).then(
+      () => ({ status: "complete" as const }),
+      closeError => ({ status: "failed" as const, error: conciseError(closeError) })
+    ),
+    new Promise<{ status: "timeout" }>(resolve => {
+      timer = schedule(() => resolve({ status: "timeout" }), timeoutMs);
+    })
+  ]);
+  if (timer !== undefined) unschedule(timer);
+  if (closeOutcome.status !== "complete") {
     failure.details = {
       ...(isRecord(failure.details) ? failure.details : {}),
       hostAdapterClose: {
-        status: "failed",
-        error: conciseError(closeError)
+        status: closeOutcome.status,
+        ...(closeOutcome.status === "failed" ? { error: closeOutcome.error } : { timeoutMs })
       }
+    };
+  } else {
+    failure.details = {
+      ...(isRecord(failure.details) ? failure.details : {}),
+      hostAdapterClose: { status: "complete" }
     };
   }
   return failure;
+}
+
+function hostAdapterStopped(error: SynodError): boolean {
+  return isRecord(error.details)
+    && isRecord(error.details.hostAdapterClose)
+    && error.details.hostAdapterClose.status === "complete";
 }
 
 async function cancelReservationAfterFailure(
@@ -724,11 +752,14 @@ async function authorizeHostOwnerBeforeLeaseCleanupWindow(
   const unschedule = dependencies.clearTimeout || clearTimeout;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let settled = false;
+  const controller = new AbortController();
+  const activationRequest = { ...request, signal: controller.signal };
 
   return new Promise((resolve, reject) => {
     timer = schedule(() => {
       if (settled) return;
       settled = true;
+      controller.abort();
       reject(new SynodError(
         ERROR_CODES.HOST_AUTHORIZATION_FAILED,
         "Host activation did not finish inside the active lease cleanup window.",
@@ -745,7 +776,7 @@ async function authorizeHostOwnerBeforeLeaseCleanupWindow(
       ));
     }, Math.min(timeoutMs, 2_147_483_647));
     Promise.resolve()
-      .then(() => authorizeHostOwner(adapter, request))
+      .then(() => authorizeHostOwner(adapter, activationRequest))
       .then(authorization => {
         if (settled) return;
         settled = true;
@@ -835,8 +866,8 @@ export async function startHostDelegation(
 ): Promise<HostDelegationResult> {
   const adapter = options.adapter;
   if (!adapter) throw new SynodError(ERROR_CODES.HOST_ADAPTER_REQUIRED, "Host delegation requires an injected host adapter.");
-  if (typeof adapter.spawn !== "function" || typeof adapter.authorize !== "function") {
-    throw new SynodError(ERROR_CODES.HOST_ADAPTER_INVALID, "The injected host adapter must expose spawn and authorize methods.");
+  if (typeof adapter.spawn !== "function" || typeof adapter.authorize !== "function" || typeof adapter.close !== "function") {
+    throw new SynodError(ERROR_CODES.HOST_ADAPTER_INVALID, "The injected host adapter must expose spawn, authorize, and cancellable close methods.");
   }
   const id = taskIdentifier(options);
   const prepared = await prepareDelegationReservation(id, options, dependencies);
@@ -1058,8 +1089,29 @@ export async function startHostDelegation(
       : childLossFrom(classified)
         ? classified
         : withErrorDetails(authorizationFailure(classified, activationRequest), { cause: conciseError(classified) });
-    const closed = await closeAdapterAfterSpawnFailure(adapter, failure);
-    return endBoundLeaseAfterFailure(closed, prepared.role, bound.lease, options, dependencies);
+    const remainingMs = Math.max(1, Date.parse(bound.lease.expiresAt) - clock());
+    const closeTimeoutMs = Math.min(
+      dependencies.cleanupTimeoutMs ?? DEFAULT_HOST_CLEANUP_TIMEOUT_MS,
+      Math.max(1, Math.floor(remainingMs / 2))
+    );
+    const closed = await closeAdapterAfterSpawnFailure(adapter, failure, ERROR_CODES.HOST_AUTHORIZATION_FAILED, {
+      ...dependencies,
+      cleanupTimeoutMs: closeTimeoutMs
+    });
+    if (hostAdapterStopped(closed)) {
+      return endBoundLeaseAfterFailure(closed, prepared.role, bound.lease, options, dependencies);
+    }
+    closed.details = {
+      ...(isRecord(closed.details) ? closed.details : {}),
+      phase: "activate",
+      cleanup: {
+        status: "deferred",
+        action: "retain-active-lease",
+        reason: "adapter shutdown was not confirmed; ending the lease could race a late write authorization",
+        expiresAt: bound.lease.expiresAt
+      }
+    };
+    throw closed;
   }
   const result: HostDelegationResult = {
     directory: options.directory || ".",
@@ -1299,10 +1351,10 @@ export function resolveHostDelegationAdapter(
     || dependencies.hostDelegationAdapterFactory?.()
     || dependencies.hostDelegationAdapter;
   if (injected) {
-    if (typeof injected.spawn !== "function" || typeof injected.authorize !== "function") {
+    if (typeof injected.spawn !== "function" || typeof injected.authorize !== "function" || typeof injected.close !== "function") {
       throw new SynodError(
         ERROR_CODES.HOST_ADAPTER_INVALID,
-        "The injected host adapter must expose spawn and authorize methods."
+        "The injected host adapter must expose spawn, authorize, and cancellable close methods."
       );
     }
     return injected;
@@ -1439,6 +1491,15 @@ export async function completeHostDelegation(
   if (!ownerThread) {
     throw new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Host delegation complete requires an opaque owner thread.");
   }
+  if (options.adapter && (
+    typeof options.adapter.authorize !== "function"
+    || typeof options.adapter.close !== "function"
+  )) {
+    throw new SynodError(
+      ERROR_CODES.HOST_ADAPTER_INVALID,
+      "Host delegation complete requires authorize and cancellable close methods."
+    );
+  }
   const targetDirectory = options.directory || ".";
   const read = dependencies.read || readOrchestration;
   const canonical = await read(path.resolve(targetDirectory));
@@ -1527,11 +1588,34 @@ export async function completeHostDelegation(
         : childLossFrom(classified)
           ? classified
           : withErrorDetails(authorizationFailure(classified, activationRequest), { cause: conciseError(classified) });
-      const closed = await closeAdapterAfterSpawnFailure(options.adapter, failure);
-      return endBoundLeaseAfterFailure(closed, completeRole, bound.lease, {
-        directory: targetDirectory,
-        ...(options.actor === undefined ? {} : { actor: options.actor })
-      }, dependencies);
+      const observed = dependencies.clock?.() ?? Date.now();
+      const now = observed instanceof Date ? observed.getTime() : typeof observed === "number" ? observed : Date.parse(observed);
+      const remainingMs = Math.max(1, Date.parse(bound.lease.expiresAt) - now);
+      const closeTimeoutMs = Math.min(
+        dependencies.cleanupTimeoutMs ?? DEFAULT_HOST_CLEANUP_TIMEOUT_MS,
+        Math.max(1, Math.floor(remainingMs / 2))
+      );
+      const closed = await closeAdapterAfterSpawnFailure(options.adapter, failure, ERROR_CODES.HOST_AUTHORIZATION_FAILED, {
+        ...dependencies,
+        cleanupTimeoutMs: closeTimeoutMs
+      });
+      if (hostAdapterStopped(closed)) {
+        return endBoundLeaseAfterFailure(closed, completeRole, bound.lease, {
+          directory: targetDirectory,
+          ...(options.actor === undefined ? {} : { actor: options.actor })
+        }, dependencies);
+      }
+      closed.details = {
+        ...(isRecord(closed.details) ? closed.details : {}),
+        phase: "activate",
+        cleanup: {
+          status: "deferred",
+          action: "retain-active-lease",
+          reason: "adapter shutdown was not confirmed; ending the lease could race a late write authorization",
+          expiresAt: bound.lease.expiresAt
+        }
+      };
+      throw closed;
     }
   } else {
     authorization = withApprovalCommand(

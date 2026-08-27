@@ -11,8 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Host delegation now uses a non-executing authorization preflight before bind
   and grants worker activation only after the exact lease is active. Preflight
   failure cancels the reservation, bind failure closes and cancels the owner,
-  activation is bounded by the lease cleanup window, and activation failure
-  ends the bound lease instead of leaving `ACTIVE` plus a read-only thread.
+  activation is cancellable and bounded by the lease cleanup window. Adapter
+  shutdown is also bounded; activation failure ends the bound lease only after
+  shutdown is confirmed, avoiding late write authorization against an ended
+  fence.
 
 ## [0.12.0] - 2026-08-23
 

@@ -136,7 +136,8 @@ test("host delegation reserves, spawns read-only, preflights, binds, then activa
       calls.push("authorize");
       authorizedRequests.push(request);
       return { status: "authorized", receipt: "host-receipt" };
-    }
+    },
+    async close() {}
   };
   const result = await startHostDelegation({ id: "T-HOST", adapter, write: ["src/host-delegation.ts"] }, {
     ...dependencies(),
@@ -445,6 +446,7 @@ test("activation failure revokes the bound writer lease instead of leaving ACTIV
 test("activation is bounded before lease expiry so cleanup retains the exact fence", async () => {
   let authorizationCalls = 0;
   let activationDeadline: (() => void) | undefined;
+  let activationSignal: AbortSignal | undefined;
   let revoked: Record<string, unknown> | undefined;
   let closed = 0;
   const adapter: HostDelegationAdapter = {
@@ -452,6 +454,7 @@ test("activation is bounded before lease expiry so cleanup retains the exact fen
     async authorize(request) {
       authorizationCalls += 1;
       if (request.phase === "preflight") return { status: "accepted" };
+      activationSignal = request.signal;
       return new Promise(() => {});
     },
     async close() { closed += 1; }
@@ -476,8 +479,53 @@ test("activation is bounded before lease expiry so cleanup retains the exact fen
     assert.equal(value.details.cleanup.action, "revoke");
     return true;
   });
+  assert.equal(activationSignal?.aborted, true);
   assert.equal(closed, 1);
   assert.equal(revoked?.expectedHeartbeatAt, lease().heartbeatAt);
+});
+
+test("activation timeout retains the live lease when bounded adapter shutdown is unconfirmed", async () => {
+  let authorizationCalls = 0;
+  const deadlines: Array<() => void> = [];
+  let revoked: Record<string, unknown> | undefined;
+  const adapter: HostDelegationAdapter = {
+    async spawn() { return "opaque-owner"; },
+    async authorize(request) {
+      authorizationCalls += 1;
+      if (request.phase === "preflight") return { status: "accepted" };
+      return new Promise(() => {});
+    },
+    async close() { return new Promise(() => {}); }
+  };
+
+  const delegated = startHostDelegation({ id: "T-HOST", adapter }, dependencies({
+    setTimeout: callback => {
+      deadlines.push(callback);
+      return deadlines.length as unknown as ReturnType<typeof setTimeout>;
+    },
+    clearTimeout: () => {},
+    revoke: async options => { revoked = options; return {} as never; }
+  }));
+  await waitForCondition(() => authorizationCalls === 2 && deadlines.length === 1);
+  deadlines.shift()?.();
+  await waitForCondition(() => deadlines.length === 1);
+  deadlines.shift()?.();
+
+  await assert.rejects(delegated, error => {
+    const value = error as {
+      code: string;
+      details: {
+        hostAdapterClose: { status: string };
+        cleanup: { status: string; action: string };
+      };
+    };
+    assert.equal(value.code, ERROR_CODES.HOST_AUTHORIZATION_FAILED);
+    assert.equal(value.details.hostAdapterClose.status, "timeout");
+    assert.equal(value.details.cleanup.status, "deferred");
+    assert.equal(value.details.cleanup.action, "retain-active-lease");
+    return true;
+  });
+  assert.equal(revoked, undefined);
 });
 
 test("authorization accepts only explicit positive structured receipts and does not bind", async () => {
@@ -493,7 +541,8 @@ test("authorization accepts only explicit positive structured receipts and does 
     let bound = 0;
     const adapter: HostDelegationAdapter = {
       async spawn() { return "opaque-owner"; },
-      async authorize() { return receipt; }
+      async authorize() { return receipt; },
+      async close() {}
     };
     await assert.rejects(
       startHostDelegation({ id: "T-HOST", adapter }, dependencies({
@@ -518,7 +567,8 @@ test("authorization accepts only explicit positive structured receipts and does 
 test("legacy void authorization remains the only implicit compatibility success", async () => {
   const adapter: HostDelegationAdapter = {
     async spawn() { return "opaque-owner"; },
-    async authorize() { return undefined; }
+    async authorize() { return undefined; },
+    async close() {}
   };
   const result = await startHostDelegation({ id: "T-HOST", adapter }, dependencies());
   assert.equal(result.authorization.status, "authorized");
@@ -532,7 +582,8 @@ test("host wait reports host authority and stops exact-fenced heartbeat on compl
     async authorize() { return { status: "authorized" }; },
     async wait() {
       return { statuses: [{ threadId: "opaque-owner", status: { type: "idle" as const } }] };
-    }
+    },
+    async close() {}
   };
   const report: WaitReport = {
     mode: "poll",
@@ -628,7 +679,8 @@ test("stale host heartbeat fails closed and stops liveness with diagnostics", as
     async wait() {
       await new Promise<void>(resolve => setImmediate(resolve));
       return { statuses: [{ threadId: "opaque-owner", status: { type: "active", activeFlags: [] } }] };
-    }
+    },
+    async close() {}
   };
   const result = await startHostDelegation({ id: "T-HOST", adapter, wait: { timeoutMs: 100, heartbeatIntervalMs: 1 } }, {
     ...dependencies({
@@ -647,7 +699,8 @@ test("PATH CLI delegate start uses the Synod-owned App Server adapter", async ()
   const messages: string[] = [];
   const adapter: HostDelegationAdapter = {
     async spawn() { return { ownerId: "thread-from-appserver" }; },
-    async authorize() { return { status: "authorized" }; }
+    async authorize() { return { status: "authorized" }; },
+    async close() {}
   };
   const status = await run(["delegate", "start", "T-HOST", "--json"], {
     log: value => messages.push(String(value)),
@@ -671,9 +724,19 @@ test("PATH CLI delegate start uses the Synod-owned App Server adapter", async ()
 test("resolver uses an injected adapter and fails closed for SYNOD_HOST_ADAPTER", () => {
   const adapter: HostDelegationAdapter = {
     async spawn() { return "opaque-owner"; },
-    async authorize() { return { status: "authorized" }; }
+    async authorize() { return { status: "authorized" }; },
+    async close() {}
   };
   assert.equal(resolveHostDelegationAdapter({ adapter }), adapter);
+  assert.throws(
+    () => resolveHostDelegationAdapter({
+      adapter: {
+        async spawn() { return "opaque-owner"; },
+        async authorize() { return { status: "authorized" }; }
+      }
+    }),
+    error => error instanceof Error && (error as Error & { code?: string }).code === ERROR_CODES.HOST_ADAPTER_INVALID
+  );
   assert.equal(resolveHostDelegationAdapter({}, {}), undefined);
   assert.throws(
     () => resolveHostDelegationAdapter({}, { SYNOD_HOST_ADAPTER: "unix:/tmp/synod-host.sock" }),
@@ -743,7 +806,8 @@ test("complete authorizes legacy role-less reservations as implementers", async 
     async authorize(request) {
       authorizedRequests.push(request);
       return { status: "authorized" };
-    }
+    },
+    async close() {}
   };
   const completed = await completeHostDelegation({
     id: "T-HOST",
@@ -931,7 +995,8 @@ test("host wait timeout without a wake classifies wait-never-woke", async () => 
     async authorize() { return { status: "authorized" }; },
     async wait() {
       return { statuses: [{ threadId: "opaque-owner", status: { type: "active" as const, activeFlags: [] } }] };
-    }
+    },
+    async close() {}
   };
   const report: WaitReport = {
     mode: "poll",
