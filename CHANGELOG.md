@@ -24,7 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `task next` argv now includes the CLI flags the supervisor must fill
   (`--evidence`, `--reason`, `--owner-thread`). `requirements[]` names those
   values and no longer stands in for flags the CLI would reject. Host completion
-  guidance also carries the evidence placeholder required for correction binds.
+  guidance also carries the evidence placeholder required for correction binds,
+  including in the plain-text command displayed by `delegate start`.
 
 ## [0.12.0] - 2026-08-23
 

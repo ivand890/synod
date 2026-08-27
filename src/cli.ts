@@ -71,6 +71,24 @@ import type { HostDelegationAdapter } from "./host-delegation.js";
 import { createCliAppServerAdapter, disposeCliAppServerOwner, findCliAppServerWaitClient } from "./cli-app-server-adapter.js";
 import type { CliAppServerAdapterOptions } from "./cli-app-server-adapter.js";
 
+function shellQuoteDisplayArgument(value: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value)
+    ? value
+    : `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+export function formatHostHandoffCommand(command: { argv: string[]; requirements: string[] }): string {
+  const missing = new Set(command.requirements);
+  const rendered = command.argv.flatMap(argument => {
+    const requirement = argument.startsWith("--") ? argument.slice(2) : undefined;
+    return [
+      shellQuoteDisplayArgument(argument),
+      ...(requirement && missing.has(requirement) ? [`<${requirement}>`] : [])
+    ];
+  });
+  return ["synod", ...rendered].join(" ");
+}
+
 const HELP = `Synod ${packageVersion}
 
 Install and operate a persistent, reviewed advisor loop for Codex projects.
@@ -654,7 +672,7 @@ export async function run(
         };
         if (options.json) printJsonEnvelope(successEnvelope("delegate", data), output, view);
         else {
-          output.log(`Reserved ${handoff.task.id}; host spawn required. Next: synod delegate complete ${handoff.task.id} --owner-thread <owner-thread>.`);
+          output.log(`Reserved ${handoff.task.id}; host spawn required. Next: ${formatHostHandoffCommand(handoff.nextCommand)}.`);
         }
         return 1;
       }
