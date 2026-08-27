@@ -15,6 +15,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   shutdown is also bounded; activation failure ends the bound lease only after
   shutdown is confirmed, avoiding late write authorization against an ended
   fence.
+- CLI Path A stays read-only. Writer leases without an injected adapter are
+  host-owned Path B (`hostSpawnRequired` on Desktop and Codex CLI). README and
+  PRODUCT no longer claim the CLI reserves, spawns, binds, and authorizes
+  writers.
 
 ## [0.12.0] - 2026-08-23
 

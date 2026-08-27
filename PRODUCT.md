@@ -34,8 +34,9 @@ observation, or an execution plane.
 
 The public `v0.12.0` release supports the Codex delegation paths. On a supported
 Codex CLI without an injected adapter, `delegate start` selects Synod's owned
-CLI App Server Path A to reserve, spawn, bind, and authorize the worker, then
-retains the exact owner for task-aware wait. An injected
+CLI App Server Path A for read-only observer turns only. Writer leases stay
+host-owned: Desktop and Codex CLI return `hostSpawnRequired` so the supervisor
+calls `spawn_agent`, then `delegate complete --owner-thread`. An injected
 `HostDelegationAdapter` remains supported for host-owned spawn identity, bind
 authorization, wait observation, and lease liveness. Desktop returns an
 explicit host spawn/wait handoff and never starts a child App Server;

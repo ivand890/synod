@@ -1145,11 +1145,9 @@ function rowStatus(rows: unknown[], threadId: string): CliAppServerRuntimeStatus
 }
 
 /**
- * CLI Path A adapter: Synod owns one App Server, creates one thread without a
- * turn, authorizes, then binds that UUID only after authorize succeeds. A
- * workspace-write turn still requires an authoritative pre-turn writable
- * boundary; without one, authorize fails closed and must not leave ACTIVE.
- * Desktop must not construct.
+ * CLI Path A adapter: Synod owns one App Server for read-only observer turns.
+ * Writer leases stay host-owned (Path B or an injected adapter). Desktop must
+ * not construct.
  */
 export function createCliAppServerAdapter(
   options: CliAppServerAdapterOptions
@@ -1201,6 +1199,13 @@ export function createCliAppServerAdapter(
           observedExecutor: request.reservation.executor,
           constructedAppServer: false
         }
+      );
+    }
+    if (writeScopes(request.reservation.scopes).length > 0) {
+      throw adapterError(
+        ERROR_CODES.APP_SERVER_UNSUPPORTED,
+        "CLI Path A is read-only; writer leases stay host-owned.",
+        { constructedAppServer: false }
       );
     }
 

@@ -1325,16 +1325,18 @@ export type SelectedHostDelegation =
 
 /**
  * Injected adapters win. Desktop stays Path B and never constructs an App Server.
- * CLI without an injection uses the Synod-owned App Server adapter.
+ * CLI Path A is read-only; writer leases without an injection stay host-owned Path B.
  */
 export function selectHostDelegationAdapter(options: {
   adapter?: HostDelegationAdapter;
   runtime: Pick<ResolvedCodexRuntime, "surface" | "resolved" | "executableSource">;
   createCliAdapter: () => HostDelegationAdapter;
+  writer?: boolean;
 }): SelectedHostDelegation {
   if (options.adapter) return { path: "injected", adapter: options.adapter };
   if (options.runtime.surface === "desktop") return { path: "handoff" };
   if (options.runtime.surface === "cli") {
+    if (options.writer === true) return { path: "handoff" };
     return { path: "cli-app-server", adapter: options.createCliAdapter() };
   }
   return { path: "handoff" };

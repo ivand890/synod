@@ -593,7 +593,8 @@ export async function run(
         return 0;
       }
       const runtime = dependencies.hostRuntimeResolver?.() || resolveCodexRuntime();
-      if (!injectedAdapter && runtime.surface === "cli" && options.wait) {
+      const writer = (options.write?.length || 0) > 0 || (options.writeTree?.length || 0) > 0;
+      if (!injectedAdapter && runtime.surface === "cli" && options.wait && !writer) {
         throw new SynodError(
           ERROR_CODES.HOST_ADAPTER_INVALID,
           "CLI App Server Path A does not treat App Server events as wait --task."
@@ -618,7 +619,8 @@ export async function run(
             ...(installedProfile === undefined ? {} : { profile: installedProfile }),
             ...(options.role === undefined ? {} : { role: options.role }),
             ...(options.cwd === undefined ? {} : { directory: options.cwd })
-          })
+          }),
+        ...(writer ? { writer: true } : {})
       });
       if (selected.path === "handoff") {
         if (!isCodexHostOperator(runtime)) {
@@ -655,6 +657,12 @@ export async function run(
           output.log(`Reserved ${handoff.task.id}; host spawn required. Next: synod delegate complete ${handoff.task.id} --owner-thread <owner-thread>.`);
         }
         return 1;
+      }
+      if (selected.path === "cli-app-server" && options.wait) {
+        throw new SynodError(
+          ERROR_CODES.HOST_ADAPTER_INVALID,
+          "CLI App Server Path A does not treat App Server events as wait --task."
+        );
       }
       const adapter = selected.adapter;
       const result = await startHostDelegation({
