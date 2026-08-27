@@ -641,7 +641,19 @@ export function legalTaskTransitions(
   return allowed;
 }
 
+function requiredFlag(flag: string, value: unknown): string[] {
+  if (Array.isArray(value)) {
+    const items = value.filter(item => typeof item === "string" && item.length > 0);
+    return items.length > 0 ? items.flatMap(item => [flag, item]) : [flag];
+  }
+  if (typeof value === "string" && value.length > 0) return [flag, value];
+  return [flag];
+}
+
 function guidanceArgv(operation: string, taskId: string, args: Record<string, unknown> = {}): string[] {
+  const evidence = Object.hasOwn(args, "evidence") ? requiredFlag("--evidence", args.evidence) : [];
+  const reason = Object.hasOwn(args, "reason") ? requiredFlag("--reason", args.reason) : [];
+  const ownerThread = Object.hasOwn(args, "ownerThread") ? requiredFlag("--owner-thread", args.ownerThread) : [];
   if (operation === "delegate.start") {
     const lane = (key: "write" | "writeTree" | "read" | "readTree", flag: string) => {
       const values = Array.isArray(args[key]) ? args[key] : [];
@@ -655,12 +667,21 @@ function guidanceArgv(operation: string, taskId: string, args: Record<string, un
       ...lane("readTree", "--read-tree")
     ];
   }
-  if (operation === "delegate.complete") return ["delegate", "complete", taskId];
+  if (operation === "delegate.complete") {
+    return ["delegate", "complete", taskId, ...evidence, "--owner-thread"];
+  }
   if (operation === "wait.task") return ["wait", "--task", taskId];
-  if (operation === "proposal.submit") return ["proposal", "submit", taskId];
-  if (operation === "task.correct") return ["task", "correct", taskId, "--revision", String(args.revision ?? "")];
+  if (operation === "proposal.submit") return ["proposal", "submit", taskId, ...requiredFlag("--evidence", args.evidence)];
+  if (operation === "task.correct") {
+    return ["task", "correct", taskId, "--revision", String(args.revision ?? ""), ...reason, ...evidence];
+  }
   if (operation === "task.transition") {
-    return ["task", "transition", taskId, String(args.to ?? ""), "--revision", String(args.revision ?? "")];
+    return [
+      "task", "transition", taskId, String(args.to ?? ""),
+      "--revision", String(args.revision ?? ""),
+      ...evidence,
+      ...reason
+    ];
   }
   if (operation === "lease.recover") {
     return [
@@ -669,7 +690,9 @@ function guidanceArgv(operation: string, taskId: string, args: Record<string, un
       "--generation", String(args.generation ?? ""),
       "--revision", String(args.revision ?? ""),
       "--expected-heartbeat-at", String(args.expectedHeartbeatAt ?? ""),
-      ...(args.decision ? ["--decision", String(args.decision)] : [])
+      ...(args.decision ? ["--decision", String(args.decision)] : []),
+      ...ownerThread,
+      ...reason
     ];
   }
   if (operation === "lease.revoke") {
@@ -678,7 +701,8 @@ function guidanceArgv(operation: string, taskId: string, args: Record<string, un
       "--lease-id", String(args.leaseId ?? ""),
       "--generation", String(args.generation ?? ""),
       "--revision", String(args.revision ?? ""),
-      "--expected-heartbeat-at", String(args.expectedHeartbeatAt ?? "")
+      "--expected-heartbeat-at", String(args.expectedHeartbeatAt ?? ""),
+      ...reason
     ];
   }
   if (operation === "lease.cancel") {
@@ -689,7 +713,8 @@ function guidanceArgv(operation: string, taskId: string, args: Record<string, un
       "--generation", String(args.generation ?? ""),
       "--revision", String(args.revision ?? ""),
       "--expected-reserved-at", String(args.expectedReservedAt ?? ""),
-      "--baseline-hash", String(args.baselineHash ?? "")
+      "--baseline-hash", String(args.baselineHash ?? ""),
+      ...reason
     ];
   }
   if (operation === "lease.expire" && args.reservationToken) {
@@ -700,7 +725,8 @@ function guidanceArgv(operation: string, taskId: string, args: Record<string, un
       "--generation", String(args.generation ?? ""),
       "--revision", String(args.revision ?? ""),
       "--expected-reserved-at", String(args.expectedReservedAt ?? ""),
-      "--baseline-hash", String(args.baselineHash ?? "")
+      "--baseline-hash", String(args.baselineHash ?? ""),
+      ...reason
     ];
   }
   if (operation === "lease.expire") {
@@ -709,7 +735,8 @@ function guidanceArgv(operation: string, taskId: string, args: Record<string, un
       "--lease-id", String(args.leaseId ?? ""),
       "--generation", String(args.generation ?? ""),
       "--revision", String(args.revision ?? ""),
-      "--expected-heartbeat-at", String(args.expectedHeartbeatAt ?? "")
+      "--expected-heartbeat-at", String(args.expectedHeartbeatAt ?? ""),
+      ...reason
     ];
   }
   return [];
@@ -929,7 +956,10 @@ export async function nextTaskGuidance(
         ? [guidanceAction("lease.expire", { ...reservationFenceArgs, reason: null }, ["reason"], reservationFenceOnly)]
         : reservationFenceArgs && reservationFenceOnly
         ? [
-            guidanceAction("delegate.complete", { taskId: task.id }, bindRequirements, reservationFenceOnly),
+            guidanceAction("delegate.complete", {
+              taskId: task.id,
+              ...(correctionReady ? { evidence: [] } : {})
+            }, bindRequirements, reservationFenceOnly),
             guidanceAction("lease.cancel", { ...reservationFenceArgs, reason: null }, ["reason"], reservationFenceOnly)
           ]
         : expiredLease && task.lease
@@ -960,7 +990,7 @@ export async function nextTaskGuidance(
         && !expiredLease
         && task.correctionPolicy.used < task.correctionPolicy.limit
         && task.budget?.thresholdStatus !== "decision-required"
-        ? guidanceAction("task.correct", { taskId: task.id, revision: task.revision, reason: null, evidence: [] }, ["revision", "reason", "evidence"])
+        ? guidanceAction("task.correct", { taskId: task.id, revision: task.revision, reason: null, evidence: [] }, ["reason", "evidence"])
         : undefined;
       const emptyDeliveryRevoke = noInScopeDelta
         && task.lease

@@ -2249,7 +2249,7 @@ test("CLI proposal summary exposes the exact acceptance action after releasing i
     assert.deepEqual(summary.data.nextOperation, {
       operation: "task.transition",
       arguments: { taskId: "T-PROPOSAL", to: "ACCEPTED", revision: 1, evidence: [] },
-      argv: ["task", "transition", "T-PROPOSAL", "ACCEPTED", "--revision", "1"],
+      argv: ["task", "transition", "T-PROPOSAL", "ACCEPTED", "--revision", "1", "--evidence"],
       requirements: ["evidence"]
     });
     assert.equal(Object.hasOwn(summary.data.nextOperation, "fence"), false);

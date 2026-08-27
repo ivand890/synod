@@ -1389,7 +1389,7 @@ export function delegateCompleteCommand(
 ): HostNextCommand {
   return {
     operation: "delegate.complete",
-    argv: ["delegate", "complete", taskId, ...evidence.flatMap(reference => ["--evidence", reference])],
+    argv: ["delegate", "complete", taskId, ...evidence.flatMap(reference => ["--evidence", reference]), "--owner-thread"],
     requirements: ["owner-thread"],
     fence
   };

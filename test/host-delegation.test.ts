@@ -784,7 +784,7 @@ test("Codex handoff reserves and complete binds the stored fence", async () => {
   assert.equal(handoff.readOnlyContract.writeAuthorized, false);
   assert.equal(handoff.nextCommand.operation, "delegate.complete");
   assert.deepEqual(handoff.nextCommand.argv, [
-    "delegate", "complete", "T-HOST", "--evidence", "correction:round-1"
+    "delegate", "complete", "T-HOST", "--evidence", "correction:round-1", "--owner-thread"
   ]);
   assert.deepEqual(handoff.nextCommand.requirements, ["owner-thread"]);
   assert.equal(handoff.probe.constructedAppServer, false);

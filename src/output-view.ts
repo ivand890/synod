@@ -366,7 +366,7 @@ function nextOperation(data: Record<string, unknown>): unknown {
     return {
       operation: "delegate.complete",
       ...(taskId ? { taskId } : {}),
-      argv: taskId ? ["delegate", "complete", taskId] : [],
+      argv: taskId ? ["delegate", "complete", taskId, "--owner-thread"] : [],
       fence,
       requirements: ["owner-thread"],
       alternatives: ["lease.cancel", "lease.expire"]
@@ -396,7 +396,8 @@ function nextOperation(data: Record<string, unknown>): unknown {
             "--generation", String(fence.generation ?? ""),
             "--revision", String(fence.revision ?? ""),
             "--expected-heartbeat-at", String(fence.expectedHeartbeatAt ?? ""),
-            "--decision", "resume"
+            "--decision", "resume",
+            "--reason"
           ]
         : [],
       fence,
@@ -484,7 +485,7 @@ function proposalNextOperation(value: Record<string, unknown>): unknown {
       revision,
       evidence: []
     },
-    argv: ["task", "transition", taskId, "ACCEPTED", "--revision", String(revision)],
+    argv: ["task", "transition", taskId, "ACCEPTED", "--revision", String(revision), "--evidence"],
     requirements: ["evidence"]
   };
 }
