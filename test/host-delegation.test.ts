@@ -806,6 +806,34 @@ test("Codex handoff reserves and complete binds the stored fence", async () => {
   assert.equal(completed.authorization.hostNotificationRequired, true);
 });
 
+test("correction handoff requires evidence on host completion when start supplied none", async () => {
+  const correctionTask = { ...task, state: "REVIEW" } as OrchestrationTask;
+  const handoff = await startHostDelegationHandoff({
+    id: "T-HOST",
+    write: ["src/host-delegation.ts"]
+  }, {
+    ...dependencies({
+      reserve: async () => ({
+        task: correctionTask,
+        reservation,
+        writeAuthorized: false as const,
+        state: { checkpoint: {}, lastEvent: {} }
+      }) as never
+    }),
+    hostRuntimeResolver: () => ({
+      surface: "desktop",
+      executable: "/Applications/ChatGPT.app/Contents/Resources/codex",
+      executableSource: "desktop-process",
+      resolved: true
+    })
+  });
+
+  assert.deepEqual(handoff.nextCommand.argv, [
+    "delegate", "complete", "T-HOST", "--evidence", "--owner-thread"
+  ]);
+  assert.deepEqual(handoff.nextCommand.requirements, ["owner-thread", "evidence"]);
+});
+
 test("complete authorizes legacy role-less reservations as implementers", async () => {
   const authorizedRequests: HostDelegationAuthorizeRequest[] = [];
   const adapter: HostDelegationAdapter = {
