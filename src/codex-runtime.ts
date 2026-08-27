@@ -15,6 +15,8 @@ export interface ResolvedCodexRuntime {
   executable: string;
   executableSource: string;
   resolved: boolean;
+  /** True when this process is running under a Codex host, independent of which executable will be launched. */
+  hostOperator?: boolean;
 }
 
 export type ProcessInspector = (pid: number, platform: NodeJS.Platform) => ProcessEntry | undefined;
@@ -143,12 +145,14 @@ export function resolveCodexRuntime({
     || isDesktopCodexExecutable(env.SYNOD_CODEX_BIN)
     || isDesktopCodexExecutable(ancestorExecutable);
   const surface = desktop ? "desktop" : "cli";
+  const hostOperator = desktop || Boolean(ancestorExecutable);
   if (env.SYNOD_CODEX_BIN) {
     return {
       surface,
       executable: env.SYNOD_CODEX_BIN,
       executableSource: "SYNOD_CODEX_BIN",
-      resolved: true
+      resolved: true,
+      hostOperator
     };
   }
   if (ancestorExecutable) {
@@ -156,15 +160,16 @@ export function resolveCodexRuntime({
       surface,
       executable: ancestorExecutable,
       executableSource: `${surface}-process`,
-      resolved: true
+      resolved: true,
+      hostOperator
     };
   }
   if (!desktop) {
     const executable = findExecutable("codex", env, platform);
     return executable
-      ? { surface, executable, executableSource: "PATH", resolved: true }
-      : { surface, executable: "codex", executableSource: "PATH-unresolved", resolved: false };
+      ? { surface, executable, executableSource: "PATH", resolved: true, hostOperator }
+      : { surface, executable: "codex", executableSource: "PATH-unresolved", resolved: false, hostOperator };
   }
 
-  return { surface, executable: "codex", executableSource: "PATH-fallback", resolved: false };
+  return { surface, executable: "codex", executableSource: "PATH-fallback", resolved: false, hostOperator };
 }

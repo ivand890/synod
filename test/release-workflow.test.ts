@@ -454,7 +454,9 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.match(product, /WCAG 2\.2 AA/);
   assert.match(product, /`JobHandle` and `JobEvent`/);
   assert.match(product, /public `v0\.12\.0` release/);
-  assert.match(product, /CLI App Server Path A[\s\S]*reserve, spawn, bind, and authorize[\s\S]*exact owner for task-aware wait/);
+  assert.match(product, /CLI App Server Path A[\s\S]*read-only observer turns only/);
+  assert.match(product, /Writer leases stay[\s\S]*host-owned/);
+  assert.doesNotMatch(product, /reserve, spawn, bind, and authorize/);
   assert.match(product, /injected\s+`HostDelegationAdapter`/);
   assert.match(product, /Desktop returns an\s+explicit host spawn\/wait handoff[\s\S]*never starts a child App Server/);
   assert.match(product, /unsupported or non-Codex contexts fail closed/);

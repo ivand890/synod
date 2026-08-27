@@ -774,15 +774,20 @@ function writerAuthorizeRequest(ownerThread = "thread-from-appserver"): HostDele
   };
 }
 
-test("thread/start stays read-only when the reservation already has a write scope", async () => {
+test("CLI Path A spawn fails closed when the reservation has a write scope", async () => {
   const client = new FakeClient();
   const adapter = cliAdapter(client, () => client);
   const request = spawnRequest();
   request.reservation = { ...reservation, scopes: [writerScope] } as unknown as TaskLeaseReservation;
-  await adapter.spawn(request);
-  assert.equal(client.calls[0]?.params.sandbox, "read-only");
-  assert.equal(Object.hasOwn(client.calls[0]?.params || {}, "runtimeWorkspaceRoots"), false);
-  assert.equal(client.calls.some(call => call.method === "turn/start"), false);
+  await assert.rejects(
+    adapter.spawn(request),
+    error => error instanceof SynodError
+      && error.code === ERROR_CODES.APP_SERVER_UNSUPPORTED
+      && isRecord(error.details)
+      && error.details.constructedAppServer === false
+  );
+  assert.equal(client.started, 0);
+  assert.equal(client.calls.some(call => call.method === "thread/start"), false);
 });
 
 test("workspace-write fails closed before turn/start without a pre-turn observed boundary", async () => {
@@ -1165,6 +1170,18 @@ test("selectHostDelegationAdapter keeps injected and Desktop Path B, uses CLI Ap
   assert.equal(cli.path, "cli-app-server");
   if (cli.path !== "cli-app-server") throw new Error("expected cli-app-server");
   assert.equal(cli.adapter, cliAdapterValue);
+  assert.equal(created, 1);
+  assert.deepEqual(
+    selectHostDelegationAdapter({
+      runtime: { surface: "cli", resolved: true, executableSource: "PATH" },
+      writer: true,
+      createCliAdapter: () => {
+        created += 1;
+        return cliAdapterValue;
+      }
+    }),
+    { path: "handoff" }
+  );
   assert.equal(created, 1);
 });
 
