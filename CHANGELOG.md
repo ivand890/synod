@@ -28,8 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   including lease-reserve summaries and the plain-text command displayed by
   `delegate start`.
 - `--view summary` redacts reservation tokens from task-next actions, fences,
-  and reservation records the same way `handoff` already does. Full JSON still
-  returns the token from reserve.
+  delegate handoffs, and reservation records the same way `handoff` already
+  does. Full JSON still returns the token from reserve.
 
 ## [0.12.0] - 2026-08-23
 

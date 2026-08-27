@@ -549,6 +549,20 @@ function compactProposalMutation(value: unknown): unknown {
   return compacted;
 }
 
+function compactDelegate(value: unknown): unknown {
+  const compacted = compactValue(value);
+  if (!isRecord(compacted) || !isRecord(value)) return compacted;
+  if (isRecord(value.reservationFence)) {
+    const fence = structuredClone(value.reservationFence);
+    delete fence.reservationToken;
+    compacted.reservationFence = fence;
+  }
+  if (Object.hasOwn(value, "nextCommand")) {
+    compacted.nextCommand = redactGuidanceAction(value.nextCommand);
+  }
+  return compacted;
+}
+
 export function parseOutputViewArgs(args: string[]): ParsedOutputViewArgs {
   const remaining: string[] = [];
   let view: OutputView = "full";
@@ -593,6 +607,7 @@ export function projectSummary(command: string | null, data: unknown): unknown {
   if (command === "lease") return compactMutation(data);
   if (command === "wait") return compactWait(data);
   if (command === "proposal") return compactProposalMutation(data);
+  if (command === "delegate") return compactDelegate(data);
   if (command === "task" && isRecord(data) && data.action === "next") return compactTaskNext(data);
   if (command === "handoff") {
     if (!isRecord(data)) return data;

@@ -234,6 +234,47 @@ test("summary lease mutation keeps the exact next-operation fence", () => {
   });
 });
 
+test("summary delegate handoff redacts every reservation-token copy", () => {
+  const full = {
+    action: "start",
+    reservation: {
+      id: "lease-1",
+      token: "secret-token",
+      generation: 1,
+      taskId: "T-HOST",
+      taskRevision: 0,
+      status: "RESERVED"
+    },
+    reservationFence: {
+      reservationToken: "secret-token",
+      leaseId: "lease-1",
+      generation: 1,
+      revision: 0,
+      expectedReservedAt: "2026-08-27T00:00:00.000Z",
+      baselineHash: "sha256:baseline"
+    },
+    nextCommand: {
+      operation: "delegate.complete",
+      argv: ["delegate", "complete", "T-HOST", "--owner-thread"],
+      requirements: ["owner-thread"],
+      fence: {
+        reservationToken: "secret-token",
+        leaseId: "lease-1",
+        generation: 1,
+        revision: 0
+      }
+    }
+  };
+  const summary = projectSummary("delegate", full) as Record<string, unknown>;
+
+  assert.equal(Object.hasOwn(summary.reservation as object, "token"), false);
+  assert.equal(Object.hasOwn(summary.reservationFence as object, "reservationToken"), false);
+  assert.equal(Object.hasOwn((summary.nextCommand as Record<string, unknown>).fence as object, "reservationToken"), false);
+  assert.equal(full.reservation.token, "secret-token");
+  assert.equal(full.reservationFence.reservationToken, "secret-token");
+  assert.equal(full.nextCommand.fence.reservationToken, "secret-token");
+});
+
 test("summary proposal submission exposes the exact acceptance action without a lease fence", () => {
   const summary = projectSummary("proposal", {
     action: "submit",
