@@ -309,14 +309,6 @@ async function closeClient(client: CliAppServerClient | undefined): Promise<void
   await client.close().catch(() => undefined);
 }
 
-function isPreTurnBoundaryFailure(error: unknown): boolean {
-  if (!(error instanceof SynodError) || error.code !== ERROR_CODES.APP_SERVER_UNSUPPORTED) return false;
-  if (!isRecord(error.details)) return false;
-  return error.details.phase === "before-turn/start"
-    && error.details.authority === "effective-writable-boundary"
-    && error.details.observed === false;
-}
-
 interface WaitEndpointMetadata {
   version: 1;
   threadId: string;
@@ -1079,10 +1071,9 @@ function turnFenceFor(
   contract: HostDelegationSpawnRequest["readOnlyContract"]
 ): TurnFence {
   const directoryRoot = path.resolve(directory);
-  const scopes = validatedScopes(request.lease.scopes ?? request.reservation.scopes ?? []);
-  // The bound lease is the post-bind authority. Carry its exact scopes into
-  // the worker prompt so a stale reservation contract cannot widen or hide
-  // the fence that the turn actually receives.
+  const scopes = validatedScopes(request.lease?.scopes ?? request.reservation.scopes ?? []);
+  // Activation runs after bind. Carry the bound lease scopes into the worker
+  // prompt so a stale spawn contract cannot widen the fence.
   const boundContract = { ...contract, scopes };
   const writes = writeScopes(scopes);
   if (writes.length > 1) {
@@ -1155,8 +1146,10 @@ function rowStatus(rows: unknown[], threadId: string): CliAppServerRuntimeStatus
 
 /**
  * CLI Path A adapter: Synod owns one App Server, creates one thread without a
- * turn, binds that UUID, then starts exactly one turn. workspace-write is
- * applied only after bind for a single writer scope. Desktop must not construct.
+ * turn, authorizes, then binds that UUID only after authorize succeeds. A
+ * workspace-write turn still requires an authoritative pre-turn writable
+ * boundary; without one, authorize fails closed and must not leave ACTIVE.
+ * Desktop must not construct.
  */
 export function createCliAppServerAdapter(
   options: CliAppServerAdapterOptions
@@ -1348,6 +1341,47 @@ export function createCliAppServerAdapter(
         "authorize requires one unconsumed live Synod-owned App Server session from spawn."
       );
     }
+    if (request.ownerThread !== session.ownerThread) {
+      throw adapterError(
+        ERROR_CODES.HOST_OWNER_MISSING,
+        "authorize owner thread did not match the spawned App Server thread.",
+        {
+          expected: session.ownerThread,
+          observed: request.ownerThread,
+          constructedAppServer: true,
+          childLoss: "spawn-invoked-no-owner"
+        }
+      );
+    }
+    if (request.phase === "preflight") {
+      if (request.writeAuthorized !== false || request.lease !== undefined || request.leaseFence !== undefined) {
+        throw adapterError(
+          ERROR_CODES.HOST_ADAPTER_INVALID,
+          "preflight must remain non-executing and cannot carry active lease authority.",
+          { constructedAppServer: true }
+        );
+      }
+      if (writeScopes(request.reservation.scopes).length > 0) {
+        throw adapterError(
+          ERROR_CODES.APP_SERVER_UNSUPPORTED,
+          "CLI Path A cannot authorize workspace-write without an authoritative effective boundary before turn/start.",
+          {
+            phase: "before-turn/start",
+            authority: "effective-writable-boundary",
+            observed: false,
+            constructedAppServer: true
+          }
+        );
+      }
+      return { status: "accepted", phase: "preflight" };
+    }
+    if (request.phase !== "activate" || !request.lease || !request.leaseFence) {
+      throw adapterError(
+        ERROR_CODES.HOST_ADAPTER_INVALID,
+        "activation requires the exact bound lease and lease fence.",
+        { constructedAppServer: true }
+      );
+    }
     const completedNotifications: unknown[] = [];
     const settingsNotifications: unknown[] = [];
     const tokenUsageByThread = new Map<string, unknown>();
@@ -1358,18 +1392,6 @@ export function createCliAppServerAdapter(
     let retainForWait = false;
 
     try {
-      if (request.ownerThread !== session.ownerThread) {
-        throw adapterError(
-          ERROR_CODES.HOST_OWNER_MISSING,
-          "authorize owner thread did not match the spawned App Server thread.",
-          {
-            expected: session.ownerThread,
-            observed: request.ownerThread,
-            constructedAppServer: true,
-            childLoss: "spawn-invoked-no-owner"
-          }
-        );
-      }
       const fence = turnFenceFor(request, cwd, session.contract);
       if (fence.writerKey !== undefined) {
         throw adapterError(
@@ -1608,17 +1630,7 @@ export function createCliAppServerAdapter(
         nextCommand
       };
     } catch (error) {
-      const classified = classifyAuthorizeFailure(error);
-      if (detachedOwner && isPreTurnBoundaryFailure(classified)) {
-        session.retainForObservation = true;
-        if (classified instanceof SynodError) {
-          classified.details = {
-            ...(isRecord(classified.details) ? classified.details : {}),
-            retainedForObservation: true
-          };
-        }
-      }
-      throw classified;
+      throw classifyAuthorizeFailure(error);
     } finally {
       unsubscribe();
       releaseWriterScope(heldWriterKey);

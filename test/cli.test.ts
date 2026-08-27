@@ -13,6 +13,7 @@ import { createCliAppServerAdapter, findCliAppServerWaitClient, type CliAppServe
 import { cliAppServerEndpointPaths } from "../src/cli-app-server-runner.js";
 import { parseDelegateArgs, parseLeaseArgs, parseProposalArgs, parseStatusArgs, parseTaskArgs, parseWorktreeArgs } from "../src/command-options.js";
 import { initProject } from "../src/lifecycle.js";
+import { readOrchestration } from "../src/orchestration.js";
 import { packageName, packageVersion } from "../src/package.js";
 
 const bin = path.resolve("bin/synod.js");
@@ -505,7 +506,8 @@ test("CLI delegate start on PATH CLI binds the App Server thread UUID before a t
             async authorize() {
               methods.push("authorize");
               return { status: "authorized" };
-            }
+            },
+            async close() {}
           };
         }
       }
@@ -517,7 +519,7 @@ test("CLI delegate start on PATH CLI binds the App Server thread UUID before a t
     assert.equal(start.data.ownerThread, "thread-from-appserver");
     assert.equal(start.data.authorization.status, "authorized");
     assert.equal(observedProfile, "portable");
-    assert.deepEqual(methods, ["spawn", "authorize"]);
+    assert.deepEqual(methods, ["spawn", "authorize", "authorize"]);
 
     messages.length = 0;
     const waitStatus = await run(
@@ -557,7 +559,7 @@ test("CLI delegate start on PATH CLI binds the App Server thread UUID before a t
   }
 });
 
-test("CLI Path A writer authorization fails closed before turn/start and retains the bound UUID", async () => {
+test("CLI Path A writer authorization fails closed before turn/start and does not leave ACTIVE", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-delegate-cli-wait-endpoint-"));
   const { messages, output } = capturedOutput();
   const ownerThread = "11111111-2222-4333-8444-555555555555";
@@ -608,14 +610,19 @@ test("CLI Path A writer authorization fails closed before turn/start and retains
     assert.equal(start.ok, false, JSON.stringify(start));
     assert.equal(start.error.code, ERROR_CODES.HOST_AUTHORIZATION_FAILED);
     assert.equal(start.error.details.ownerThread, ownerThread);
-    assert.equal(start.error.details.lease.ownerThread, ownerThread);
-    assert.equal(start.error.details.lease.status, "ACTIVE");
-    assert.equal(start.error.details.recovery.status, "lease-bound-awaiting-authorization");
+    assert.equal(Object.hasOwn(start.error.details, "lease"), false);
+    assert.equal(start.error.details.recovery.status, "authorization-failed-reservation-unbound");
+    assert.equal(start.error.details.phase, "authorize");
+    assert.equal(start.error.details.cleanup.status, "complete");
     assert.equal(start.error.details.authorization.status, "failed");
     assert.equal(start.error.details.authorization.code, ERROR_CODES.APP_SERVER_UNSUPPORTED);
     assert.equal(start.error.details.authorization.details.phase, "before-turn/start");
     assert.equal(start.error.details.authorization.details.authority, "effective-writable-boundary");
     assert.equal(start.error.details.cause.code, ERROR_CODES.APP_SERVER_UNSUPPORTED);
+    const canonical = await readOrchestration(directory);
+    assert.equal(canonical.state.tasks["T-ENDPOINT"]?.state, "READY");
+    assert.equal(canonical.state.tasks["T-ENDPOINT"]?.lease, undefined);
+    assert.equal(canonical.state.tasks["T-ENDPOINT"]?.leaseReservation, undefined);
     assert.deepEqual(spawnClient.calls.map(call => call.method), ["thread/start"]);
     assert.equal(spawnClient.calls[0]?.params.model, "gpt-5.5");
     assert.equal(spawnClient.calls.some(call => call.method === "turn/start"), false);
@@ -628,7 +635,7 @@ test("CLI Path A writer authorization fails closed before turn/start and retains
   }
 });
 
-test("production delegate start retains the bound owner for the next same-shell wait", async () => {
+test("production delegate start does not leave ACTIVE after a pre-turn writer fence failure", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-delegate-cli-production-boundary-"));
   const fakeCodex = path.join(directory, "fake-codex.mjs");
   const ownerThread = "22222222-3333-4444-8555-666666666666";
@@ -659,9 +666,9 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
     await run(["checkpoint", directory], output);
     await run([
       "task", "add", "T-PRODUCTION-BOUNDARY",
-      "--objective", "Retain exact owner after the pre-turn writer fence",
+      "--objective", "Do not bind after the pre-turn writer fence fails",
       "--executor", "synod_implementer",
-      "--acceptance", "The exact owner remains observable after typed authorization failure",
+      "--acceptance", "Authorize failure leaves READY with no bound lease",
       "--verification", "pnpm test",
       "--cwd", directory
     ], output);
@@ -683,11 +690,16 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
     assert.equal(start.ok, false, JSON.stringify(start));
     assert.equal(start.error.code, ERROR_CODES.HOST_AUTHORIZATION_FAILED);
     assert.equal(start.error.details.ownerThread, ownerThread);
-    assert.equal(start.error.details.lease.ownerThread, ownerThread);
-    assert.equal(start.error.details.lease.status, "ACTIVE");
+    assert.equal(Object.hasOwn(start.error.details, "lease"), false);
+    assert.equal(start.error.details.recovery.status, "authorization-failed-reservation-unbound");
+    assert.equal(start.error.details.phase, "authorize");
+    assert.equal(start.error.details.cleanup.status, "complete");
     assert.equal(start.error.details.authorization.details.phase, "before-turn/start");
     assert.equal(start.error.details.authorization.details.authority, "effective-writable-boundary");
-    assert.equal(start.error.details.authorization.details.retainedForObservation, true);
+    const canonical = await readOrchestration(directory);
+    assert.equal(canonical.state.tasks["T-PRODUCTION-BOUNDARY"]?.state, "READY");
+    assert.equal(canonical.state.tasks["T-PRODUCTION-BOUNDARY"]?.lease, undefined);
+    assert.equal(canonical.state.tasks["T-PRODUCTION-BOUNDARY"]?.leaseReservation, undefined);
 
     messages.length = 0;
     const waitStatus = await run(
@@ -696,17 +708,14 @@ readline.createInterface({ input: process.stdin }).on("line", line => {
       { waitRuntimeResolver: () => runtime }
     );
     const waited = JSON.parse(takeMessage(messages));
-    assert.equal(waitStatus, 0);
-    assert.equal(waited.ok, true, JSON.stringify(waited));
-    assert.equal(waited.data.waitAuthority, "appServer");
-    assert.deepEqual(waited.data.threadIds, [ownerThread]);
-    assert.equal(waited.data.hostWaitRequired, false);
-    assert.equal(waited.data.hostFallbackRequired, false);
+    assert.equal(waitStatus, 1);
+    assert.equal(waited.ok, false, JSON.stringify(waited));
+    assert.equal(waited.error.code, ERROR_CODES.LEASE_REQUIRED);
 
     for (let attempt = 0; attempt < 100 && findCliAppServerWaitClient(directory, ownerThread); attempt += 1) {
       await new Promise(resolve => setTimeout(resolve, 20));
     }
-    assert.equal(findCliAppServerWaitClient(directory, ownerThread), undefined, "wait cleanup must remove the retained owner endpoint");
+    assert.equal(findCliAppServerWaitClient(directory, ownerThread), undefined, "failed authorize must not retain a wait owner endpoint");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -2116,7 +2125,8 @@ test("wait uses the same host adapter resolver and does not request a host hando
           mode: "notification",
           wakeCount: 1
         };
-      }
+      },
+      async close() {}
     }),
     waitRuntimeResolver: () => ({
       surface: "desktop",
