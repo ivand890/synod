@@ -2139,8 +2139,9 @@ test("CLI summary view keeps status and lease mutation fences while full stays d
     ], output);
     const reserved = JSON.parse(takeMessage(messages));
     assert.equal(reserveCode, 0);
+    assert.equal(Object.hasOwn(reserved.data.reservation, "token"), false);
+    assert.equal(Object.hasOwn(reserved.data.nextOperation.fence, "reservationToken"), false);
     assert.deepEqual(reserved.data.nextOperation.fence, {
-      reservationToken: reserved.data.reservation.token,
       leaseId: reserved.data.reservation.id,
       generation: reserved.data.reservation.generation,
       revision: reserved.data.reservation.taskRevision,
@@ -2148,6 +2149,49 @@ test("CLI summary view keeps status and lease mutation fences while full stays d
       baselineHash: reserved.data.reservation.baseline.snapshotContentHash
     });
 
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("CLI delegate-start summary redacts handoff reservation fences", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-delegate-summary-test-"));
+  const { messages, output } = capturedOutput();
+  try {
+    await run(["init", directory], output);
+    initializeGitHead(directory);
+    await run(["checkpoint", directory], output);
+    await run([
+      "task", "add", "T-HANDOFF-VIEW",
+      "--objective", "Redact every host handoff capability",
+      "--executor", "synod_implementer",
+      "--acceptance", "Summary contains no reservation token",
+      "--verification", "pnpm test",
+      "--cwd", directory
+    ], output);
+    await run(["task", "transition", "T-HANDOFF-VIEW", "READY", "--revision", "0", "--cwd", directory], output);
+    messages.length = 0;
+
+    const code = await run([
+      "delegate", "start", "T-HANDOFF-VIEW",
+      "--write", "src/output-view.ts",
+      "--cwd", directory,
+      "--json", "--view", "summary"
+    ], output, {
+      hostRuntimeResolver: () => ({
+        surface: "desktop",
+        executable: "/Applications/ChatGPT.app/Contents/Resources/codex",
+        executableSource: "desktop-process",
+        resolved: true
+      })
+    });
+    const summary = JSON.parse(takeMessage(messages));
+    assert.equal(code, 1);
+    assert.equal(summary.ok, true);
+    assert.equal(summary.data.hostSpawnRequired, true);
+    assert.equal(Object.hasOwn(summary.data.reservation, "token"), false);
+    assert.equal(Object.hasOwn(summary.data.reservationFence, "reservationToken"), false);
+    assert.equal(Object.hasOwn(summary.data.nextCommand.fence, "reservationToken"), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

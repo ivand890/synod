@@ -81,7 +81,6 @@ function compactReservation(value: unknown): unknown {
   if (!isRecord(value)) return value;
   const result = pick(value, [
     "id",
-    "token",
     "generation",
     "taskId",
     "taskRevision",
@@ -95,6 +94,40 @@ function compactReservation(value: unknown): unknown {
   ]);
   if (Object.hasOwn(value, "baseline")) result.baseline = compactBaseline(value.baseline);
   return result;
+}
+
+export function redactGuidanceAction<T>(action: T): T {
+  const redacted = structuredClone(action);
+  if (!isRecord(redacted)) return redacted;
+  const record = redacted as Record<string, unknown>;
+  const token = isRecord(record.arguments) ? record.arguments.reservationToken : undefined;
+  if (isRecord(record.fence)) delete record.fence.reservationToken;
+  if (isRecord(record.arguments)) delete record.arguments.reservationToken;
+  if (Array.isArray(record.argv)) {
+    const argv: unknown[] = [];
+    let reservationTokenRequired = false;
+    for (let index = 0; index < record.argv.length; index += 1) {
+      const item = record.argv[index];
+      if (item === "--reservation-token") {
+        argv.push(item);
+        reservationTokenRequired = true;
+        index += 1;
+        continue;
+      }
+      if (typeof token === "string" && item === token) continue;
+      if (item !== undefined) argv.push(item);
+    }
+    record.argv = argv;
+    if (reservationTokenRequired) {
+      const requirements = Array.isArray(record.requirements)
+        ? record.requirements.filter(item => typeof item === "string")
+        : [];
+      record.requirements = requirements.includes("reservation-token")
+        ? requirements
+        : ["reservation-token", ...requirements];
+    }
+  }
+  return redacted;
 }
 
 function compactProposal(value: unknown): unknown {
@@ -262,7 +295,7 @@ function compactGuidanceTask(value: unknown): unknown {
   if (Array.isArray(value.incompleteDependencies)) result.incompleteDependencies = [...value.incompleteDependencies];
   if (isRecord(value.constraints)) result.constraints = structuredClone(value.constraints);
   if (Array.isArray(value.legalTransitions)) result.legalTransitions = [...value.legalTransitions];
-  if (Array.isArray(value.actions)) result.actions = structuredClone(value.actions);
+  if (Array.isArray(value.actions)) result.actions = value.actions.map(item => redactGuidanceAction(item));
   return result;
 }
 
@@ -270,9 +303,24 @@ function compactTaskGuidance(value: unknown): unknown {
   if (!isRecord(value)) return value;
   const result: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
-    result[key] = key === "tasks" && Array.isArray(entry)
-      ? entry.map(task => compactGuidanceTask(task))
-      : compactValue(entry, key);
+    if (key === "tasks" && Array.isArray(entry)) {
+      result[key] = entry.map(task => compactGuidanceTask(task));
+      continue;
+    }
+    if (key === "parallelBatches" && Array.isArray(entry)) {
+      result[key] = entry.map(batch => {
+        if (!isRecord(batch)) return compactValue(batch);
+        const compacted: Record<string, unknown> = {};
+        for (const [batchKey, batchEntry] of Object.entries(batch)) {
+          compacted[batchKey] = batchKey === "actions" && Array.isArray(batchEntry)
+            ? batchEntry.map(item => redactGuidanceAction(item))
+            : compactValue(batchEntry, batchKey);
+        }
+        return compacted;
+      });
+      continue;
+    }
+    result[key] = compactValue(entry, key);
   }
   return result;
 }
@@ -337,7 +385,6 @@ function compactValue(value: unknown, key?: string): unknown {
 function reservationFence(value: Record<string, unknown>): Record<string, unknown> {
   const baseline = isRecord(value.baseline) ? value.baseline : {};
   return {
-    reservationToken: value.token,
     leaseId: value.id,
     generation: value.generation,
     revision: value.taskRevision,
@@ -502,6 +549,20 @@ function compactProposalMutation(value: unknown): unknown {
   return compacted;
 }
 
+function compactDelegate(value: unknown): unknown {
+  const compacted = compactValue(value);
+  if (!isRecord(compacted) || !isRecord(value)) return compacted;
+  if (isRecord(value.reservationFence)) {
+    const fence = structuredClone(value.reservationFence);
+    delete fence.reservationToken;
+    compacted.reservationFence = fence;
+  }
+  if (Object.hasOwn(value, "nextCommand")) {
+    compacted.nextCommand = redactGuidanceAction(value.nextCommand);
+  }
+  return compacted;
+}
+
 export function parseOutputViewArgs(args: string[]): ParsedOutputViewArgs {
   const remaining: string[] = [];
   let view: OutputView = "full";
@@ -546,6 +607,7 @@ export function projectSummary(command: string | null, data: unknown): unknown {
   if (command === "lease") return compactMutation(data);
   if (command === "wait") return compactWait(data);
   if (command === "proposal") return compactProposalMutation(data);
+  if (command === "delegate") return compactDelegate(data);
   if (command === "task" && isRecord(data) && data.action === "next") return compactTaskNext(data);
   if (command === "handoff") {
     if (!isRecord(data)) return data;
