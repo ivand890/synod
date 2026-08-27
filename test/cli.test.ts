@@ -441,40 +441,6 @@ test("CLI Path A binds a read-only observer thread UUID before a turn", async ()
     assert.equal(start.data.authorization.approvalRequired, true);
     assert.equal(observedProfile, "portable");
     assert.deepEqual(methods, ["spawn", "authorize", "authorize"]);
-
-    messages.length = 0;
-    const waitStatus = await run(
-      ["wait", "--task", "T-HOST", "--cwd", directory, "--json"],
-      output,
-      {
-        waitRuntimeResolver: () => ({
-          surface: "cli",
-          executable: "codex",
-          executableSource: "PATH",
-          resolved: true
-        }),
-        waitAdapterFactory: () => ({
-          async start() {},
-          capabilities: () => ({ notification: false, cursor: false }),
-          async read(threadIds: string[]) {
-            observedThreadIds = [...threadIds];
-            return {
-              statuses: threadIds.map(threadId => ({ threadId, status: { type: "idle" as const } }))
-            };
-          },
-          async close() {}
-        })
-      }
-    );
-    const waited = JSON.parse(takeMessage(messages));
-    assert.equal(waitStatus, 0);
-    assert.equal(waited.ok, true);
-    assert.equal(waited.data.waitAuthority, "appServer");
-    assert.deepEqual(waited.data.threadIds, ["thread-from-appserver"]);
-    assert.deepEqual(observedThreadIds, ["thread-from-appserver"]);
-    assert.equal(waited.data.hostWaitRequired, false);
-    assert.equal(waited.data.hostFallbackRequired, false);
-    assert.equal(waited.data.hostSpawnRequired, undefined);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

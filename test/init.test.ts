@@ -230,9 +230,15 @@ test("keeps the primary agent supervisory and delegates routine implementation",
   assert.match(skill, /On Desktop without an injected adapter/);
   assert.match(skill, /Do not start a child App Server/);
   assert.match(skill, /delegate complete --owner-thread/);
+  assert.match(skill, /hostNotificationRequired/);
+  assert.match(skill, /send_message.*followup_task/);
+  assert.match(skill, /exact returned `ownerThread`/);
   assert.doesNotMatch(skill, /atomic `delegate start` remains deferred/);
   assert.doesNotMatch(skill, /receipt preserves the exact next-operation lease fence/);
   assert.match(agents, /Do not use the supervising model as the default implementation worker\./);
+  assert.match(agents, /hostNotificationRequired/);
+  assert.match(agents, /send_message.*followup_task/);
+  assert.match(agents, /exact returned `ownerThread`/);
   assert.match(decisions, /Cost-efficient agents perform implementation/);
 });
 
