@@ -1,8 +1,8 @@
 # Synod Roadmap
 
-Last updated: 2026-08-23
+Last updated: 2026-08-27
 Current public release: `v0.12.0`
-Current source release: `v0.12.0`
+Current source release: `v0.12.1`
 Last verified public release at this update: `v0.12.0`
 
 This roadmap converts the advisor loop's remaining operational risks into
@@ -16,8 +16,9 @@ package, and public CLI evidence for `v0.12.0` are captured in the versioned
 in `release-closeouts/v0.11.0.json`, and the earlier `v0.9.5` evidence remains
 recorded in `release-closeouts/v0.9.5.json`.
 The signed tag and GitHub Release `isImmutable: true` provide the external
-release anchors; the root `RELEASE-CLOSEOUT.json` records the same closed and
-verified `v0.12.0` evidence.
+release anchors. The root `RELEASE-CLOSEOUT.json` is the prepared/pending
+source record for `v0.12.1`; verified `v0.12.0` evidence remains in
+`release-closeouts/v0.12.0.json`.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
 workflow; the tag workflow validates only the strict prepared/pending source
 record before publication.

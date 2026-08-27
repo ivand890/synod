@@ -32,8 +32,9 @@ separation between host, App Server, and canonical wait authority. The strict
 shapes: they do not add persistence, runners, process ownership, spawn/resume
 observation, or an execution plane.
 
-The public `v0.12.0` release supports the Codex delegation paths. On a supported
-Codex CLI without an injected adapter, `delegate start` selects Synod's owned
+The source prepared as `v0.12.1` supports the corrected Codex delegation paths;
+the last verified public release remains `v0.12.0`. On a supported Codex CLI
+without an injected adapter, `delegate start` selects Synod's owned
 CLI App Server Path A for read-only observer turns only. Writer leases stay
 host-owned: Desktop and Codex CLI return `hostSpawnRequired` so the supervisor
 calls `spawn_agent`, then `delegate complete --owner-thread`. An injected
@@ -46,7 +47,7 @@ execution ownership. Proposal evidence also keeps independent Git lanes:
 not one completion signal. The 0.9.5 hotfix, retained since 0.11.0, also makes the `--task`,
 `--active-only`, and `--changed-since-checkpoint` selectors work through an
 initialized project-local bootstrap while incompatible selector combinations
-still fail closed. The public release requires Node.js `>=22`, and its Codex
+still fail closed. The prepared release requires Node.js `>=22`, and its Codex
 support expression accepts every valid semantic version whose numeric major and
 minor are `0.148`, including stable, patch, prerelease, and build-metadata
 variants; `0.148.0-alpha.9` is known-good. Future source increments remain

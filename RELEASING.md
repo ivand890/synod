@@ -9,8 +9,10 @@ versioned `release-closeouts/v0.12.0.json`. The prior `v0.11.0` evidence is
 recorded in versioned `release-closeouts/v0.11.0.json`, and the earlier
 `v0.9.5` evidence is recorded in versioned `release-closeouts/v0.9.5.json`,
 bound to signed tag commit `494f1ebd85b1c51dde522e7a7ec6e334dadc4e30`. The
-root `RELEASE-CLOSEOUT.json` records the same closed and verified public
-`v0.12.0` evidence. Do not rerun historical tag or publication commands.
+root `RELEASE-CLOSEOUT.json` is the prepared/pending source record for
+`v0.12.1` and does not yet claim public verification; verified public `v0.12.0`
+evidence remains in its versioned closeout. Do not rerun historical tag or
+publication commands.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
 workflow; the tag workflow validates only the strict prepared/pending source
 record for the next release before publication.

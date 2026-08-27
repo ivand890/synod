@@ -18,19 +18,21 @@ externally immutable. Post-publication evidence is recorded in the versioned
 [`release-closeouts/v0.11.0.json`](release-closeouts/v0.11.0.json), alongside
 the earlier `v0.9.5` evidence in
 [`release-closeouts/v0.9.5.json`](release-closeouts/v0.9.5.json). The root
-[`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) records the same verified
-public v0.12.0 evidence. The phase-2 live verifier runs on the protected
-closeout PR, not the tag workflow; the tag workflow validates only the strict
-prepared/pending source record before publication.
+[`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) is now the prepared/pending
+source record for `v0.12.1`; it does not claim public verification. Verified
+public `v0.12.0` evidence remains in its versioned closeout above. The
+phase-2 live verifier runs on the protected closeout PR, not the tag workflow; the tag
+workflow validates only the strict prepared/pending source record before
+publication.
 
 ## Public release and source tree
 
 The public and pinned `@ivand890/synod@0.12.0` is the release described above.
 A project using `pnpm dlx @ivand890/synod@0.12.0`, or a project runtime pinned
-to `0.12.0`, exposes the released command surface. The source tree contains
-the same v0.12.0 surfaces and their regression tests; future source increments
-remain unavailable to a pinned runtime until a corresponding release is
-published and that project is explicitly upgraded.
+to `0.12.0`, exposes that released command surface. The source tree is prepared
+as `v0.12.1`: it retains the v0.12.0 surfaces and adds the fixes recorded in
+the `v0.12.1` changelog section. Those fixes remain unavailable to a pinned
+runtime until publication succeeds and that project is explicitly upgraded.
 
 The v0.12.0 source surfaces include:
 

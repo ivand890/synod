@@ -388,13 +388,13 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.match(changelog, /\[0\.9\.4\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.3\.\.\.v0\.9\.4/);
   assert.match(changelog, /\[0\.9\.3\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.2\.\.\.v0\.9\.3/);
   assert.match(roadmap, /Current public release: `v0\.12\.0`/);
-  assert.match(roadmap, /Current source release: `v0\.12\.0`/);
+  assert.match(roadmap, /Current source release: `v0\.12\.1`/);
   assert.match(roadmap, /Last verified public release at this update: `v0\.12\.0`/);
   assert.match(roadmap, /release-closeouts\/v0\.11\.0\.json/);
   assert.match(roadmap, /release-closeouts\/v0\.12\.0\.json/);
   assert.match(roadmap, /(?:prior|earlier) `v0\.9\.5`[\s\S]*release-closeouts\/v0\.9\.5\.json/);
   assert.match(roadmap, /signed tag and GitHub Release `isImmutable: true` provide the external\s+release anchors/);
-  assert.match(roadmap, /the root\s+`RELEASE-CLOSEOUT\.json` records the same closed and\s+verified `v0\.12\.0` evidence/);
+  assert.match(roadmap, /root `RELEASE-CLOSEOUT\.json` is the prepared\/pending\s+source record for `v0\.12\.1`/);
   assert.doesNotMatch(roadmap, /public latest remains/);
   assert.match(roadmap, /Status: delivered and publicly verified/);
   assert.doesNotMatch(roadmap, /last verified public package remains `v0\.9\.2`/i);
@@ -432,7 +432,8 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.match(readme, /Post-publication evidence is recorded in the versioned[\s\S]*release-closeouts\/v0\.11\.0\.json/);
   assert.match(readme, /(?:prior|earlier)[\s\S]*release-closeouts\/v0\.9\.5\.json/);
   assert.match(readme, /public and pinned `@ivand890\/synod@0\.12\.0`/);
-  assert.match(readme, /root[\s\S]*RELEASE-CLOSEOUT\.json[\s\S]*same verified[\s\S]*public v0\.12\.0 evidence/);
+  assert.match(readme, /RELEASE-CLOSEOUT\.json[\s\S]*prepared\/pending[\s\S]*`v0\.12\.1`[\s\S]*does not claim public verification/);
+  assert.match(readme, /source tree is prepared\s+as `v0\.12\.1`/);
   assert.match(readme, /The v0\.12\.0 source surfaces include/);
   assert.match(readme, /0\.9\.5 hotfix, retained since v0\.11\.0, makes[\s\S]*mixed selectors still\s+fail closed/);
   assert.match(readme, /v0\.12\.0 release requires Node\.js `>=22`/);
@@ -465,7 +466,7 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.equal(product.match(/^\d+\. /gm)?.length, 5);
   assert.match(product, /WCAG 2\.2 AA/);
   assert.match(product, /`JobHandle` and `JobEvent`/);
-  assert.match(product, /public `v0\.12\.0` release/);
+  assert.match(product, /source prepared as `v0\.12\.1`[\s\S]*last verified public release remains `v0\.12\.0`/);
   assert.match(product, /CLI App Server Path A[\s\S]*read-only observer turns only/);
   assert.match(product, /Writer leases stay[\s\S]*host-owned/);
   assert.doesNotMatch(product, /reserve, spawn, bind, and authorize/);
@@ -500,7 +501,7 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.match(releasing, /`release-closeouts\/v0\.12\.0\.json`/);
   assert.match(releasing, /`release-closeouts\/v0\.11\.0\.json`/);
   assert.match(releasing, /(?:prior|earlier)\s+`v0\.9\.5` evidence[\s\S]*`release-closeouts\/v0\.9\.5\.json`/);
-  assert.match(releasing, /root\s+`RELEASE-CLOSEOUT\.json` records the same closed and verified public\s+`v0\.12\.0`\s+evidence/);
+  assert.match(releasing, /root `RELEASE-CLOSEOUT\.json` is the prepared\/pending source record for\s+`v0\.12\.1`[\s\S]*does not yet claim public verification/);
   assert.doesNotMatch(releasing, /Public latest remains/);
   assert.doesNotMatch(releasing, /pre-tag candidate record/);
   assert.match(releasing, /registry-installed package result/);
