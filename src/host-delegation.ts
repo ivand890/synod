@@ -95,8 +95,9 @@ export interface HostDelegationAuthorizeRequest {
   writeAuthorized: boolean;
   role?: DelegationRole;
   reservation: TaskLeaseReservation;
-  lease: TaskLease;
-  leaseFence: HostDelegationLeaseFence;
+  /** Present only after bind. Authorize runs first, so adapters must not require this. */
+  lease?: TaskLease;
+  leaseFence?: HostDelegationLeaseFence;
 }
 
 export interface HostAuthorizationReceipt {
@@ -657,25 +658,65 @@ function spawnBoundedByReservation(
 
 function authorizationFailure(
   value: unknown,
-  result: { task: HostDelegationResult["task"]; lease: TaskLease; ownerThread: string }
+  result: { taskId: string; ownerThread: string; reservation: TaskLeaseReservation }
 ): SynodError {
-  const failure = new SynodError(ERROR_CODES.HOST_AUTHORIZATION_FAILED, "Host authorization was not accepted after the writer lease was bound.", {
+  return new SynodError(ERROR_CODES.HOST_AUTHORIZATION_FAILED, "Host authorization was not accepted before the writer lease was bound.", {
     details: {
-      taskId: result.task.id,
-      lease: result.lease,
+      taskId: result.taskId,
       ownerThread: result.ownerThread,
+      reservation: {
+        taskId: result.reservation.taskId,
+        leaseId: result.reservation.id,
+        generation: result.reservation.generation,
+        revision: result.reservation.taskRevision,
+        reservedAt: result.reservation.reservedAt,
+        baselineHash: result.reservation.baseline.snapshotContentHash
+      },
       authorization: authorizationReceipt(value),
       recovery: {
-        status: "lease-bound-awaiting-authorization",
-        action: "preserve-bound-lease",
-        next: "supervisor must inspect the host and use the exact active lease fence for recovery"
+        status: "authorization-failed-reservation-unbound",
+        action: "cancel-reservation",
+        next: "supervisor must inspect the host and retry delegate start after reservation cleanup"
       }
     }
   });
-  return failure;
 }
 
-/** Reserve, host-spawn read-only, bind the returned opaque owner, then authorize. */
+async function authorizeHostOwner(
+  adapter: HostDelegationAdapter,
+  request: HostDelegationAuthorizeRequest
+): Promise<HostAuthorizationReceipt> {
+  const value = await adapter.authorize(request);
+  const authorization = authorizationReceipt(value);
+  if (authorization.status === "failed" || authorization.status === "rejected" || authorization.status === "denied") {
+    throw authorizationFailure(authorization, request);
+  }
+  return authorization;
+}
+
+function approvalProposal(
+  role: DelegationRole,
+  task: { proposal?: { revision: number; bundleId: string } }
+): { role: Exclude<DelegationRole, "implementer">; revision: number; bundleId: string } | undefined {
+  if (role === "implementer" || !task.proposal) return undefined;
+  return { role, revision: task.proposal.revision, bundleId: task.proposal.bundleId };
+}
+
+function withApprovalCommand(
+  authorization: HostAuthorizationReceipt,
+  taskId: string,
+  ownerThread: string,
+  proposal: ReturnType<typeof approvalProposal>
+): HostAuthorizationReceipt {
+  if (!proposal) return authorization;
+  return {
+    ...authorization,
+    approvalRequired: true,
+    nextCommand: approvalNextCommand(taskId, proposal.role, proposal.revision, proposal.bundleId, ownerThread)
+  };
+}
+
+/** Reserve, host-spawn read-only, authorize, then bind the opaque owner only after authorize succeeds. */
 export async function startHostDelegation(
   options: HostDelegationOptions = {},
   dependencies: HostDelegationDependencies = {}
@@ -840,6 +881,32 @@ export async function startHostDelegation(
       dependencies
     );
   }
+  const authorizeRequest: HostDelegationAuthorizeRequest = {
+    taskId: id,
+    directory: options.directory || ".",
+    ownerThread,
+    writeAuthorized: prepared.role === "implementer",
+    role: prepared.role,
+    reservation
+  };
+  let authorization: HostAuthorizationReceipt;
+  try {
+    authorization = withApprovalCommand(
+      await authorizeHostOwner(adapter, authorizeRequest),
+      id,
+      ownerThread,
+      approvalProposal(prepared.role, reserved.task)
+    );
+  } catch (error) {
+    const classified = classifyPostBindChildLoss(error);
+    const failure = classified instanceof SynodError && classified.code === ERROR_CODES.HOST_AUTHORIZATION_FAILED
+      ? classified
+      : childLossFrom(classified)
+        ? classified
+        : withErrorDetails(authorizationFailure(classified, authorizeRequest), { cause: conciseError(classified) });
+    const closed = await closeAdapterAfterSpawnFailure(adapter, failure);
+    return cancelReservationAfterFailure(closed, closed.code, "authorize", reservation, options, dependencies);
+  }
   const bind = dependencies.bind || bindTaskLease;
   let bound: BindResult;
   try {
@@ -856,57 +923,6 @@ export async function startHostDelegation(
   } catch (error) {
     const failure = await closeAdapterAfterSpawnFailure(adapter, error, ERROR_CODES.LEASE_STALE);
     return cancelReservationAfterFailure(failure, ERROR_CODES.LEASE_STALE, "bind", reservation, options, dependencies);
-  }
-  let authorization: HostAuthorizationReceipt;
-  try {
-    const value = await adapter.authorize({
-      taskId: id,
-      directory: options.directory || ".",
-      ownerThread,
-      writeAuthorized: prepared.role === "implementer",
-      role: prepared.role,
-      reservation,
-      lease: bound.lease,
-      leaseFence: leaseFence(bound.lease)
-    });
-    authorization = authorizationReceipt(value);
-    if (authorization.status === "failed" || authorization.status === "rejected" || authorization.status === "denied") {
-      throw authorizationFailure(authorization, { task: bound.task, lease: bound.lease, ownerThread });
-    }
-    if (prepared.role !== "implementer" && bound.task.proposal) {
-      authorization = {
-        ...authorization,
-        approvalRequired: true,
-        nextCommand: approvalNextCommand(
-          id,
-          prepared.role,
-          bound.task.proposal.revision,
-          bound.task.proposal.bundleId,
-          ownerThread
-        )
-      };
-    }
-  } catch (error) {
-    const classified = classifyPostBindChildLoss(error);
-    if (childLossFrom(classified)) {
-      throw await closeAdapterAfterSpawnFailure(adapter, withErrorDetails(classified, {
-        taskId: bound.task.id,
-        lease: bound.lease,
-        ownerThread,
-        recovery: {
-          status: "lease-bound-awaiting-authorization",
-          action: "preserve-bound-lease",
-          next: "supervisor must inspect the host and use the exact active lease fence for recovery"
-        }
-      }));
-    }
-    const failure = classified instanceof SynodError && classified.code === ERROR_CODES.HOST_AUTHORIZATION_FAILED
-      ? classified
-      : withErrorDetails(
-        authorizationFailure(classified, { task: bound.task, lease: bound.lease, ownerThread }),
-        { cause: conciseError(classified) }
-      );
-    throw await closeAdapterAfterSpawnFailure(adapter, failure);
   }
   const result: HostDelegationResult = {
     directory: options.directory || ".",
@@ -1265,7 +1281,7 @@ export async function startHostDelegationHandoff(
   };
 }
 
-/** Bind the stored reservation to a host-returned owner. Authorizes only when an adapter is present. */
+/** Authorize, then bind the stored reservation to a host-returned owner. Authorizes only when an adapter is present. */
 export async function completeHostDelegation(
   options: {
     directory?: string;
@@ -1299,6 +1315,45 @@ export async function completeHostDelegation(
     });
   }
   const reservedFence = reservationFence(reservation);
+  const completeRole = reservation.role ?? "implementer";
+  const authorizeRequest: HostDelegationAuthorizeRequest = {
+    taskId: id,
+    directory: targetDirectory,
+    ownerThread,
+    // Reservations from the pre-role API omit role and are legacy
+    // implementer leases. Only explicit reviewer/verifier roles are
+    // observer-only at this boundary.
+    writeAuthorized: reservation.role === undefined || reservation.role === "implementer",
+    ...(reservation.role === undefined ? {} : { role: reservation.role }),
+    reservation
+  };
+  let authorization: HostAuthorizationReceipt;
+  if (options.adapter) {
+    try {
+      authorization = withApprovalCommand(
+        await authorizeHostOwner(options.adapter, authorizeRequest),
+        id,
+        ownerThread,
+        approvalProposal(completeRole, task)
+      );
+    } catch (error) {
+      const classified = error instanceof SynodError && error.code === ERROR_CODES.HOST_AUTHORIZATION_FAILED
+        ? error
+        : withErrorDetails(authorizationFailure(error, authorizeRequest), { cause: conciseError(error) });
+      const closed = await closeAdapterAfterSpawnFailure(options.adapter, classified);
+      return cancelReservationAfterFailure(closed, closed.code, "authorize", reservation, {
+        directory: targetDirectory,
+        ...(options.actor === undefined ? {} : { actor: options.actor })
+      }, dependencies);
+    }
+  } else {
+    authorization = withApprovalCommand(
+      { status: "accepted", hostNotificationRequired: true },
+      id,
+      ownerThread,
+      approvalProposal(completeRole, task)
+    );
+  }
   const bind = dependencies.bind || bindTaskLease;
   const bound = await bind({
     directory: targetDirectory,
@@ -1310,49 +1365,6 @@ export async function completeHostDelegation(
     evidence: options.evidence || [],
     ...(options.actor === undefined ? {} : { actor: options.actor })
   }, dependencies);
-  let authorization: HostAuthorizationReceipt;
-  if (options.adapter) {
-    try {
-      const value = await options.adapter.authorize({
-        taskId: id,
-        directory: targetDirectory,
-        ownerThread,
-        // Reservations from the pre-role API omit role and are legacy
-        // implementer leases. Only explicit reviewer/verifier roles are
-        // observer-only at this boundary.
-        writeAuthorized: reservation.role === undefined || reservation.role === "implementer",
-        ...(reservation.role === undefined ? {} : { role: reservation.role }),
-        reservation,
-        lease: bound.lease,
-        leaseFence: leaseFence(bound.lease)
-      });
-      authorization = authorizationReceipt(value);
-      if (authorization.status === "failed" || authorization.status === "rejected" || authorization.status === "denied") {
-        throw authorizationFailure(authorization, { task: bound.task, lease: bound.lease, ownerThread });
-      }
-    } catch (error) {
-      if (error instanceof SynodError && error.code === ERROR_CODES.HOST_AUTHORIZATION_FAILED) throw error;
-      throw withErrorDetails(
-        authorizationFailure(error, { task: bound.task, lease: bound.lease, ownerThread }),
-        { cause: conciseError(error) }
-      );
-    }
-  } else {
-    authorization = { status: "accepted", hostNotificationRequired: true };
-  }
-  if ((reservation.role === "reviewer" || reservation.role === "verifier") && bound.task.proposal) {
-    authorization = {
-      ...authorization,
-      approvalRequired: true,
-      nextCommand: approvalNextCommand(
-        id,
-        reservation.role,
-        bound.task.proposal.revision,
-        bound.task.proposal.bundleId,
-        ownerThread
-      )
-    };
-  }
   return {
     directory: targetDirectory,
     task: bound.task,

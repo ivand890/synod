@@ -109,7 +109,7 @@ async function waitForCondition(predicate: () => boolean, timeoutMs = 1_000): Pr
   }
 }
 
-test("host delegation reserves, spawns read-only, binds the opaque owner, then authorizes", async () => {
+test("host delegation reserves, spawns read-only, authorizes, then binds the opaque owner", async () => {
   const calls: string[] = [];
   let spawnedRequest: any;
   let authorizedRequest: any;
@@ -143,12 +143,14 @@ test("host delegation reserves, spawns read-only, binds the opaque owner, then a
     }
   });
 
-  assert.deepEqual(calls, ["reserve", "spawn", "bind", "authorize"]);
+  assert.deepEqual(calls, ["reserve", "spawn", "authorize", "bind"]);
   assert.equal(spawnedRequest.writeAuthorized, false);
   assert.equal(spawnedRequest.readOnlyContract.writeAuthorized, false);
   assert.equal(result.ownerThread, "opaque-owner");
   assert.equal(authorizedRequest.ownerThread, "opaque-owner");
   assert.equal(authorizedRequest.writeAuthorized, true);
+  assert.equal(authorizedRequest.lease, undefined);
+  assert.equal(authorizedRequest.leaseFence, undefined);
   assert.equal(result.authorization.status, "authorized");
 });
 
@@ -329,7 +331,7 @@ test("bind failure closes the spawned adapter before cancelling the reservation"
   let cancelled = 0;
   const adapter: HostDelegationAdapter = {
     async spawn() { return "opaque-owner"; },
-    async authorize() { throw new Error("must not authorize"); },
+    async authorize() { return { status: "authorized" }; },
     async close() { closed += 1; }
   };
   await assert.rejects(
@@ -346,29 +348,39 @@ test("bind failure closes the spawned adapter before cancelling the reservation"
   assert.equal(cancelled, 1);
 });
 
-test("authorization failure leaves the bound lease as truthful recovery state", async () => {
+test("authorization failure cancels the reservation and does not bind", async () => {
   let cancelled = 0;
   let closed = 0;
+  let bound = 0;
   const adapter: HostDelegationAdapter = {
     async spawn() { return "opaque-owner"; },
     async authorize() { return { status: "failed", reason: "host rejected authorization" }; },
     async close() { closed += 1; }
   };
   await assert.rejects(
-    startHostDelegation({ id: "T-HOST", adapter }, dependencies({ cancel: async () => { cancelled += 1; } })),
+    startHostDelegation({ id: "T-HOST", adapter }, dependencies({
+      cancel: async () => { cancelled += 1; },
+      bind: async () => {
+        bound += 1;
+        throw new Error("must not bind after authorize failure");
+      }
+    })),
     error => {
-      const value = error as { code: string; details: { recovery: { status: string }; lease: TaskLease } };
+      const value = error as { code: string; details: { recovery: { status: string }; lease?: unknown; cleanup: { status: string }; phase: string } };
       assert.equal(value.code, ERROR_CODES.HOST_AUTHORIZATION_FAILED);
-      assert.equal(value.details.recovery.status, "lease-bound-awaiting-authorization");
-      assert.equal(value.details.lease.ownerThread, "opaque-owner");
+      assert.equal(value.details.recovery.status, "authorization-failed-reservation-unbound");
+      assert.equal(value.details.phase, "authorize");
+      assert.equal(value.details.cleanup.status, "complete");
+      assert.equal(Object.hasOwn(value.details, "lease"), false);
       return true;
     }
   );
-  assert.equal(cancelled, 0);
+  assert.equal(cancelled, 1);
   assert.equal(closed, 1);
+  assert.equal(bound, 0);
 });
 
-test("authorization accepts only explicit positive structured receipts and preserves the bound lease", async () => {
+test("authorization accepts only explicit positive structured receipts and does not bind", async () => {
   for (const receipt of [
     { status: "pending" },
     { status: "queued" },
@@ -378,20 +390,28 @@ test("authorization accepts only explicit positive structured receipts and prese
     null,
     true
   ]) {
+    let bound = 0;
     const adapter: HostDelegationAdapter = {
       async spawn() { return "opaque-owner"; },
       async authorize() { return receipt; }
     };
     await assert.rejects(
-      startHostDelegation({ id: "T-HOST", adapter }, dependencies()),
+      startHostDelegation({ id: "T-HOST", adapter }, dependencies({
+        cancel: async () => undefined,
+        bind: async () => {
+          bound += 1;
+          throw new Error("must not bind after authorize failure");
+        }
+      })),
       error => {
-        const value = error as { code: string; details: { recovery: { status: string }; lease: TaskLease } };
+        const value = error as { code: string; details: { recovery: { status: string }; lease?: unknown } };
         assert.equal(value.code, ERROR_CODES.HOST_AUTHORIZATION_FAILED);
-        assert.equal(value.details.recovery.status, "lease-bound-awaiting-authorization");
-        assert.equal(value.details.lease.ownerThread, "opaque-owner");
+        assert.equal(value.details.recovery.status, "authorization-failed-reservation-unbound");
+        assert.equal(Object.hasOwn(value.details, "lease"), false);
         return true;
       }
     );
+    assert.equal(bound, 0);
   }
 });
 
@@ -648,7 +668,50 @@ test("complete authorizes legacy role-less reservations as implementers", async 
 
   assert.equal(authorizedRequest?.writeAuthorized, true);
   assert.equal(authorizedRequest?.role, undefined);
+  assert.equal(authorizedRequest?.lease, undefined);
   assert.equal(completed.role, "implementer");
+});
+
+test("complete authorization failure cancels the reservation and does not bind", async () => {
+  let cancelled = 0;
+  let bound = 0;
+  let closed = 0;
+  const adapter: HostDelegationAdapter = {
+    async spawn() { return "unused"; },
+    async authorize() { return { status: "denied" }; },
+    async close() { closed += 1; }
+  };
+  await assert.rejects(
+    completeHostDelegation({
+      id: "T-HOST",
+      ownerThread: "opaque-owner",
+      adapter
+    }, {
+      ...dependencies({
+        cancel: async () => { cancelled += 1; },
+        bind: async () => {
+          bound += 1;
+          throw new Error("must not bind after authorize failure");
+        }
+      }),
+      read: (async () => ({
+        state: { tasks: { "T-HOST": { id: "T-HOST", leaseReservation: reservation } } },
+        events: [],
+        leaseBaselines: { baselines: [] }
+      })) as never
+    }),
+    error => {
+      const value = error as { code: string; details: { recovery: { status: string }; phase: string; cleanup: { status: string } } };
+      assert.equal(value.code, ERROR_CODES.HOST_AUTHORIZATION_FAILED);
+      assert.equal(value.details.recovery.status, "authorization-failed-reservation-unbound");
+      assert.equal(value.details.phase, "authorize");
+      assert.equal(value.details.cleanup.status, "complete");
+      return true;
+    }
+  );
+  assert.equal(cancelled, 1);
+  assert.equal(bound, 0);
+  assert.equal(closed, 1);
 });
 
 test("handoff --wait without an adapter fails closed", async () => {
@@ -722,8 +785,10 @@ test("unclassified child-loss details fail closed and still close the child", as
   assert.equal(cancelled, 1);
 });
 
-test("post-bind App Server exit classifies child-dead-lease-live and closes", async () => {
+test("authorize-time App Server exit classifies child-dead-lease-live, closes, and cancels the reservation", async () => {
   let closed = 0;
+  let cancelled = 0;
+  let bound = 0;
   const adapter: HostDelegationAdapter = {
     async spawn() { return "opaque-owner"; },
     async authorize() {
@@ -732,17 +797,27 @@ test("post-bind App Server exit classifies child-dead-lease-live and closes", as
     async close() { closed += 1; }
   };
   await assert.rejects(
-    startHostDelegation({ id: "T-HOST", adapter }, dependencies()),
+    startHostDelegation({ id: "T-HOST", adapter }, dependencies({
+      cancel: async () => { cancelled += 1; },
+      bind: async () => {
+        bound += 1;
+        throw new Error("must not bind after authorize failure");
+      }
+    })),
     error => {
       assert.ok(error instanceof SynodError);
       assert.equal(error.code, ERROR_CODES.APP_SERVER_EXITED);
       assert.ok(isRecord(error.details));
       assert.equal(error.details.childLoss, "child-dead-lease-live");
-      assert.equal(isRecord(error.details.recovery) && error.details.recovery.status, "lease-bound-awaiting-authorization");
+      assert.equal(error.details.phase, "authorize");
+      assert.equal(isRecord(error.details.cleanup) && error.details.cleanup.status, "complete");
+      assert.equal(Object.hasOwn(error.details, "lease"), false);
       return true;
     }
   );
   assert.equal(closed, 1);
+  assert.equal(cancelled, 1);
+  assert.equal(bound, 0);
 });
 
 test("host wait timeout without a wake classifies wait-never-woke", async () => {

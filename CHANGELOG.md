@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Host delegation withholds bind until `authorize` succeeds. An authorization
+  failure now cancels the reservation instead of leaving `ACTIVE` plus a
+  read-only thread.
+
 ## [0.12.0] - 2026-08-23
 
 ### Added
