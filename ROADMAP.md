@@ -1,9 +1,9 @@
 # Synod Roadmap
 
 Last updated: 2026-08-27
-Current public release: `v0.12.0`
+Current public release: `v0.12.1`
 Current source release: `v0.12.1`
-Last verified public release at this update: `v0.12.0`
+Last verified public release at this update: `v0.12.1`
 
 This roadmap converts the advisor loop's remaining operational risks into
 versioned, testable increments. Entries at or below the last verified public
@@ -11,14 +11,14 @@ release are delivered. Later increments remain unavailable to a public/pinned
 runtime until their release is published and the project is explicitly
 upgraded. Exact CLI spelling remains provisional until an increment is
 implemented and released. Source preparation and post-publication npm, GitHub, registry-installed
-package, and public CLI evidence for `v0.12.0` are captured in the versioned
-`release-closeouts/v0.12.0.json`; the prior `v0.11.0` evidence remains recorded
+package, and public CLI evidence for `v0.12.1` are captured in the versioned
+`release-closeouts/v0.12.1.json`; the prior `v0.12.0` evidence remains recorded
+in `release-closeouts/v0.12.0.json`, the `v0.11.0` evidence remains recorded
 in `release-closeouts/v0.11.0.json`, and the earlier `v0.9.5` evidence remains
 recorded in `release-closeouts/v0.9.5.json`.
 The signed tag and GitHub Release `isImmutable: true` provide the external
-release anchors. The root `RELEASE-CLOSEOUT.json` is the prepared/pending
-source record for `v0.12.1`; verified `v0.12.0` evidence remains in
-`release-closeouts/v0.12.0.json`.
+release anchors; the root `RELEASE-CLOSEOUT.json` records the same closed and
+verified `v0.12.1` evidence.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
 workflow; the tag workflow validates only the strict prepared/pending source
 record before publication.
@@ -373,7 +373,7 @@ The release also ships bounded delegation and independent approval surfaces;
 future protocol holes return to `v0.12.x` patches rather than opening a new
 feature series.
 
-Status: delivered and publicly verified for the `v0.12.0` package and its
+Status: delivered and publicly verified for the `v0.12.1` package and its
 bounded delegation/approval surfaces. The package includes a validated
 concurrency policy and CLI App Server runner, zero-write observer
 leases, typed reviewer/verifier approval lanes, and bounded parallel delegation.

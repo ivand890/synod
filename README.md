@@ -10,31 +10,32 @@ Open Codex in this repo. Send these three messages:
 
 Synod installs a persistent, reviewed advisor loop for Codex projects. The selected model profile assigns supervision, atomic implementation, exploration, review, verification, and mechanical work while keeping the primary agent responsible for integration and final evidence.
 
-The public `v0.12.0` release is verified at signed tag commit
-`9ee278290b3f7928138aa827b544a5145d516a3b`; its matching GitHub Release is
+The public `v0.12.1` release is verified at signed tag commit
+`937c7d713523e4de587e7a6951716d72a9681131`; its matching GitHub Release is
 externally immutable. Post-publication evidence is recorded in the versioned
-[`release-closeouts/v0.12.0.json`](release-closeouts/v0.12.0.json). The prior
-`v0.11.0` evidence remains recorded in the versioned
-[`release-closeouts/v0.11.0.json`](release-closeouts/v0.11.0.json), alongside
-the earlier `v0.9.5` evidence in
+[`release-closeouts/v0.12.1.json`](release-closeouts/v0.12.1.json). The prior
+`v0.12.0` evidence remains recorded in the versioned
+[`release-closeouts/v0.12.0.json`](release-closeouts/v0.12.0.json), with the
+`v0.11.0` evidence in the versioned
+[`release-closeouts/v0.11.0.json`](release-closeouts/v0.11.0.json) and the
+earlier `v0.9.5` evidence in
 [`release-closeouts/v0.9.5.json`](release-closeouts/v0.9.5.json). The root
-[`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) is now the prepared/pending
-source record for `v0.12.1`; it does not claim public verification. Verified
-public `v0.12.0` evidence remains in its versioned closeout above. The
-phase-2 live verifier runs on the protected closeout PR, not the tag workflow; the tag
+[`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) records the same verified
+public `v0.12.1` evidence. The phase-2 live verifier runs on the protected
+closeout PR, not the tag workflow; the tag
 workflow validates only the strict prepared/pending source record before
 publication.
 
 ## Public release and source tree
 
-The public and pinned `@ivand890/synod@0.12.0` is the release described above.
-A project using `pnpm dlx @ivand890/synod@0.12.0`, or a project runtime pinned
-to `0.12.0`, exposes that released command surface. The source tree is prepared
-as `v0.12.1`: it retains the v0.12.0 surfaces and adds the fixes recorded in
-the `v0.12.1` changelog section. Those fixes remain unavailable to a pinned
-runtime until publication succeeds and that project is explicitly upgraded.
+The public and pinned `@ivand890/synod@0.12.1` is the release described above.
+A project using `pnpm dlx @ivand890/synod@0.12.1`, or a project runtime pinned
+to `0.12.1`, exposes the released command surface. The source tree contains the
+same v0.12.1 surfaces and their regression tests; future source increments
+remain unavailable to a pinned runtime until a corresponding release is
+published and that project is explicitly upgraded.
 
-The v0.12.0 source surfaces include:
+The v0.12.0 source surfaces remain available in this release:
 
 - A validated concurrency policy and CLI App Server runner with bounded
   `maxConcurrentSubagents` enforcement, capacity reporting, child-loss
@@ -67,15 +68,15 @@ The v0.11.0 source surfaces remain available in this release:
   Server; unsupported or non-Codex contexts fail closed.
 - The explicit `--include-local-docs` recovery-bundle path.
 
-These commands are available in the public v0.12.0 release. The public/pinned
-`v0.12.0` `doctor` support expression is
+These commands are available in the public v0.12.1 release. The public/pinned
+`v0.12.1` `doctor` support expression is
 `>=0.148.0-0 <0.149.0 (all 0.148.x variants)`.
 Every valid `0.148.x` semantic version is accepted, including prerelease,
 stable, patch, and build-metadata variants; `0.148.0-alpha.9` is known-good.
 Valid versions below `0.148` or at and above `0.149`, plus invalid semver, are
 unsupported.
 
-The v0.12.0 release requires Node.js `>=22`; Node 20 is unsupported. Its CI
+The v0.12.1 release requires Node.js `>=22`; Node 20 is unsupported. Its CI
 tests Node 22 and 24 on Ubuntu, plus Node 24 package smoke on macOS and
 Windows.
 
@@ -371,7 +372,7 @@ synod status --json
 
 `status` exits non-zero with `SYNOD_CHECKPOINT_DRIFT` when branch, `HEAD`, or relevant working-tree content differs. `status --explain` adds a read-only path delta in text or JSON that distinguishes committed, staged, unstaged, untracked, deleted, renamed, resolved, and binary paths since the acknowledged checkpoint. Synod-owned infrastructure and orchestration records are excluded so Synod does not create its own drift.
 
-The v0.12.0 release also includes the retained bounded selectors; use them from a project
+The v0.12.1 release also includes the retained bounded selectors; use them from a project
 pinned to the released runtime:
 
 ```bash
@@ -456,7 +457,7 @@ Export requires an acknowledged Git `HEAD`; the live branch, `HEAD`, Git index, 
 
 A schema-1 bundle contains canonical `manifest.json` plus raw content-addressed objects under `objects/`. The manifest binds the bundle ID to source branch/`HEAD`, checkpoint and snapshot hashes, last event identity, path modes and types, object sizes and SHA-256 values, and whether untracked material was included. Its deterministic `createdAt` is the acknowledged snapshot capture time, so repeated exports of the same checkpoint with the same Synod version serialize identically. Bundles can contain source code, secrets, binary data, and symlink targets, so keep them local and protect them like the checkout itself.
 
-`docs/synod/GOAL.md`, `PLAN.md`, `STATE.md`, `DECISIONS.md`, and `WORKLOG.md` are ignored, human-owned supporting context—not Git, checkpoint, or release proof. They never enter a default bundle or alter a checkpoint fingerprint. `--include-untracked` keeps its existing meaning and does not include them. Use the separate, explicit `--include-local-docs` opt-in to add only those five bounded regular files as verified `supplemental.localDocs`; generated `STATUS.md` and every other ignored path are excluded. Restore leaves supplemental notes untouched unless `--include-local-docs` is supplied, rejects unsafe ancestors and conflicting destination content, and journals the write transactionally. These notes may contain prompts, credentials, tokens, or other secrets: inspect and redact them before export, transfer, or publication. The opt-in local-doc path is part of the public v0.12.0 recovery contract, retained from v0.11.0.
+`docs/synod/GOAL.md`, `PLAN.md`, `STATE.md`, `DECISIONS.md`, and `WORKLOG.md` are ignored, human-owned supporting context—not Git, checkpoint, or release proof. They never enter a default bundle or alter a checkpoint fingerprint. `--include-untracked` keeps its existing meaning and does not include them. Use the separate, explicit `--include-local-docs` opt-in to add only those five bounded regular files as verified `supplemental.localDocs`; generated `STATUS.md` and every other ignored path are excluded. Restore leaves supplemental notes untouched unless `--include-local-docs` is supplied, rejects unsafe ancestors and conflicting destination content, and journals the write transactionally. These notes may contain prompts, credentials, tokens, or other secrets: inspect and redact them before export, transfer, or publication. The opt-in local-doc path is part of the public v0.12.1 recovery contract, retained from v0.11.0.
 
 The `pnpm test:package` local tarball smoke is source-preparation evidence only;
 it cannot satisfy public verification. The public phase requires a clean
@@ -564,7 +565,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
   "data": {},
   "warnings": [],
   "diagnostics": {
-    "synodVersion": "0.12.0",
+    "synodVersion": "0.12.1",
     "nodeVersion": "24.12.0",
     "platform": "darwin",
     "codexVersion": "0.142.0"
@@ -606,7 +607,7 @@ CLI and Desktop may share `~/.codex` while running different Codex versions. Ins
 
 It then classifies that surface's Codex version independently from model availability:
 
-- Public/pinned `v0.12.0` support expression:
+- Public/pinned `v0.12.1` support expression:
   `>=0.148.0-0 <0.149.0 (all 0.148.x variants)`.
 - Known-good and exercised in CI: `0.148.0-alpha.9`.
 - Supported: every valid semantic version whose numeric major/minor
@@ -644,6 +645,6 @@ pnpm test:codex-compatibility # requires explicit SYNOD_EXPECTED_* environment v
 pnpm pack --pack-destination dist
 ```
 
-Source uses strict TypeScript 7 with explicit `.js` ESM specifiers and compiles into `dist`; published consumers execute JavaScript and do not need TypeScript. The v0.12.0 CI exercises the installed tarball on Node 22 and 24 on Ubuntu, plus Node 24 on macOS and Windows.
+Source uses strict TypeScript 7 with explicit `.js` ESM specifiers and compiles into `dist`; published consumers execute JavaScript and do not need TypeScript. The v0.12.1 CI exercises the installed tarball on Node 22 and 24 on Ubuntu, plus Node 24 on macOS and Windows.
 
 Every change lands through a pull request with required CI. Protected `vX.Y.Z` tags publish both npm and GitHub releases, with exact-commit and `latest` parity enforced before the workflow succeeds; see [RELEASING.md](RELEASING.md).
