@@ -300,6 +300,7 @@ function spawnRequest(): HostDelegationSpawnRequest {
 
 function authorizeRequest(ownerThread = "thread-from-appserver"): HostDelegationAuthorizeRequest {
   return {
+    phase: "activate",
     taskId: "T-HOST",
     directory: "/tmp/project",
     ownerThread,

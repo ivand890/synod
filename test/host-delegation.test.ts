@@ -11,6 +11,7 @@ import {
   startHostDelegation,
   startHostDelegationHandoff,
   type HostDelegationAdapter,
+  type HostDelegationAuthorizeRequest,
   type HostDelegationDependencies
 } from "../src/host-delegation.js";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
@@ -79,6 +80,8 @@ function dependencies({
     evidence: [],
     state: { checkpoint: {}, lastEvent: {} }
   }),
+  release,
+  revoke,
   heartbeat,
   clock = () => Date.parse("2026-08-15T00:00:00.000Z")
 }: {
@@ -87,6 +90,8 @@ function dependencies({
   expire?: (options: Record<string, unknown>) => Promise<unknown>;
   reservationValue?: TaskLeaseReservation;
   bind?: (options: { ownerThread?: string }) => Promise<unknown>;
+  release?: (options: Record<string, unknown>) => Promise<unknown>;
+  revoke?: (options: Record<string, unknown>) => Promise<unknown>;
   heartbeat?: (options: Record<string, unknown>) => Promise<unknown>;
   clock?: () => number;
 } = {}): HostDelegationDependencies {
@@ -97,6 +102,8 @@ function dependencies({
   if (bind) result.bind = bind as unknown as NonNullable<HostDelegationDependencies["bind"]>;
   if (cancel) result.cancel = cancel as unknown as NonNullable<HostDelegationDependencies["cancel"]>;
   if (expire) result.expire = expire as unknown as NonNullable<HostDelegationDependencies["expire"]>;
+  if (release) result.release = release as unknown as NonNullable<HostDelegationDependencies["release"]>;
+  if (revoke) result.revoke = revoke as unknown as NonNullable<HostDelegationDependencies["revoke"]>;
   if (heartbeat) result.heartbeat = heartbeat as unknown as NonNullable<HostDelegationDependencies["heartbeat"]>;
   return result;
 }
@@ -109,10 +116,10 @@ async function waitForCondition(predicate: () => boolean, timeoutMs = 1_000): Pr
   }
 }
 
-test("host delegation reserves, spawns read-only, authorizes, then binds the opaque owner", async () => {
+test("host delegation reserves, spawns read-only, preflights, binds, then activates the opaque owner", async () => {
   const calls: string[] = [];
   let spawnedRequest: any;
-  let authorizedRequest: any;
+  const authorizedRequests: any[] = [];
   const adapter: HostDelegationAdapter = {
     async spawn(request) {
       calls.push("spawn");
@@ -121,7 +128,7 @@ test("host delegation reserves, spawns read-only, authorizes, then binds the opa
     },
     async authorize(request) {
       calls.push("authorize");
-      authorizedRequest = request;
+      authorizedRequests.push(request);
       return { status: "authorized", receipt: "host-receipt" };
     }
   };
@@ -143,14 +150,20 @@ test("host delegation reserves, spawns read-only, authorizes, then binds the opa
     }
   });
 
-  assert.deepEqual(calls, ["reserve", "spawn", "authorize", "bind"]);
+  assert.deepEqual(calls, ["reserve", "spawn", "authorize", "bind", "authorize"]);
   assert.equal(spawnedRequest.writeAuthorized, false);
   assert.equal(spawnedRequest.readOnlyContract.writeAuthorized, false);
   assert.equal(result.ownerThread, "opaque-owner");
-  assert.equal(authorizedRequest.ownerThread, "opaque-owner");
-  assert.equal(authorizedRequest.writeAuthorized, true);
-  assert.equal(authorizedRequest.lease, undefined);
-  assert.equal(authorizedRequest.leaseFence, undefined);
+  assert.equal(authorizedRequests[0]?.phase, "preflight");
+  assert.equal(authorizedRequests[0]?.ownerThread, "opaque-owner");
+  assert.equal(authorizedRequests[0]?.writeAuthorized, false);
+  assert.equal(authorizedRequests[0]?.lease, undefined);
+  assert.equal(authorizedRequests[0]?.leaseFence, undefined);
+  assert.equal(authorizedRequests[1]?.phase, "activate");
+  assert.equal(authorizedRequests[1]?.writeAuthorized, true);
+  assert.equal(authorizedRequests[1]?.lease?.ownerThread, "opaque-owner");
+  assert.equal(authorizedRequests[1]?.leaseFence?.ownerThread, "opaque-owner");
+  assert.equal(result.preflightAuthorization?.status, "authorized");
   assert.equal(result.authorization.status, "authorized");
 });
 
@@ -329,9 +342,10 @@ test("missing owner fails closed and expires without binding", async () => {
 test("bind failure closes the spawned adapter before cancelling the reservation", async () => {
   let closed = 0;
   let cancelled = 0;
+  const requests: HostDelegationAuthorizeRequest[] = [];
   const adapter: HostDelegationAdapter = {
     async spawn() { return "opaque-owner"; },
-    async authorize() { return { status: "authorized" }; },
+    async authorize(request) { requests.push(request); return { status: "authorized" }; },
     async close() { closed += 1; }
   };
   await assert.rejects(
@@ -346,6 +360,9 @@ test("bind failure closes the spawned adapter before cancelling the reservation"
   );
   assert.equal(closed, 1);
   assert.equal(cancelled, 1);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]?.phase, "preflight");
+  assert.equal(requests[0]?.writeAuthorized, false);
 });
 
 test("authorization failure cancels the reservation and does not bind", async () => {
@@ -378,6 +395,45 @@ test("authorization failure cancels the reservation and does not bind", async ()
   assert.equal(cancelled, 1);
   assert.equal(closed, 1);
   assert.equal(bound, 0);
+});
+
+test("activation failure revokes the bound writer lease instead of leaving ACTIVE", async () => {
+  let authorizationCalls = 0;
+  let cancelled = 0;
+  let revoked: Record<string, unknown> | undefined;
+  let closed = 0;
+  const adapter: HostDelegationAdapter = {
+    async spawn() { return "opaque-owner"; },
+    async authorize(request) {
+      authorizationCalls += 1;
+      return request.phase === "preflight"
+        ? { status: "accepted" }
+        : { status: "failed", reason: "activation rejected" };
+    },
+    async close() { closed += 1; }
+  };
+
+  await assert.rejects(
+    startHostDelegation({ id: "T-HOST", adapter }, dependencies({
+      cancel: async () => { cancelled += 1; },
+      revoke: async options => { revoked = options; return {} as never; }
+    })),
+    error => {
+      const value = error as { code: string; details: { phase: string; cleanup: { status: string; action: string }; recovery: { status: string } } };
+      assert.equal(value.code, ERROR_CODES.HOST_AUTHORIZATION_FAILED);
+      assert.equal(value.details.phase, "activate");
+      assert.equal(value.details.cleanup.status, "complete");
+      assert.equal(value.details.cleanup.action, "revoke");
+      assert.equal(value.details.recovery.status, "activation-failed-lease-ended");
+      return true;
+    }
+  );
+
+  assert.equal(authorizationCalls, 2);
+  assert.equal(cancelled, 0);
+  assert.equal(closed, 1);
+  assert.equal(revoked?.leaseId, reservation.id);
+  assert.equal(revoked?.ownerThread, "opaque-owner");
 });
 
 test("authorization accepts only explicit positive structured receipts and does not bind", async () => {
@@ -637,11 +693,11 @@ test("Codex handoff reserves and complete binds the stored fence", async () => {
 });
 
 test("complete authorizes legacy role-less reservations as implementers", async () => {
-  let authorizedRequest: Record<string, unknown> | undefined;
+  const authorizedRequests: HostDelegationAuthorizeRequest[] = [];
   const adapter: HostDelegationAdapter = {
     async spawn() { return "unused"; },
     async authorize(request) {
-      authorizedRequest = request as unknown as Record<string, unknown>;
+      authorizedRequests.push(request);
       return { status: "authorized" };
     }
   };
@@ -666,9 +722,14 @@ test("complete authorizes legacy role-less reservations as implementers", async 
     })) as never
   });
 
-  assert.equal(authorizedRequest?.writeAuthorized, true);
-  assert.equal(authorizedRequest?.role, undefined);
-  assert.equal(authorizedRequest?.lease, undefined);
+  assert.equal(authorizedRequests[0]?.phase, "preflight");
+  assert.equal(authorizedRequests[0]?.writeAuthorized, false);
+  assert.equal(authorizedRequests[0]?.role, undefined);
+  assert.equal(authorizedRequests[0]?.lease, undefined);
+  assert.equal(authorizedRequests[1]?.phase, "activate");
+  assert.equal(authorizedRequests[1]?.writeAuthorized, true);
+  assert.equal(authorizedRequests[1]?.role, undefined);
+  assert.equal(authorizedRequests[1]?.lease?.ownerThread, "legacy-owner");
   assert.equal(completed.role, "implementer");
 });
 

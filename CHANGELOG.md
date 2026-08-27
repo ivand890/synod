@@ -8,9 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Host delegation withholds bind until `authorize` succeeds. An authorization
-  failure now cancels the reservation instead of leaving `ACTIVE` plus a
-  read-only thread.
+- Host delegation now uses a non-executing authorization preflight before bind
+  and grants worker activation only after the exact lease is active. Preflight
+  failure cancels the reservation, bind failure closes and cancels the owner,
+  and activation failure ends the bound lease instead of leaving `ACTIVE` plus
+  a read-only thread.
 
 ## [0.12.0] - 2026-08-23
 

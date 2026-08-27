@@ -1072,8 +1072,8 @@ function turnFenceFor(
 ): TurnFence {
   const directoryRoot = path.resolve(directory);
   const scopes = validatedScopes(request.lease?.scopes ?? request.reservation.scopes ?? []);
-  // Authorize runs before bind. Carry reservation (or bound lease, if present)
-  // scopes into the worker prompt so a stale spawn contract cannot widen the fence.
+  // Activation runs after bind. Carry the bound lease scopes into the worker
+  // prompt so a stale spawn contract cannot widen the fence.
   const boundContract = { ...contract, scopes };
   const writes = writeScopes(scopes);
   if (writes.length > 1) {
@@ -1341,6 +1341,47 @@ export function createCliAppServerAdapter(
         "authorize requires one unconsumed live Synod-owned App Server session from spawn."
       );
     }
+    if (request.ownerThread !== session.ownerThread) {
+      throw adapterError(
+        ERROR_CODES.HOST_OWNER_MISSING,
+        "authorize owner thread did not match the spawned App Server thread.",
+        {
+          expected: session.ownerThread,
+          observed: request.ownerThread,
+          constructedAppServer: true,
+          childLoss: "spawn-invoked-no-owner"
+        }
+      );
+    }
+    if (request.phase === "preflight") {
+      if (request.writeAuthorized !== false || request.lease !== undefined || request.leaseFence !== undefined) {
+        throw adapterError(
+          ERROR_CODES.HOST_ADAPTER_INVALID,
+          "preflight must remain non-executing and cannot carry active lease authority.",
+          { constructedAppServer: true }
+        );
+      }
+      if (writeScopes(request.reservation.scopes).length > 0) {
+        throw adapterError(
+          ERROR_CODES.APP_SERVER_UNSUPPORTED,
+          "CLI Path A cannot authorize workspace-write without an authoritative effective boundary before turn/start.",
+          {
+            phase: "before-turn/start",
+            authority: "effective-writable-boundary",
+            observed: false,
+            constructedAppServer: true
+          }
+        );
+      }
+      return { status: "accepted", phase: "preflight" };
+    }
+    if (request.phase !== "activate" || !request.lease || !request.leaseFence) {
+      throw adapterError(
+        ERROR_CODES.HOST_ADAPTER_INVALID,
+        "activation requires the exact bound lease and lease fence.",
+        { constructedAppServer: true }
+      );
+    }
     const completedNotifications: unknown[] = [];
     const settingsNotifications: unknown[] = [];
     const tokenUsageByThread = new Map<string, unknown>();
@@ -1351,18 +1392,6 @@ export function createCliAppServerAdapter(
     let retainForWait = false;
 
     try {
-      if (request.ownerThread !== session.ownerThread) {
-        throw adapterError(
-          ERROR_CODES.HOST_OWNER_MISSING,
-          "authorize owner thread did not match the spawned App Server thread.",
-          {
-            expected: session.ownerThread,
-            observed: request.ownerThread,
-            constructedAppServer: true,
-            childLoss: "spawn-invoked-no-owner"
-          }
-        );
-      }
       const fence = turnFenceFor(request, cwd, session.contract);
       if (fence.writerKey !== undefined) {
         throw adapterError(

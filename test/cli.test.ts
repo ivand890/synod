@@ -518,7 +518,7 @@ test("CLI delegate start on PATH CLI binds the App Server thread UUID before a t
     assert.equal(start.data.ownerThread, "thread-from-appserver");
     assert.equal(start.data.authorization.status, "authorized");
     assert.equal(observedProfile, "portable");
-    assert.deepEqual(methods, ["spawn", "authorize"]);
+    assert.deepEqual(methods, ["spawn", "authorize", "authorize"]);
 
     messages.length = 0;
     const waitStatus = await run(
