@@ -363,12 +363,17 @@ function nextOperation(data: Record<string, unknown>): unknown {
   const reservation = isRecord(data.reservation) ? data.reservation : undefined;
   if (action === "reserve" && reservation) {
     const fence = reservationFence(reservation);
+    const correctionEvidenceRequired = reservation.observer !== true
+      && (reservation.role === undefined || reservation.role === "implementer")
+      && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(String(task?.state ?? ""));
     return {
       operation: "delegate.complete",
       ...(taskId ? { taskId } : {}),
-      argv: taskId ? ["delegate", "complete", taskId, "--owner-thread"] : [],
+      argv: taskId
+        ? ["delegate", "complete", taskId, ...(correctionEvidenceRequired ? ["--evidence"] : []), "--owner-thread"]
+        : [],
       fence,
-      requirements: ["owner-thread"],
+      requirements: ["owner-thread", ...(correctionEvidenceRequired ? ["evidence"] : [])],
       alternatives: ["lease.cancel", "lease.expire"]
     };
   }
