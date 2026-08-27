@@ -157,6 +157,8 @@ export interface HostDelegationDependencies extends OrchestrationDependencies {
   cleanupTimeoutMs?: number;
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
+  setTimeout?: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
+  clearTimeout?: (timer: ReturnType<typeof setTimeout>) => void;
 }
 
 export interface HostNextCommand {
@@ -707,6 +709,57 @@ async function authorizeHostOwner(
   return authorization;
 }
 
+/** Keep post-bind activation inside the lease's safe cleanup window without changing its exact fence. */
+async function authorizeHostOwnerBeforeLeaseCleanupWindow(
+  adapter: HostDelegationAdapter,
+  request: HostDelegationAuthorizeRequest,
+  lease: TaskLease,
+  dependencies: HostDelegationDependencies
+): Promise<HostAuthorizationReceipt> {
+  const observed = dependencies.clock?.() ?? Date.now();
+  const now = observed instanceof Date ? observed.getTime() : typeof observed === "number" ? observed : Date.parse(observed);
+  const deadline = Date.parse(lease.expiresAt) - lease.heartbeatIntervalSeconds * 1_000;
+  const timeoutMs = Math.max(0, deadline - now);
+  const schedule = dependencies.setTimeout || setTimeout;
+  const unschedule = dependencies.clearTimeout || clearTimeout;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
+
+  return new Promise((resolve, reject) => {
+    timer = schedule(() => {
+      if (settled) return;
+      settled = true;
+      reject(new SynodError(
+        ERROR_CODES.HOST_AUTHORIZATION_FAILED,
+        "Host activation did not finish inside the active lease cleanup window.",
+        {
+          details: {
+            phase: "activate",
+            taskId: request.taskId,
+            ownerThread: request.ownerThread,
+            lease: leaseFence(lease),
+            activationDeadline: new Date(deadline).toISOString(),
+            expiresAt: lease.expiresAt
+          }
+        }
+      ));
+    }, Math.min(timeoutMs, 2_147_483_647));
+    Promise.resolve()
+      .then(() => authorizeHostOwner(adapter, request))
+      .then(authorization => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) unschedule(timer);
+        resolve(authorization);
+      }, error => {
+        if (settled) return;
+        settled = true;
+        if (timer !== undefined) unschedule(timer);
+        reject(error);
+      });
+  });
+}
+
 async function endBoundLeaseAfterFailure(
   error: unknown,
   role: DelegationRole,
@@ -993,7 +1046,7 @@ export async function startHostDelegation(
   let authorization: HostAuthorizationReceipt;
   try {
     authorization = withApprovalCommand(
-      await authorizeHostOwner(adapter, activationRequest),
+      await authorizeHostOwnerBeforeLeaseCleanupWindow(adapter, activationRequest, bound.lease, dependencies),
       id,
       ownerThread,
       approvalProposal(prepared.role, bound.task)
@@ -1462,7 +1515,7 @@ export async function completeHostDelegation(
     };
     try {
       authorization = withApprovalCommand(
-        await authorizeHostOwner(options.adapter, activationRequest),
+        await authorizeHostOwnerBeforeLeaseCleanupWindow(options.adapter, activationRequest, bound.lease, dependencies),
         id,
         ownerThread,
         approvalProposal(completeRole, bound.task)

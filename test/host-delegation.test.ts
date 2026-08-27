@@ -83,6 +83,8 @@ function dependencies({
   release,
   revoke,
   heartbeat,
+  setTimeout: scheduleTimeout,
+  clearTimeout: clearScheduledTimeout,
   clock = () => Date.parse("2026-08-15T00:00:00.000Z")
 }: {
   reserve?: HostDelegationDependencies["reserve"];
@@ -93,6 +95,8 @@ function dependencies({
   release?: (options: Record<string, unknown>) => Promise<unknown>;
   revoke?: (options: Record<string, unknown>) => Promise<unknown>;
   heartbeat?: (options: Record<string, unknown>) => Promise<unknown>;
+  setTimeout?: HostDelegationDependencies["setTimeout"];
+  clearTimeout?: HostDelegationDependencies["clearTimeout"];
   clock?: () => number;
 } = {}): HostDelegationDependencies {
   const result: HostDelegationDependencies = {
@@ -105,6 +109,8 @@ function dependencies({
   if (release) result.release = release as unknown as NonNullable<HostDelegationDependencies["release"]>;
   if (revoke) result.revoke = revoke as unknown as NonNullable<HostDelegationDependencies["revoke"]>;
   if (heartbeat) result.heartbeat = heartbeat as unknown as NonNullable<HostDelegationDependencies["heartbeat"]>;
+  if (scheduleTimeout) result.setTimeout = scheduleTimeout;
+  if (clearScheduledTimeout) result.clearTimeout = clearScheduledTimeout;
   return result;
 }
 
@@ -434,6 +440,44 @@ test("activation failure revokes the bound writer lease instead of leaving ACTIV
   assert.equal(closed, 1);
   assert.equal(revoked?.leaseId, reservation.id);
   assert.equal(revoked?.ownerThread, "opaque-owner");
+});
+
+test("activation is bounded before lease expiry so cleanup retains the exact fence", async () => {
+  let authorizationCalls = 0;
+  let activationDeadline: (() => void) | undefined;
+  let revoked: Record<string, unknown> | undefined;
+  let closed = 0;
+  const adapter: HostDelegationAdapter = {
+    async spawn() { return "opaque-owner"; },
+    async authorize(request) {
+      authorizationCalls += 1;
+      if (request.phase === "preflight") return { status: "accepted" };
+      return new Promise(() => {});
+    },
+    async close() { closed += 1; }
+  };
+
+  const delegated = startHostDelegation({ id: "T-HOST", adapter }, dependencies({
+    setTimeout: callback => {
+      activationDeadline = callback;
+      return 1 as unknown as ReturnType<typeof setTimeout>;
+    },
+    clearTimeout: () => {},
+    revoke: async options => { revoked = options; return {} as never; }
+  }));
+  await waitForCondition(() => authorizationCalls === 2 && activationDeadline !== undefined);
+  activationDeadline?.();
+
+  await assert.rejects(delegated, error => {
+    const value = error as { code: string; details: { phase: string; cleanup: { status: string; action: string } } };
+    assert.equal(value.code, ERROR_CODES.HOST_AUTHORIZATION_FAILED);
+    assert.equal(value.details.phase, "activate");
+    assert.equal(value.details.cleanup.status, "complete");
+    assert.equal(value.details.cleanup.action, "revoke");
+    return true;
+  });
+  assert.equal(closed, 1);
+  assert.equal(revoked?.expectedHeartbeatAt, lease().heartbeatAt);
 });
 
 test("authorization accepts only explicit positive structured receipts and does not bind", async () => {
