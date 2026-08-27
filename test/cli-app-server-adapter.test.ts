@@ -1123,11 +1123,13 @@ test("unclassified child-loss details fail closed", async () => {
 test("selectHostDelegationAdapter keeps injected and Desktop Path B, uses CLI App Server on CLI", () => {
   const injected: HostDelegationAdapter = {
     async spawn() { return "injected"; },
-    async authorize() { return { status: "authorized" }; }
+    async authorize() { return { status: "authorized" }; },
+    async close() {}
   };
   const cliAdapterValue: HostDelegationAdapter = {
     async spawn() { return "cli"; },
-    async authorize() { return { status: "authorized" }; }
+    async authorize() { return { status: "authorized" }; },
+    async close() {}
   };
   let created = 0;
   assert.deepEqual(

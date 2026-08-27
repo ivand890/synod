@@ -659,7 +659,8 @@ test("host-owned notLoaded observation stays incomplete without recursive host h
     async authorize() { return { status: "authorized" }; },
     async read() {
       return { statuses: [{ threadId: "opaque-owner", status: { type: "notLoaded" } }] };
-    }
+    },
+    async close() {}
   };
   const report = await waitForThreads({ threadIds: ["opaque-owner"], timeoutMs: 100 }, { hostAdapter: adapter });
   assert.equal(report.waitAuthority, "host");
@@ -733,7 +734,7 @@ test("resolver uses an injected adapter and fails closed for SYNOD_HOST_ADAPTER"
       adapter: {
         async spawn() { return "opaque-owner"; },
         async authorize() { return { status: "authorized" }; }
-      }
+      } as unknown as HostDelegationAdapter
     }),
     error => error instanceof Error && (error as Error & { code?: string }).code === ERROR_CODES.HOST_ADAPTER_INVALID
   );
@@ -1045,7 +1046,8 @@ test("PATH CLI delegate --wait does not treat App Server events as wait --task",
         return { ownerId: "thread-from-appserver" };
       },
       async authorize() { return { status: "authorized" }; },
-      async wait() { throw new Error("must not treat App Server events as wait --task"); }
+      async wait() { throw new Error("must not treat App Server events as wait --task"); },
+      async close() {}
     };
     const status = await run(["delegate", "start", "T-HOST", "--wait", "--cwd", directory, "--json"], {
       log: value => messages.push(String(value)),

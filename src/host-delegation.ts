@@ -121,6 +121,8 @@ export interface HostAuthorizationReceipt {
 export interface HostDelegationAdapter extends HostWaitAdapter {
   spawn(request: HostDelegationSpawnRequest): Promise<HostDelegationSpawnResult>;
   authorize(request: HostDelegationAuthorizeRequest): Promise<HostAuthorizationReceipt | unknown>;
+  /** Resolves only after pending spawn/activation operations can no longer grant authority. */
+  close(): Promise<unknown>;
 }
 
 export interface HostDelegationWaitOptions {
