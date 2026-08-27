@@ -134,8 +134,9 @@ test("handoff redacts reservation tokens from expire argv", async () => {
   const handoff = await generateHandoff({ directory }, { clock: () => "2026-08-18T00:02:00.000Z" });
   assert.equal(handoff.guidance.nextCommand?.operation, "lease.expire");
   assert.ok(Array.isArray(handoff.guidance.nextCommand?.argv));
-  assert.equal(handoff.guidance.nextCommand?.argv.includes("--reservation-token"), false);
+  assert.equal(handoff.guidance.nextCommand?.argv.includes("--reservation-token"), true);
   assert.equal(handoff.guidance.nextCommand?.argv.includes(reserved.reservation.token), false);
+  assert.deepEqual(handoff.guidance.nextCommand?.requirements, ["reservation-token", "reason"]);
   assert.equal(Object.hasOwn(handoff.guidance.nextCommand?.arguments || {}, "reservationToken"), false);
   assert.equal(Object.hasOwn(handoff.guidance.nextCommand?.fence || {}, "reservationToken"), false);
   assert.equal(JSON.stringify(handoff).includes(reserved.reservation.token), false);

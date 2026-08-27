@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { parseLeaseArgs } from "../src/command-options.js";
 import { ERROR_CODES } from "../src/errors.js";
 import {
   parseOutputViewArgs,
@@ -500,6 +501,10 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
         "lease", "expire", "T-EXPIRED-RESERVATION",
         "--reservation-token", "expired-reservation-token",
         "--lease-id", "expired-reservation-lease",
+        "--generation", "3",
+        "--revision", "2",
+        "--expected-reserved-at", "2026-08-14T00:00:00.000Z",
+        "--baseline-hash", "sha256:expired-baseline",
         "--reason"
       ],
       fence: { reservationToken: "expired-reservation-token", leaseId: "expired-reservation-lease" },
@@ -566,10 +571,16 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
     },
     argv: [
       "lease", "expire", "T-EXPIRED-RESERVATION",
+      "--reservation-token",
       "--lease-id", "expired-reservation-lease",
+      "--generation", "3",
+      "--revision", "2",
+      "--expected-reserved-at", "2026-08-14T00:00:00.000Z",
+      "--baseline-hash", "sha256:expired-baseline",
       "--reason"
     ],
-    fence: { leaseId: "expired-reservation-lease" }
+    fence: { leaseId: "expired-reservation-lease" },
+    requirements: ["reservation-token", "reason"]
   };
   assert.deepEqual(fencedTasks.map(task => task.actions), [
     [redactedExpire],
@@ -577,6 +588,18 @@ test("summary task-next preserves guidance gates and exact typed actions", () =>
     [fencedActions[2]]
   ]);
   assert.equal(JSON.stringify(fencedSummary).includes("expired-reservation-token"), false);
+  const filledExpireArgv = (redactedExpire.argv as string[]).flatMap(item => {
+    if (item === "--reservation-token") return [item, "supervisor-supplied-token"];
+    if (item === "--reason") return [item, "reservation expired"];
+    return [item];
+  });
+  const parsedExpire = parseLeaseArgs(filledExpireArgv.slice(1));
+  assert.equal("help" in parsedExpire, false);
+  if (!("help" in parsedExpire)) {
+    assert.equal(parsedExpire.action, "expire");
+    assert.equal("reservationToken" in parsedExpire ? parsedExpire.reservationToken : undefined, "supervisor-supplied-token");
+    assert.equal(parsedExpire.reason, "reservation expired");
+  }
 });
 
 test("summary wait selection retains task selector identity", () => {

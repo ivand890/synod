@@ -105,9 +105,12 @@ export function redactGuidanceAction<T>(action: T): T {
   if (isRecord(record.arguments)) delete record.arguments.reservationToken;
   if (Array.isArray(record.argv)) {
     const argv: unknown[] = [];
+    let reservationTokenRequired = false;
     for (let index = 0; index < record.argv.length; index += 1) {
       const item = record.argv[index];
       if (item === "--reservation-token") {
+        argv.push(item);
+        reservationTokenRequired = true;
         index += 1;
         continue;
       }
@@ -115,6 +118,14 @@ export function redactGuidanceAction<T>(action: T): T {
       if (item !== undefined) argv.push(item);
     }
     record.argv = argv;
+    if (reservationTokenRequired) {
+      const requirements = Array.isArray(record.requirements)
+        ? record.requirements.filter(item => typeof item === "string")
+        : [];
+      record.requirements = requirements.includes("reservation-token")
+        ? requirements
+        : ["reservation-token", ...requirements];
+    }
   }
   return redacted;
 }
