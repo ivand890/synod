@@ -35,6 +35,22 @@ test("invalid structured thread IDs fail before lease bind mutation", async () =
   );
 });
 
+test("host lease aliases must match with or without an optional thread ID", () => {
+  const lease = {
+    ...writerLeaseFixture(),
+    ownerThread: "host:owner",
+    waitAuthority: "host" as const,
+    hostHandle: "host:owner"
+  };
+  assert.equal(isTaskLease(lease), true);
+  assert.equal(isTaskLease({ ...lease, ownerThread: "host:other" }), false);
+  assert.equal(isTaskLease({
+    ...lease,
+    threadId: "11111111-2222-4333-8444-555555555555",
+    ownerThread: "host:other"
+  }), false);
+});
+
 test("lease reservations validate as a distinct pre-bind authority", () => {
   const reservation = {
     id: "00000000-0000-4000-8000-000000000001",

@@ -155,7 +155,7 @@ test("task-aware selection resolves exact active lease owners read-only and dedu
   assert.deepEqual(selection.threadIds, [apiThread, uiThread, "thread:reader"]);
 });
 
-test("legacy path-like lease owners normalize to opaque host handles without App Server construction", async () => {
+test("mixed legacy host handles stay separate while App Server IDs remain observable", async () => {
   const legacyPath = "/root/syn_price_sample_impl";
   const legacyCodexThreadId = "11111111-2222-4333-8444-555555555555";
   const canonical = { state: { tasks: {
@@ -193,20 +193,26 @@ test("legacy path-like lease owners normalize to opaque host handles without App
   assert.equal(selection.tasks[0]?.waitAuthority, "host");
   assert.equal(selection.tasks[0]?.hostHandle, legacyPath);
 
-  let constructed = 0;
+  let observedIds: string[] | undefined;
   const report = await waitForThreads({
     threadIds: selection.threadIds,
     hostWaitHandles: selection.hostWaitHandles,
     timeoutMs: 100
   }, {
     runtimeResolver: () => ({ surface: "cli", executable: "codex", resolved: true }),
-    clientFactory: () => {
-      constructed += 1;
-      throw new Error("legacy host handle must not construct App Server");
-    }
+    adapterFactory: () => ({
+      async start() {},
+      capabilities: () => ({ notification: false, cursor: false }),
+      async read(ids: string[]) {
+        observedIds = ids;
+        return { statuses: [{ threadId: legacyCodexThreadId, status: { type: "idle" as const } }] };
+      },
+      async close() {}
+    })
   });
-  assert.equal(constructed, 0);
-  assert.equal(report.waitAuthority, "host");
+  assert.deepEqual(observedIds, [legacyCodexThreadId]);
+  assert.equal(report.waitAuthority, "appServer");
+  assert.equal(report.incomplete, true);
   assert.equal(report.hostWaitRequired, true);
   assert.deepEqual(report.hostWaitHandles, [legacyPath]);
   assert.deepEqual(report.hostWaitThreadIds, []);
@@ -331,7 +337,11 @@ test("exact App Server lease thread IDs are preserved while host handles stay se
   assert.deepEqual(selection.hostWaitHandles, [hostHandle]);
 
   let observedIds: string[] | undefined;
-  const report = await waitForThreads({ threadIds: selection.threadIds, timeoutMs: 100 }, {
+  const report = await waitForThreads({
+    threadIds: selection.threadIds,
+    hostWaitHandles: selection.hostWaitHandles,
+    timeoutMs: 100
+  }, {
     adapterFactory: () => ({
       async start() {},
       capabilities: () => ({ notification: false, cursor: false }),
@@ -344,6 +354,9 @@ test("exact App Server lease thread IDs are preserved while host handles stay se
   });
   assert.deepEqual(observedIds, [threadId]);
   assert.deepEqual(report.threadIds, [threadId]);
+  assert.equal(report.incomplete, true);
+  assert.equal(report.hostWaitRequired, true);
+  assert.deepEqual(report.hostWaitHandles, [hostHandle]);
 
   let observedHostRequest: { threadIds: string[]; hostWaitHandles?: string[]; timeoutMs: number; pollIntervalMs: number } | undefined;
   await waitForThreads({ threadIds: [], hostWaitHandles: [hostHandle], timeoutMs: 100 }, {

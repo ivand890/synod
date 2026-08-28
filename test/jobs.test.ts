@@ -109,6 +109,16 @@ test("rejects unknown fields and malformed handle identity", () => {
   assert.throws(() => validateJobHandle({ ...handle, leaseGeneration: 0 }));
   assert.throws(() => validateJobHandle({ ...handle, waitAuthority: "desktop" }));
   assert.throws(() => validateJobHandle({ ...handle, threadId: "thread:not-a-uuid" }));
+  const threadHandle = {
+    schemaVersion: JOB_CONTRACT_SCHEMA_VERSION,
+    kind: "thread" as const,
+    jobId: "job:thread",
+    registeredAt: handle.registeredAt,
+    waitAuthority: "appServer" as const,
+    threadId: handle.threadId
+  };
+  assert.deepEqual(validateJobHandle(threadHandle), threadHandle);
+  assert.throws(() => validateJobHandle({ ...threadHandle, hostHandle: "opaque-host-handle" }));
   const hostHandle = {
     ...handle,
     waitAuthority: "host" as const,

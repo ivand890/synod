@@ -18,7 +18,7 @@ import {
   type LeaseReservationIdentityOptions,
   type ReserveLeaseOptions
 } from "./orchestration.js";
-import type { OrchestrationDependencies } from "./orchestration.js";
+import type { OrchestrationDependencies, OrchestrationTask } from "./orchestration.js";
 import {
   isLeaseWaitAuthority,
   isValidCodexThreadId,
@@ -263,6 +263,7 @@ function taskIdentifier(options: HostDelegationOptions): string {
 
 interface PreparedDelegationReservation {
   role: DelegationRole;
+  task?: OrchestrationTask;
   read: unknown[];
   write: unknown[];
   readTree: unknown[];
@@ -351,7 +352,7 @@ async function prepareDelegationReservation(
       details: { taskId: id, role, expectedPaths: expected, requestedPaths: requested }
     });
   }
-  return { role, read: requested, write: [], readTree: [], writeTree: [], observer: true };
+  return { role, task, read: requested, write: [], readTree: [], writeTree: [], observer: true };
 }
 
 function reservationFence(reservation: TaskLeaseReservation): HostDelegationReservationFence {
@@ -976,7 +977,7 @@ export async function startHostDelegation(
   const id = taskIdentifier(options);
   const prepared = await prepareDelegationReservation(id, options, dependencies);
   const refresh = dependencies.refreshBudget || refreshTaskBudget;
-  const budget = await refresh({
+  const budget = prepared.task && !prepared.task.budget ? undefined : await refresh({
     directory: options.directory || ".",
     id,
     ...(options.actor === undefined ? {} : { actor: options.actor })
@@ -1605,7 +1606,7 @@ export async function startHostDelegationHandoff(
   const id = taskIdentifier(options);
   const prepared = await prepareDelegationReservation(id, options, dependencies);
   const refresh = dependencies.refreshBudget || refreshTaskBudget;
-  const budget = await refresh({
+  const budget = prepared.task && !prepared.task.budget ? undefined : await refresh({
     directory: options.directory || ".",
     id,
     ...(options.actor === undefined ? {} : { actor: options.actor })

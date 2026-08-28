@@ -394,14 +394,17 @@ function parseHandleValue(value: unknown): JobHandle {
   if (base.kind === "thread" && base.waitAuthority === "canonical") {
     return fail("canonical authority requires task identity", "handle.waitAuthority");
   }
+  const hostHandle = item.hostHandle === undefined ? undefined : identifier(item.hostHandle, "handle.hostHandle");
+  if (base.waitAuthority !== "host" && hostHandle !== undefined) {
+    return fail("hostHandle requires host authority", "handle.hostHandle");
+  }
   if (itemKind === "thread") return {
     ...base,
     kind: "thread",
     waitAuthority: base.waitAuthority as RuntimeWaitAuthority,
-    ...(item.hostHandle === undefined ? {} : { hostHandle: identifier(item.hostHandle, "handle.hostHandle") })
+    ...(hostHandle === undefined ? {} : { hostHandle })
   };
   const ownerThread = identifier(item.ownerThread, "handle.ownerThread");
-  const hostHandle = item.hostHandle === undefined ? undefined : identifier(item.hostHandle, "handle.hostHandle");
   if (base.waitAuthority === "host") {
     if (!hostHandle) return fail("host authority requires hostHandle", "handle.hostHandle");
     if (ownerThread !== hostHandle) return fail("ownerThread must equal hostHandle", "handle.ownerThread");

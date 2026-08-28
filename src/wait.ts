@@ -935,7 +935,7 @@ export async function waitForThreads({
   // Host handles are not Codex thread IDs. If the host cannot perform the
   // direct wait, hand them back without constructing an App Server or calling
   // thread/read with an opaque handle.
-  if (handles.length > 0 && !host?.wait && !host?.observe) {
+  if (ids.length === 0 && handles.length > 0 && !host?.wait && !host?.observe) {
     const runtime = (dependencies.runtimeResolver || resolveCodexRuntime)();
     return hostHandoffReport(ids, runtime, startedAt, now, signal, handles);
   }
@@ -1117,13 +1117,13 @@ export async function waitForThreads({
       elapsedMs: Math.max(0, now() - startedAt),
       timedOut,
       aborted,
-      incomplete: timedOut || aborted || final.incomplete,
+      incomplete: timedOut || aborted || final.incomplete || handles.length > 0,
       approvalNeeded: final.approvalNeeded,
       userInputNeeded: final.userInputNeeded,
-      hostWaitRequired: hostWaitThreadIds.length > 0,
+      hostWaitRequired: hostWaitThreadIds.length > 0 || handles.length > 0,
       hostWaitThreadIds,
-      hostWaitHandles: [],
-      hostFallbackRequired: hostWaitThreadIds.length > 0,
+      hostWaitHandles: handles,
+      hostFallbackRequired: hostWaitThreadIds.length > 0 || handles.length > 0,
       hostFallbackThreadIds: [...hostWaitThreadIds],
       statuses,
       ...(childLoss ? { childLoss } : {}),
@@ -1132,7 +1132,11 @@ export async function waitForThreads({
       diagnostics: {
         ...(childLoss ? { childLoss } : {}),
         ...reportDiagnostics(lossCause, evidence),
-        ...(observedAuthority !== waitAuthority ? { waitAuthority: observedAuthority } : {})
+        ...(observedAuthority !== waitAuthority ? { waitAuthority: observedAuthority } : {}),
+        ...(handles.length > 0 ? {
+          hostWaitRequired: true,
+          hostWaitHandles: handles
+        } : {})
       }
     };
   } catch (error) {

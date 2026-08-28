@@ -271,7 +271,7 @@ export function isLeaseOwnerIdentity(value: {
   if (authority === "host") {
     if (allowUnbound && value.hostHandle === undefined && value.threadId === undefined) return true;
     if (!isNonEmptyIdentity(value.hostHandle)) return false;
-    return value.threadId === undefined || value.ownerThread === undefined || value.ownerThread === value.hostHandle;
+    return value.ownerThread === undefined || value.ownerThread === value.hostHandle;
   }
   if (value.hostHandle !== undefined) return false;
   if (allowUnbound && value.threadId === undefined) return true;
