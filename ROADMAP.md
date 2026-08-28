@@ -1,6 +1,6 @@
 # Synod Roadmap
 
-Last updated: 2026-08-27
+Last updated: 2026-08-28
 Current public release: `v0.12.2`
 Current source release: `v0.12.2`
 Last verified public release at this update: `v0.12.2`
