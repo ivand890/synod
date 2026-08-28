@@ -689,12 +689,12 @@ const handle = {
   jobId: 'job:package',
   registeredAt: '2026-08-14T17:01:00.000Z',
   waitAuthority: 'appServer',
-  threadId: 'thread:package',
+  threadId: '00000000-0000-4000-8000-000000000001',
   taskId: 'T-PACKAGE-JOB',
   taskRevision: 0,
   leaseId: 'lease:package',
   leaseGeneration: 1,
-  ownerThread: 'thread:package'
+  ownerThread: '00000000-0000-4000-8000-000000000001'
 };
 const event = (sequence, eventId, previousEventId, observedAt, sourceTimestamp, status, outcome) => ({
   schemaVersion: 1,

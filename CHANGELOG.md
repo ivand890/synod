@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-08-27
+
+### Added
+
+- Fresh initialization now probes the active Codex App Server before mutation,
+  selects `synod-5.6` when every required model and reasoning effort is
+  available, and otherwise falls back to `portable` with structured warning
+  provenance. Explicit and already-installed profiles remain authoritative.
+- Added a packaged, dated OpenAI API price-file example covering every exact
+  model in the built-in profiles while keeping cost estimation local,
+  caller-owned, opt-in, and free of implicit pricing-network requests.
+
+### Changed
+
+- Delegation identity now keeps opaque host handles, exact Codex thread UUIDs,
+  and host/App Server wait authority as separate fields across reservations,
+  leases, recovery, summaries, waits, and dormant job contracts. Legacy owners
+  remain readable, while malformed structured identities fail before mutation.
+- Task-aware waits and host delegation boundaries now refresh configured token
+  budgets automatically. A newly crossed hard limit records the canonical
+  observation and stops reservation, bind, activation, or wait dispatch until
+  the supervisor records an explicit bounded decision.
+- Extended the fail-closed Codex compatibility window to the tested `0.148.x`
+  and `0.150.x` minor lines, leaving the untested `0.149.x` gap unsupported and
+  exercising stable Codex `0.150.0` in CI.
+
 ## [0.12.1] - 2026-08-27
 
 ### Fixed
@@ -344,7 +370,8 @@ recovery (PR #39).
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.12.2...HEAD
+[0.12.2]: https://github.com/ivand890/synod/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/ivand890/synod/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/ivand890/synod/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/ivand890/synod/compare/v0.9.5...v0.11.0

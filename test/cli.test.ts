@@ -109,7 +109,7 @@ test("installed status bypasses malformed runtime metadata but not malformed can
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-status-runtime-invalid-test-"));
 
   try {
-    await initProject({ directory });
+    await initProject({ directory, profile: "portable" });
     const runtimePath = path.join(directory, ".synod/runtime.json");
     const statePath = path.join(directory, ".synod/state.json");
     await writeFile(runtimePath, "{ malformed\n", "utf8");
@@ -238,6 +238,136 @@ test("init emits versioned JSON for success and conflicts", async () => {
     assert.equal(conflict.ok, false);
     assert.equal(conflict.error.code, ERROR_CODES.INIT_CONFLICT);
     assert.deepEqual(conflict.error.details.paths, [".codex/agents/synod-reviewer.toml"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("fresh implicit init selects synod-5.6 from model capabilities before mutation", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-profile-preferred-test-"));
+  const { messages, output } = capturedOutput();
+  const efforts = ["low", "medium", "high", "xhigh", "max"];
+  const models = [
+    { id: "gpt-5.6-sol", supportedReasoningEfforts: efforts },
+    { id: "gpt-5.6-luna", supportedReasoningEfforts: efforts },
+    { id: "gpt-5.6-terra", supportedReasoningEfforts: efforts }
+  ];
+  let discoveredBeforeMutation = false;
+
+  try {
+    const status = await run(["init", directory, "--json"], output, {
+      doctorRuntimeResolver: () => ({ surface: "cli", executable: "codex", resolved: true }),
+      doctorClientFactory: () => ({
+        async start() {},
+        async probeCapabilities() {},
+        async listModels() {
+          await assert.rejects(readFile(path.join(directory, "AGENTS.md")), { code: "ENOENT" });
+          discoveredBeforeMutation = true;
+          return models;
+        },
+        async close() {},
+        getDiagnostics() {
+          return {
+            codexVersion: "0.149.0",
+            codexSurface: "cli",
+            appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
+          };
+        },
+        getWarnings() { return []; }
+      })
+    });
+    const envelope = JSON.parse(takeMessage(messages));
+    assert.equal(status, 0);
+    assert.equal(discoveredBeforeMutation, true);
+    assert.equal(envelope.data.profile, "synod-5.6");
+    assert.deepEqual(envelope.data.profileSelection, {
+      profile: "synod-5.6",
+      source: "capability",
+      reason: "model-compatible",
+      details: { modelCompatible: true, codexStatus: "unsupported", codexVersion: "0.149.0" }
+    });
+    assert.ok(!envelope.warnings.some((item: { code?: unknown }) => item.code === WARNING_CODES.PROFILE_FALLBACK));
+    assert.equal(JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8")).profile, "synod-5.6");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("fresh implicit init falls back to portable with structured provenance", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-profile-fallback-test-"));
+  const { messages, output } = capturedOutput();
+
+  try {
+    const status = await run(["init", directory, "--json"], output, {
+      doctorRuntimeResolver: () => ({ surface: "cli", executable: "codex", resolved: true }),
+      doctorClientFactory: () => ({
+        async start() {},
+        async probeCapabilities() {},
+        async listModels() { return []; },
+        async close() {},
+        getDiagnostics() {
+          return {
+            codexVersion: "0.149.0",
+            codexSurface: "cli",
+            appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
+          };
+        },
+        getWarnings() { return []; }
+      })
+    });
+    const envelope = JSON.parse(takeMessage(messages));
+    assert.equal(status, 0);
+    assert.equal(envelope.data.profile, "portable");
+    assert.equal(envelope.data.profileSelection.source, "fallback");
+    assert.equal(envelope.data.profileSelection.reason, "model-capabilities-unavailable");
+    const fallbackWarning = envelope.warnings.find((item: { code?: unknown }) => item.code === WARNING_CODES.PROFILE_FALLBACK);
+    assert.ok(fallbackWarning);
+    assert.deepEqual(fallbackWarning.details, {
+      preferredProfile: "synod-5.6",
+      fallbackProfile: "portable",
+      reason: "model-capabilities-unavailable",
+      modelCompatible: false,
+      missing: [
+        { role: "default_subagent", model: "gpt-5.6-terra", capability: "model" },
+        { role: "supervisor", model: "gpt-5.6-sol", capability: "model" },
+        { role: "implementer", model: "gpt-5.6-luna", capability: "model" },
+        { role: "explorer", model: "gpt-5.6-terra", capability: "model" },
+        { role: "reviewer", model: "gpt-5.6-terra", capability: "model" },
+        { role: "verifier", model: "gpt-5.6-terra", capability: "model" },
+        { role: "mechanical", model: "gpt-5.6-luna", capability: "model" }
+      ],
+      codexStatus: "unsupported",
+      codexVersion: "0.149.0"
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("explicit and existing profiles bypass capability selection", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-profile-explicit-test-"));
+  const { messages, output } = capturedOutput();
+  let doctorCalls = 0;
+  const failingDoctor = {
+    doctorRuntimeResolver: () => {
+      doctorCalls += 1;
+      throw new Error("doctor must not run");
+    }
+  };
+
+  try {
+    const explicitStatus = await run(["init", directory, "--profile", "portable", "--json"], output, failingDoctor);
+    const explicit = JSON.parse(takeMessage(messages));
+    assert.equal(explicitStatus, 0);
+    assert.equal(explicit.data.profile, "portable");
+    assert.equal(explicit.data.profileSelection.source, "explicit");
+
+    const existingStatus = await run(["init", directory, "--json"], output, failingDoctor);
+    const existing = JSON.parse(takeMessage(messages));
+    assert.equal(existingStatus, 0);
+    assert.equal(existing.data.profile, "portable");
+    assert.equal(existing.data.profileSelection.source, "existing");
+    assert.equal(doctorCalls, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -390,7 +520,7 @@ test("CLI Path A binds a read-only observer thread UUID before a turn", async ()
   const methods: string[] = [];
   let observedProfile: string | undefined;
   try {
-    await run(["init", directory], output);
+    await run(["init", directory, "--profile", "portable"], output);
     await mkdir(path.join(directory, "src"));
     initializeGitHead(directory);
     await run(["checkpoint", directory], output);
@@ -432,7 +562,7 @@ test("CLI Path A binds a read-only observer thread UUID before a turn", async ()
           return {
             async spawn() {
               methods.push("spawn");
-              return { ownerId: "thread-from-appserver", threadId: "thread-from-appserver" };
+              return { ownerId: "thread-from-appserver" };
             },
             async authorize() {
               methods.push("authorize");
@@ -1234,6 +1364,7 @@ test("status selectors bound task and checkpoint output in text and JSON", async
 test("lease commands expose durable owner, generation, and heartbeat state through JSON", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-lease-json-test-"));
   const { messages, output } = capturedOutput();
+  const ownerThread = "11111111-2222-4333-8444-555555555555";
   let ownerServer: ReturnType<typeof createServer> | undefined;
   let ownerEndpoint: ReturnType<typeof cliAppServerEndpointPaths> | undefined;
 
@@ -1255,7 +1386,7 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
 
     const acquireCode = await run([
       "lease", "acquire", "T-LEASE",
-      "--owner-thread", "thread:cli",
+      "--owner-thread", ownerThread,
       "--write-tree", "src/lease",
       "--ttl-seconds", "120",
       "--heartbeat-seconds", "30",
@@ -1266,7 +1397,7 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
     assert.equal(acquireCode, 0);
     assert.equal(acquired.command, "lease");
     assert.equal(acquired.data.action, "acquire");
-    assert.equal(acquired.data.lease.ownerThread, "thread:cli");
+    assert.equal(acquired.data.lease.ownerThread, ownerThread);
     assert.equal(acquired.data.lease.generation, 1);
     assert.deepEqual(acquired.data.lease.scopes, [{ path: "src/lease", access: "write", kind: "tree" }]);
 
@@ -1276,7 +1407,7 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
       "--generation", "1",
       "--revision", "0",
       "--expected-heartbeat-at", acquired.data.lease.heartbeatAt,
-      "--owner-thread", "thread:cli",
+      "--owner-thread", ownerThread,
       "--cwd", directory,
       "--json"
     ], output);
@@ -1289,11 +1420,11 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
     messages.length = 0;
     await mkdir(path.join(directory, "src/lease"), { recursive: true });
     await writeFile(path.join(directory, "src/lease/work.ts"), "abandoned\n");
-    ownerEndpoint = cliAppServerEndpointPaths(directory, "thread:cli");
+    ownerEndpoint = cliAppServerEndpointPaths(directory, ownerThread);
     await mkdir(path.dirname(ownerEndpoint.socketPath), { recursive: true, mode: 0o700 });
     await writeFile(ownerEndpoint.metadataPath, JSON.stringify({
       version: 1,
-      threadId: "thread:cli",
+      threadId: ownerThread,
       directory: path.resolve(directory),
       token: "thread-cli-token",
       expiresAt: Date.now() + 60_000,
@@ -1326,8 +1457,8 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
     const revoked = JSON.parse(takeMessage(messages));
     assert.equal(revokeCode, 0);
     assert.equal(revoked.data.task.recovery.status, "PENDING");
-    assert.deepEqual(revoked.data.ownerCleanup, { ownerThread: "thread:cli", status: "closed" });
-    assert.equal(findCliAppServerWaitClient(directory, "thread:cli"), undefined);
+    assert.deepEqual(revoked.data.ownerCleanup, { ownerThread, status: "closed" });
+    assert.equal(findCliAppServerWaitClient(directory, ownerThread), undefined);
 
     const recoverCode = await run([
       "lease", "recover", "T-LEASE",
@@ -1348,7 +1479,7 @@ test("lease commands expose durable owner, generation, and heartbeat state throu
     assert.equal(recovered.data.lease.generation, 2);
     assert.equal(recovered.data.task.recovery.status, "REASSIGNED");
     assert.match(recovered.data.task.recovery.proposal.bundleId, /^sha256:/);
-    assert.deepEqual(recovered.data.ownerCleanup, { ownerThread: "thread:cli", status: "not-found" });
+    assert.deepEqual(recovered.data.ownerCleanup, { ownerThread, status: "not-found" });
   } finally {
     if (ownerServer?.listening) {
       await new Promise<void>(resolve => ownerServer!.close(() => resolve()));
@@ -1831,6 +1962,7 @@ test("wait command returns an explicit Desktop host handoff without creating a c
 
 test("wait returns a revoke next command when an observed owner stops", async () => {
   const { messages, output } = capturedOutput();
+  const ownerThread = "11111111-2222-4333-8444-555555555555";
   const status = await run(["wait", "--task", "T-WAIT", "--json"], output, {
     waitSelectionResolver: async () => ({
       waitAuthority: "canonical" as const,
@@ -1842,10 +1974,10 @@ test("wait returns a revoke next command when an observed owner stops", async ()
         revision: 1,
         leaseId: "lease-dead",
         generation: 2,
-        ownerThread: "thread:dead",
+        ownerThread,
         expectedHeartbeatAt: "2026-08-18T00:00:00.000Z"
       }],
-      threadIds: ["thread:dead"]
+      threadIds: [ownerThread]
     }),
     waitRuntimeResolver: () => ({
       surface: "cli",
@@ -1857,14 +1989,14 @@ test("wait returns a revoke next command when an observed owner stops", async ()
       async start() {},
       capabilities: () => ({ notification: false, cursor: false }),
       async read() {
-        return { statuses: [{ threadId: "thread:dead", status: { type: "systemError" as const } }] };
+        return { statuses: [{ threadId: ownerThread, status: { type: "systemError" as const } }] };
       },
       getDiagnostics() {
         return {
           waitLoss: {
             cause: "child-terminated",
             authority: "appServer",
-            threadId: "thread:dead",
+            threadId: ownerThread,
             directEvidence: true
           }
         };

@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ERROR_CODES } from "../src/errors.js";
-import { evaluateProfile, getProfile, listProfiles, resolveDelegationProfile, resolveImplementerProfile } from "../src/profiles.js";
+import {
+  evaluateProfile,
+  FALLBACK_PROFILE,
+  getProfile,
+  listProfiles,
+  PORTABLE_PROFILE,
+  PREFERRED_PROFILE,
+  resolveDelegationProfile,
+  resolveImplementerProfile
+} from "../src/profiles.js";
 import type { ModelCapability } from "../src/profiles.js";
 
 function model(id: string, efforts: string[]): ModelCapability {
@@ -101,5 +110,17 @@ test("built-in profiles require the current supported Codex minor line", () => {
       { id: "synod-5.6", minimumCodexVersion: "0.148.0" },
       { id: "portable", minimumCodexVersion: "0.148.0" }
     ]
+  );
+});
+
+test("profile APIs expose portable only as an explicit fallback and require an ID", () => {
+  assert.equal(PREFERRED_PROFILE, "synod-5.6");
+  assert.equal(PORTABLE_PROFILE, "portable");
+  assert.equal(FALLBACK_PROFILE, PORTABLE_PROFILE);
+  assert.throws(
+    () => getProfile(undefined as unknown as string),
+    error => error instanceof Error
+      && "code" in error
+      && (error as Error & { code?: string }).code === ERROR_CODES.PROFILE_NOT_FOUND
   );
 });

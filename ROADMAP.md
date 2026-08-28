@@ -2,7 +2,7 @@
 
 Last updated: 2026-08-27
 Current public release: `v0.12.1`
-Current source release: `v0.12.1`
+Current source release: `v0.12.2`
 Last verified public release at this update: `v0.12.1`
 
 This roadmap converts the advisor loop's remaining operational risks into
@@ -17,8 +17,9 @@ in `release-closeouts/v0.12.0.json`, the `v0.11.0` evidence remains recorded
 in `release-closeouts/v0.11.0.json`, and the earlier `v0.9.5` evidence remains
 recorded in `release-closeouts/v0.9.5.json`.
 The signed tag and GitHub Release `isImmutable: true` provide the external
-release anchors; the root `RELEASE-CLOSEOUT.json` records the same closed and
-verified `v0.12.1` evidence.
+release anchors. The root `RELEASE-CLOSEOUT.json` is the prepared/pending
+source record for `v0.12.2`; public latest remains `v0.12.1` until tag
+publication and the protected post-publication closeout are verified.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
 workflow; the tag workflow validates only the strict prepared/pending source
 record before publication.
@@ -373,8 +374,10 @@ The release also ships bounded delegation and independent approval surfaces;
 future protocol holes return to `v0.12.x` patches rather than opening a new
 feature series.
 
-Status: delivered and publicly verified for the `v0.12.1` package and its
-bounded delegation/approval surfaces. The package includes a validated
+Status: `v0.12.2` is source-prepared while `v0.12.1` remains the last publicly
+verified package. The patch adds structured host/App Server identities,
+execution-boundary budget refresh, capability-driven profile selection, Codex
+0.150 compatibility, and a packaged price example to the validated
 concurrency policy and CLI App Server runner, zero-write observer
 leases, typed reviewer/verifier approval lanes, and bounded parallel delegation.
 The broader independent-proof milestone remains in progress, pending the

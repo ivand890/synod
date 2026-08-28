@@ -51,6 +51,58 @@ test.afterEach(async () => {
   }
 });
 
+test("fresh lifecycle initialization exposes its portable fallback when no selector is provided", async () => {
+  const directory = await temporaryProject();
+
+  const result = await initProject({ directory });
+
+  assert.equal(result.profile, "portable");
+  assert.equal(result.profileSelection?.source, "fallback");
+  assert.equal(result.profileSelection?.reason, "capability-selection-unavailable");
+  assert.equal(result.warnings[0]?.code, WARNING_CODES.PROFILE_FALLBACK);
+  assert.notDeepEqual(await readdir(directory), []);
+});
+
+test("profile selector failures happen before lifecycle mutation", async () => {
+  const directory = await temporaryProject();
+
+  await assert.rejects(
+    initProject({ directory }, {
+      profileSelector: () => {
+        throw new SynodError(ERROR_CODES.INTERNAL, "injected selector failure");
+      }
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.INTERNAL
+  );
+  assert.deepEqual(await readdir(directory), []);
+});
+
+test("lifecycle records an injected capability fallback with its warning provenance", async () => {
+  const directory = await temporaryProject();
+  const result = await initProject({ directory }, {
+    profileSelector: () => ({
+      profile: "portable",
+      source: "fallback",
+      reason: "model-capabilities-unavailable",
+      details: { preferredProfile: "synod-5.6" },
+      warning: {
+        code: WARNING_CODES.PROFILE_FALLBACK,
+        message: "Using portable after capability discovery.",
+        details: { preferredProfile: "synod-5.6", fallbackProfile: "portable" }
+      }
+    })
+  });
+
+  assert.equal(result.profile, "portable");
+  assert.deepEqual(result.profileSelection, {
+    profile: "portable",
+    source: "fallback",
+    reason: "model-capabilities-unavailable",
+    details: { preferredProfile: "synod-5.6" }
+  });
+  assert.equal(result.warnings[0]?.code, WARNING_CODES.PROFILE_FALLBACK);
+});
+
 test("initialization rolls back files and directories after a partial failure", async () => {
   const directory = await temporaryProject();
 

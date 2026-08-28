@@ -25,12 +25,12 @@ const handle: JobHandle = {
   jobId: "job:SYN-093-JOBS-003",
   registeredAt: "2026-08-14T17:01:00.000Z",
   waitAuthority: "appServer",
-  threadId: "thread:jobs",
+  threadId: "11111111-2222-4333-8444-555555555555",
   taskId: "SYN-093-JOBS-003",
   taskRevision: 0,
   leaseId: "lease:jobs",
   leaseGeneration: 1,
-  ownerThread: "thread:jobs"
+  ownerThread: "11111111-2222-4333-8444-555555555555"
 };
 
 const event = (
@@ -108,6 +108,15 @@ test("rejects unknown fields and malformed handle identity", () => {
   assert.throws(() => validateJobHandle({ ...handle, taskRevision: Number.MAX_SAFE_INTEGER + 1 }));
   assert.throws(() => validateJobHandle({ ...handle, leaseGeneration: 0 }));
   assert.throws(() => validateJobHandle({ ...handle, waitAuthority: "desktop" }));
+  assert.throws(() => validateJobHandle({ ...handle, threadId: "thread:not-a-uuid" }));
+  const hostHandle = {
+    ...handle,
+    waitAuthority: "host" as const,
+    threadId: "host-observed-thread",
+    ownerThread: "opaque-host-handle",
+    hostHandle: "opaque-host-handle"
+  };
+  assert.deepEqual(validateJobHandle(hostHandle), hostHandle);
   assert.throws(() => validateJobHandle({ ...handle, jobId: " job" }));
   assert.throws(() => validateJobHandle({ ...handle, registeredAt: "2026-08-14T17:01:00Z" }));
 });

@@ -10,11 +10,13 @@ export interface SemanticVersion {
 export type CompatibilityStatus = "unsupported" | "supported" | "known-good";
 
 export const CODEX_COMPATIBILITY = Object.freeze({
-  supported: ">=0.148.0-0 <0.149.0 (all 0.148.x variants)",
+  supported: ">=0.148.0-0 <0.149.0 || >=0.150.0-0 <0.151.0 (all 0.148.x and 0.150.x variants)",
   knownGood: Object.freeze(["0.148.0-alpha.9"]),
   minimum: "0.148.0",
-  maximumExclusive: "0.149.0"
+  maximumExclusive: "0.151.0"
 } as const);
+
+const SUPPORTED_CODEX_MINORS = new Set([148, 150]);
 
 export function parseVersion(value: unknown): SemanticVersion | undefined {
   if (typeof value !== "string") return undefined;
@@ -73,10 +75,10 @@ export function classifyCodexVersion(version: unknown): { status: CompatibilityS
   const parsed = parseVersion(version);
   if (!parsed) return { status: "unsupported", reason: "invalid_version" };
 
-  if (parsed.major < 0 || (parsed.major === 0 && parsed.minor < 148)) {
+  if (parsed.major === 0 && parsed.minor < 148) {
     return { status: "unsupported", reason: "below_supported_range" };
   }
-  if (parsed.major > 0 || parsed.minor > 148) {
+  if (parsed.major !== 0 || !SUPPORTED_CODEX_MINORS.has(parsed.minor)) {
     return { status: "unsupported", reason: "above_tested_range" };
   }
 

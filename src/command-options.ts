@@ -68,7 +68,10 @@ export interface DelegateCompleteCommandOptions {
   cwd: string;
   json: boolean;
   actor: string;
-  ownerThread: string;
+  ownerThread?: string;
+  hostHandle?: string;
+  threadId?: string;
+  waitAuthority?: "host" | "appServer";
   ttlSeconds?: number;
   heartbeatIntervalSeconds?: number;
   evidence: string[];
@@ -154,7 +157,10 @@ interface LeaseReservationFenceCommandOptions extends LeaseCommonOptions {
 
 export interface LeaseBindCommandOptions extends LeaseReservationFenceCommandOptions {
   action: "bind";
-  ownerThread: string;
+  ownerThread?: string;
+  hostHandle?: string;
+  threadId?: string;
+  waitAuthority?: "host" | "appServer";
   ttlSeconds?: number;
   heartbeatIntervalSeconds?: number;
   evidence: string[];
@@ -172,6 +178,9 @@ export interface LeaseMutationCommandOptions extends LeaseCommonOptions {
   revision: number;
   expectedHeartbeatAt: string;
   ownerThread?: string;
+  hostHandle?: string;
+  threadId?: string;
+  waitAuthority?: "host" | "appServer";
   reason?: string;
 }
 
@@ -183,6 +192,9 @@ export interface LeaseRecoverCommandOptions extends LeaseCommonOptions {
   expectedHeartbeatAt: string;
   decision: "resume" | "reassign" | "supersede";
   ownerThread?: string;
+  hostHandle?: string;
+  threadId?: string;
+  waitAuthority?: "host" | "appServer";
   reason: string;
 }
 
@@ -631,7 +643,7 @@ export function parseDelegateArgs(args: string[]): DelegateCommandOptions | Help
       if (!arg) continue;
       if (arg === "-h" || arg === "--help") return { help: true };
       if (arg === "--json") { options.json = true; continue; }
-      const valueOptions = ["--cwd", "--actor", "--owner-thread", "--evidence", "--ttl-seconds", "--heartbeat-seconds"];
+      const valueOptions = ["--cwd", "--actor", "--owner-thread", "--host-handle", "--thread-id", "--wait-authority", "--evidence", "--ttl-seconds", "--heartbeat-seconds"];
       if (!valueOptions.includes(arg)) {
         if (arg.startsWith("-")) throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Unknown option: ${arg}`, { details: { option: arg } });
         throw new SynodError(ERROR_CODES.UNEXPECTED_ARGUMENT, `Unexpected argument: ${arg}`, { details: { argument: arg } });
@@ -640,13 +652,21 @@ export function parseDelegateArgs(args: string[]): DelegateCommandOptions | Help
       if (arg === "--cwd") options.cwd = value;
       else if (arg === "--actor") options.actor = value;
       else if (arg === "--owner-thread") options.ownerThread = value;
+      else if (arg === "--host-handle") options.hostHandle = value;
+      else if (arg === "--thread-id") options.threadId = value;
+      else if (arg === "--wait-authority") {
+        if (value !== "host" && value !== "appServer") {
+          throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "Delegate complete --wait-authority must be host or appServer.");
+        }
+        options.waitAuthority = value;
+      }
       else if (arg === "--evidence") options.evidence.push(value);
       else if (arg === "--ttl-seconds") options.ttlSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
       else options.heartbeatIntervalSeconds = /^\d+$/.test(value) ? Number(value) : Number.NaN;
       index += 1;
     }
-    if (!options.ownerThread.trim()) {
-      throw new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Delegate complete requires --owner-thread.");
+    if (!(options.ownerThread || "").trim() && !options.hostHandle?.trim()) {
+      throw new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Delegate complete requires --host-handle or --owner-thread.");
     }
     for (const [name, value] of [
       ["--ttl-seconds", options.ttlSeconds],
@@ -656,7 +676,13 @@ export function parseDelegateArgs(args: string[]): DelegateCommandOptions | Help
         throw new SynodError(ERROR_CODES.LEASE_INVALID, `Delegate complete requires an integer value for ${name}.`, { details: { option: name } });
       }
     }
-    return { ...options, ownerThread: options.ownerThread.trim(), evidence: [...new Set(options.evidence)] };
+    return {
+      ...options,
+      ownerThread: (options.ownerThread || "").trim(),
+      ...(options.hostHandle === undefined ? {} : { hostHandle: options.hostHandle.trim() }),
+      ...(options.threadId === undefined ? {} : { threadId: options.threadId }),
+      evidence: [...new Set(options.evidence)]
+    };
   }
   const options: DelegateStartCommandOptions = {
     action: "start",
@@ -872,6 +898,9 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
   let json = false;
   let actor = "supervisor";
   let ownerThread: string | undefined;
+  let hostHandle: string | undefined;
+  let threadId: string | undefined;
+  let waitAuthority: "host" | "appServer" | undefined;
   let leaseId: string | undefined;
   let generation: number | undefined;
   let revision: number | undefined;
@@ -898,7 +927,7 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
       continue;
     }
     const valueOptions = [
-      "--cwd", "--actor", "--owner-thread", "--lease-id", "--generation", "--revision", "--expected-heartbeat-at",
+      "--cwd", "--actor", "--owner-thread", "--host-handle", "--thread-id", "--wait-authority", "--lease-id", "--generation", "--revision", "--expected-heartbeat-at",
       "--reservation-token", "--expected-reserved-at", "--baseline-hash", "--ttl-seconds", "--reservation-ttl-seconds",
       "--heartbeat-seconds", "--reason", "--decision", "--read", "--write", "--read-tree", "--write-tree", "--evidence"
     ];
@@ -910,6 +939,14 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     if (arg === "--cwd") directory = value;
     else if (arg === "--actor") actor = value;
     else if (arg === "--owner-thread") ownerThread = value;
+    else if (arg === "--host-handle") hostHandle = value;
+    else if (arg === "--thread-id") threadId = value;
+    else if (arg === "--wait-authority") {
+      if (value !== "host" && value !== "appServer") {
+        throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "Lease --wait-authority must be host or appServer.");
+      }
+      waitAuthority = value;
+    }
     else if (arg === "--lease-id") leaseId = value;
     else if (arg === "--expected-heartbeat-at") expectedHeartbeatAt = value;
     else if (arg === "--reservation-token") reservationToken = value;
@@ -956,7 +993,8 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     && baselineHash !== undefined;
   if (action === "acquire") {
     if (leaseId !== undefined || generation !== undefined || revision !== undefined || expectedHeartbeatAt !== undefined
-      || hasReservationFence || reservationTtlSeconds !== undefined || evidence.length > 0 || reason !== undefined || decision !== undefined) {
+      || hasReservationFence || reservationTtlSeconds !== undefined || evidence.length > 0 || reason !== undefined || decision !== undefined
+      || hostHandle !== undefined || threadId !== undefined || waitAuthority !== undefined) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Lease acquire received a mutation-only option.");
     }
     return {
@@ -976,7 +1014,7 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     };
   }
   if (action === "reserve") {
-    if (ownerThread !== undefined || leaseId !== undefined || generation !== undefined || revision !== undefined
+    if (ownerThread !== undefined || hostHandle !== undefined || threadId !== undefined || waitAuthority !== undefined || leaseId !== undefined || generation !== undefined || revision !== undefined
       || expectedHeartbeatAt !== undefined || hasReservationFence || ttlSeconds !== undefined
       || heartbeatIntervalSeconds !== undefined || evidence.length > 0 || reason !== undefined || decision !== undefined) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Lease reserve received a bind- or mutation-only option.");
@@ -1000,8 +1038,8 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
       || reservationTtlSeconds !== undefined || expectedHeartbeatAt !== undefined || reason !== undefined || decision !== undefined) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Lease bind received a reserve- or active-mutation-only option.");
     }
-    if (!reservationFenceComplete || !ownerThread) {
-      throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease bind requires the complete reservation fence and --owner-thread.");
+    if (!reservationFenceComplete || (!ownerThread && !hostHandle && !threadId)) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease bind requires the complete reservation fence and an owner identity (--host-handle or --owner-thread).");
     }
     return {
       action,
@@ -1015,7 +1053,10 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
       revision: revision!,
       expectedReservedAt: expectedReservedAt!,
       baselineHash: baselineHash!,
-      ownerThread,
+      ...(ownerThread === undefined ? {} : { ownerThread }),
+      ...(hostHandle === undefined ? {} : { hostHandle }),
+      ...(threadId === undefined ? {} : { threadId }),
+      ...(waitAuthority === undefined ? {} : { waitAuthority }),
       evidence,
       ...(ttlSeconds === undefined ? {} : { ttlSeconds }),
       ...(heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds })
@@ -1024,7 +1065,7 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
   if (action === "cancel" || (action === "expire" && hasReservationFence)) {
     if (read.length > 0 || write.length > 0 || readTree.length > 0 || writeTree.length > 0
       || reservationTtlSeconds !== undefined || ttlSeconds !== undefined || heartbeatIntervalSeconds !== undefined
-      || expectedHeartbeatAt !== undefined || ownerThread !== undefined || evidence.length > 0 || decision !== undefined) {
+      || expectedHeartbeatAt !== undefined || ownerThread !== undefined || hostHandle !== undefined || threadId !== undefined || waitAuthority !== undefined || evidence.length > 0 || decision !== undefined) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Lease ${action} reservation cleanup received an incompatible option.`);
     }
     if (!reservationFenceComplete || !reason) {
@@ -1047,7 +1088,8 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
   }
   if (read.length > 0 || write.length > 0 || readTree.length > 0 || writeTree.length > 0
     || ttlSeconds !== undefined || reservationTtlSeconds !== undefined || heartbeatIntervalSeconds !== undefined
-    || hasReservationFence || evidence.length > 0) {
+    || hasReservationFence || evidence.length > 0
+    || ((action === "expire" || action === "revoke") && (hostHandle !== undefined || threadId !== undefined || waitAuthority !== undefined))) {
     throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, `Lease ${action} received an acquire-only option.`);
   }
   if (action !== "recover" && decision !== undefined) {
@@ -1056,17 +1098,37 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
   if (leaseId === undefined || generation === undefined || revision === undefined || expectedHeartbeatAt === undefined) {
     throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease ${action} requires --lease-id, --generation, --revision, and --expected-heartbeat-at.`);
   }
-  if ((action === "heartbeat" || action === "release") && ownerThread === undefined) {
-    throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease ${action} requires --owner-thread.`);
+  if ((action === "heartbeat" || action === "release") && ownerThread === undefined && hostHandle === undefined && threadId === undefined) {
+    throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease ${action} requires an owner identity (--owner-thread or --host-handle).`);
   }
   if ((action === "expire" || action === "revoke") && reason === undefined) {
     throw new SynodError(ERROR_CODES.LEASE_INVALID, `Lease ${action} requires --reason.`);
   }
   if (action === "recover") {
     if (!decision || !reason) throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease recover requires --decision and --reason.");
-    if (decision === "reassign" && !ownerThread) throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease reassign recovery requires --owner-thread.");
-    if (decision === "supersede" && ownerThread) throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Lease supersede recovery does not accept --owner-thread.");
-    return { action, id, directory, json, actor, leaseId, generation, revision, expectedHeartbeatAt, decision, reason, ...(ownerThread ? { ownerThread } : {}) };
+    if (decision === "reassign" && !ownerThread && !hostHandle && !threadId) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease reassign recovery requires an owner identity (--owner-thread or --host-handle).");
+    }
+    if (decision === "supersede" && (ownerThread || hostHandle || threadId || waitAuthority)) {
+      throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Lease supersede recovery does not accept owner identity options.");
+    }
+    return {
+      action,
+      id,
+      directory,
+      json,
+      actor,
+      leaseId,
+      generation,
+      revision,
+      expectedHeartbeatAt,
+      decision,
+      reason,
+      ...(ownerThread ? { ownerThread } : {}),
+      ...(hostHandle ? { hostHandle } : {}),
+      ...(threadId ? { threadId } : {}),
+      ...(waitAuthority ? { waitAuthority } : {})
+    };
   }
   return {
     action: action as LeaseMutationCommandOptions["action"],
@@ -1075,6 +1137,9 @@ export function parseLeaseArgs(args: string[]): LeaseCommandOptions | HelpOption
     json,
     actor,
     ...(ownerThread === undefined ? {} : { ownerThread }),
+    ...(hostHandle === undefined ? {} : { hostHandle }),
+    ...(threadId === undefined ? {} : { threadId }),
+    ...(waitAuthority === undefined ? {} : { waitAuthority }),
     leaseId,
     generation,
     revision,

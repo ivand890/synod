@@ -13,7 +13,7 @@ Use the project skill `$synod-advisor` for multi-phase, delegated, or cross-sess
 - Run `__SYNOD_COMMAND__ task next --json --view summary` and execute the returned `argv`. Do not reconstruct fences from chat.
 - Writer `delegate start` without an injected adapter returns `hostSpawnRequired`. Call `spawn_agent` with the returned `readOnlyContract`, then `delegate complete --owner-thread <id>`. Desktop and Codex CLI writers stay host-owned. CLI Path A is read-only. On Desktop without an injected adapter, do not start a child App Server.
 - After `delegate complete` succeeds, call `followup_task` for the exact returned `ownerThread` with explicit bind authorization before `wait --task`. `followup_task` is required because it wakes an idle worker; a bind receipt or queued message does not prove the worker resumed.
-- If `hostWaitRequired` is true, call `wait_agent` only for the exact `hostWaitThreadIds`. Keep `hostFallbackRequired`/`hostFallbackThreadIds` as compatibility aliases.
+- If `hostWaitRequired` is true, call `wait_agent` only for the exact `hostWaitHandles` (or legacy `hostWaitThreadIds`) returned. Keep `hostFallbackRequired`/`hostFallbackThreadIds` as compatibility aliases.
 - Empty delivery cannot be submitted. If wait returns `lease.revoke`, apply it and then a typed recover (`resume`, `reassign`, or `supersede`). Recovery does not accept the proposal.
 - Submit delivery with `__SYNOD_COMMAND__ proposal submit <task-id> --evidence <ref> --json --view summary`. The proposal summary returns a typed exact-revision acceptance action. Acceptance and verification are separate.
 - Run `__SYNOD_COMMAND__ checkpoint` only after intentionally accepting the current Git/worktree state.

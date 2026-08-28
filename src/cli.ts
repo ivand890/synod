@@ -1,4 +1,4 @@
-import { errorEnvelope, successEnvelope } from "./contracts.js";
+import { errorEnvelope, successEnvelope, WARNING_CODES, warning } from "./contracts.js";
 import type { Warning } from "./contracts.js";
 import { parseBudgetArgs, parseBundleArgs, parseCheckpointArgs, parseDelegateArgs, parseHandoffArgs, parseLeaseArgs, parseLifecycleArgs, parseProposalArgs, parseRotationArgs, parseStatusArgs, parseTaskArgs, parseUsageArgs, parseWaitArgs, parseWorktreeArgs } from "./command-options.js";
 import type { HelpOptions, LifecycleOptions } from "./command-options.js";
@@ -8,9 +8,12 @@ import { ERROR_CODES, SynodError, asSynodError } from "./errors.js";
 import { checkProject, initProject, uninstallProject, upgradeProject } from "./lifecycle.js";
 import type { LifecycleDependencies, LifecycleResult } from "./lifecycle.js";
 import { packageVersion } from "./package.js";
-import { listProfiles } from "./profiles.js";
+import { FALLBACK_PROFILE, listProfiles, PREFERRED_PROFILE } from "./profiles.js";
+import type { ProfileSelection } from "./profiles.js";
 import { readManifest } from "./manifest.js";
 import { collectUsage, formatUsageReport } from "./usage.js";
+import { effectiveHardTotalTokens } from "./budgets.js";
+import { isLegacyHostOwnerThread, isValidCodexThreadId } from "./leases.js";
 import {
   addTask,
   acquireTaskLease,
@@ -26,6 +29,7 @@ import {
   recoverTaskLease,
   releaseTaskLease,
   reserveTaskLease,
+  refreshTaskBudget,
   revokeTaskLease,
   overrideCorrectionPolicy,
   splitTask,
@@ -124,7 +128,7 @@ Usage:
   synod rotation verify --recommendation <sequence|id> --session <new-root-thread-id> [--actor <id>] [--cwd <directory>] [--json]
   synod lease acquire <task-id> --owner-thread <thread-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
   synod lease reserve <task-id> [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--reservation-ttl-seconds <n>] [--cwd <directory>] [--json]
-  synod lease bind <task-id> --reservation-token <uuid> --lease-id <uuid> --generation <n> --revision <n> --expected-reserved-at <iso> --baseline-hash <sha256> --owner-thread <thread-id> [--evidence <reference>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
+  synod lease bind <task-id> --reservation-token <uuid> --lease-id <uuid> --generation <n> --revision <n> --expected-reserved-at <iso> --baseline-hash <sha256> (--owner-thread <id> | --host-handle <handle>) [--thread-id <thread-id>] [--evidence <reference>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
   synod lease cancel <task-id> --reservation-token <uuid> --lease-id <uuid> --generation <n> --revision <n> --expected-reserved-at <iso> --baseline-hash <sha256> --reason <text> [--cwd <directory>] [--json]
   synod lease heartbeat <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
   synod lease release <task-id> --lease-id <uuid> --generation <n> --revision <n> --expected-heartbeat-at <iso> --owner-thread <thread-id> [--cwd <directory>] [--json]
@@ -143,7 +147,7 @@ Usage:
   synod usage [--session <thread-id>] [--cwd <directory>] [--since-event <sequence|id> | --since-checkpoint | --task <task-id>] [--until-event <sequence|id>] [--price-file <path>] [--by-model] [--json]
   synod wait (--task <task-id> | --thread <thread-id>) [--task <task-id>] [--thread <thread-id>] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
   synod delegate start <task-id> [--role <implementer|reviewer|verifier>] [--write <path>] [--write-tree <path>] [--read <path>] [--read-tree <path>] [--actor <id>] [--evidence <reference>] [--reservation-ttl-seconds <n>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--wait] [--timeout-seconds <n>] [--poll-interval-ms <n>] [--cwd <directory>] [--json]
-  synod delegate complete <task-id> --owner-thread <thread-id> [--actor <id>] [--evidence <reference>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
+  synod delegate complete <task-id> (--owner-thread <id> | --host-handle <handle>) [--thread-id <thread-id>] [--wait-authority <host|appServer>] [--actor <id>] [--evidence <reference>] [--ttl-seconds <n>] [--heartbeat-seconds <n>] [--cwd <directory>] [--json]
   synod --help
   synod --version
 
@@ -196,7 +200,11 @@ Options:
   --revision  Require the exact task revision for a transition or correction.
   --evidence  Attach evidence to the exact task revision and current checkpoint.
   --owner-thread
-              Bind a writer lease to one opaque Codex thread ID.
+              Compatibility alias for the lease owner identity.
+  --host-handle
+              Bind host authority to the exact opaque handle returned by the host.
+  --thread-id
+              Preserve the exact Codex App Server thread ID independently of a host handle.
   --write     Add a repository-relative writer scope to a lease.
   --read      Add a repository-relative read scope to a lease;
               lease acquire/reserve with only read scopes acquires an
@@ -281,6 +289,90 @@ function isDoctorClient(value: unknown): value is DoctorClient {
     && typeof value.close === "function";
 }
 
+function doctorDependenciesForCli(dependencies: CliDependencies): DoctorDependencies {
+  const usageClientFactory = dependencies.clientFactory;
+  const doctorClientFactory = dependencies.doctorClientFactory || (usageClientFactory
+    ? options => {
+        const client: unknown = usageClientFactory(options);
+        if (!isDoctorClient(client)) {
+          throw new SynodError(ERROR_CODES.INTERNAL, "The shared CLI client factory did not return a doctor-compatible client.");
+        }
+        return client;
+      }
+    : undefined);
+  return {
+    ...(doctorClientFactory ? { clientFactory: doctorClientFactory } : {}),
+    ...(dependencies.doctorRuntimeResolver ? { runtimeResolver: dependencies.doctorRuntimeResolver } : {})
+  };
+}
+
+function profileFallbackSelection(
+  reason: string,
+  details: Record<string, unknown>
+): ProfileSelection {
+  return {
+    profile: FALLBACK_PROFILE,
+    source: "fallback",
+    reason,
+    details: {
+      preferredProfile: PREFERRED_PROFILE,
+      fallbackProfile: FALLBACK_PROFILE,
+      ...details
+    },
+    warning: warning(
+      WARNING_CODES.PROFILE_FALLBACK,
+      `Could not confirm ${PREFERRED_PROFILE} model capabilities; using ${FALLBACK_PROFILE}.`,
+      {
+        preferredProfile: PREFERRED_PROFILE,
+        fallbackProfile: FALLBACK_PROFILE,
+        reason,
+        ...details
+      }
+    )
+  };
+}
+
+function createInitProfileSelector(
+  dependencies: CliDependencies
+): NonNullable<LifecycleDependencies["profileSelector"]> {
+  return async ({ directory }) => {
+    try {
+      const result = await doctorProject(
+        { directory, project: false },
+        doctorDependenciesForCli(dependencies)
+      );
+      const preferred = result.profiles.find(item => item.id === PREFERRED_PROFILE);
+      if (preferred?.modelCompatible) {
+        return {
+          profile: PREFERRED_PROFILE,
+          source: "capability",
+          reason: "model-compatible",
+          details: {
+            modelCompatible: true,
+            codexStatus: result.codex.status,
+            codexVersion: result.codex.version
+          }
+        };
+      }
+      return profileFallbackSelection(
+        preferred ? "model-capabilities-unavailable" : "profile-capability-not-reported",
+        {
+          modelCompatible: preferred?.modelCompatible ?? null,
+          missing: preferred?.missing || [],
+          codexStatus: result.codex.status,
+          codexVersion: result.codex.version
+        }
+      );
+    } catch (error) {
+      const value = asSynodError(error);
+      return profileFallbackSelection("capability-discovery-failed", {
+        errorCode: value.code,
+        errorMessage: value.message
+      });
+    }
+  };
+}
+
 function printWarnings(warnings: Warning[] | undefined, output: CliOutput): void {
   for (const item of warnings || []) output.warn(`Warning [${item.code}]: ${item.message}`);
 }
@@ -297,7 +389,7 @@ function observedOwnerStopped(
   report: { incomplete: boolean; timedOut: boolean; aborted: boolean; hostWaitRequired: boolean; statuses: Array<{ threadId: string; status: { type: string } }> },
   ownerThread: string
 ): string | undefined {
-  if (report.hostWaitRequired || report.timedOut || report.aborted) return undefined;
+  if (report.hostWaitRequired || report.timedOut || report.aborted || !isValidCodexThreadId(ownerThread)) return undefined;
   const status = report.statuses.find(item => item.threadId === ownerThread)?.status.type;
   if (status === "systemError") return "worker-stopped";
   return undefined;
@@ -340,11 +432,108 @@ function waitRecoveryNextCommand(
   };
 }
 
+type WaitBudgetRefresh = NonNullable<Awaited<ReturnType<typeof refreshTaskBudget>>>;
+
+function waitBudgetData(refresh: WaitBudgetRefresh): Record<string, unknown> {
+  const budget = refresh.task.budget;
+  const observation = refresh.observation;
+  return {
+    taskId: refresh.task.id,
+    policyRevision: budget?.policy.revision,
+    thresholdStatus: budget?.thresholdStatus,
+    decisionRequired: budget?.thresholdStatus === "decision-required",
+    ...(budget ? { effectiveHardTotalTokens: effectiveHardTotalTokens(budget) } : {}),
+    ...(observation ? {
+      totalTokens: observation.totalTokens,
+      observation: observation.event
+    } : {}),
+    ...(refresh.report ? {
+      reportHash: refresh.report.reportHash,
+      warnings: refresh.report.warnings
+    } : {})
+  };
+}
+
+function waitBudgetDecisionNextCommand(refresh: WaitBudgetRefresh | undefined): Record<string, unknown> | undefined {
+  if (!refresh) return undefined;
+  const observation = refresh.observation;
+  if (refresh.task.budget?.thresholdStatus !== "decision-required" || !observation) return undefined;
+  return {
+    operation: "budget.decide",
+    argv: ["budget", "decide", refresh.task.id, "--observation", observation.event.id, "--decision"],
+    requirements: ["decision", "reason", "evidence"]
+  };
+}
+
+async function refreshWaitBudgets(
+  selection: WaitSelection,
+  directory: string,
+  dependencies: OrchestrationDependencies
+): Promise<WaitBudgetRefresh[]> {
+  const refreshes: WaitBudgetRefresh[] = [];
+  for (const selectedTask of selection.tasks) {
+    const refreshed = await refreshTaskBudget({ directory, id: selectedTask.taskId }, dependencies);
+    if (refreshed?.task.budget) refreshes.push(refreshed);
+  }
+  return refreshes;
+}
+
+function waitBudgetWarnings(refresh: WaitBudgetRefresh): Warning[] {
+  if (refresh.report) return refresh.report.warnings;
+  const status = refresh.task.budget?.thresholdStatus;
+  if (status === "decision-required") {
+    return [warning(WARNING_CODES.BUDGET_HARD_EXCEEDED, `Task ${refresh.task.id} reached its hard token budget.`)];
+  }
+  if (status === "soft-exceeded") {
+    return [warning(WARNING_CODES.BUDGET_SOFT_EXCEEDED, `Task ${refresh.task.id} reached its soft token budget.`)];
+  }
+  return [];
+}
+
+function budgetPreflightWaitReport(selection: WaitSelection): Awaited<ReturnType<typeof waitForThreads>> {
+  return {
+    mode: "poll",
+    waitAuthority: "canonical",
+    threadIds: selection.threadIds,
+    wakeCount: 0,
+    fallbackPollCount: 0,
+    elapsedMs: 0,
+    timedOut: false,
+    aborted: false,
+    incomplete: true,
+    approvalNeeded: false,
+    userInputNeeded: false,
+    hostWaitRequired: false,
+    hostWaitThreadIds: [],
+    hostWaitHandles: selection.hostWaitHandles || [],
+    hostFallbackRequired: false,
+    hostFallbackThreadIds: [],
+    statuses: [],
+    warnings: [],
+    diagnostics: {
+      waitAuthority: "canonical",
+      observation: "budget-preflight"
+    }
+  };
+}
+
 function canonicalOwnerThreadForDisposal(result: unknown, action: string, decision: unknown): string | undefined {
+  const appServerOwner = (lease: unknown): string | undefined => {
+    if (!isRecord(lease)) return undefined;
+    if (lease.waitAuthority === "host") return undefined;
+    if (lease.waitAuthority === "appServer") {
+      return typeof lease.threadId === "string" && isValidCodexThreadId(lease.threadId) ? lease.threadId : undefined;
+    }
+    return typeof lease.ownerThread === "string"
+      && lease.ownerThread.trim()
+      && !isLegacyHostOwnerThread(lease.ownerThread)
+      ? lease.ownerThread
+      : undefined;
+  };
   if (!isRecord(result)) return undefined;
   if (action === "revoke") {
     const lease = isRecord(result.lease) ? result.lease : undefined;
-    return typeof lease?.ownerThread === "string" && lease.ownerThread.trim() ? lease.ownerThread : undefined;
+    return appServerOwner(lease);
   }
   if (action !== "recover" || decision === "resume") return undefined;
   const task = isRecord(result.task) ? result.task : undefined;
@@ -354,9 +543,13 @@ function canonicalOwnerThreadForDisposal(result: unknown, action: string, decisi
       ? task.recovery
       : undefined;
   const recordedDecision = recovery && isRecord(recovery.decision) ? recovery.decision : undefined;
-  return typeof recordedDecision?.priorOwnerThread === "string" && recordedDecision.priorOwnerThread.trim()
-    ? recordedDecision.priorOwnerThread
-    : undefined;
+  const endedLease = recovery && isRecord(recovery.endedLease) ? recovery.endedLease : undefined;
+  return appServerOwner(endedLease)
+    || (endedLease && endedLease.waitAuthority === undefined
+      && typeof recordedDecision?.priorOwnerThread === "string" && recordedDecision.priorOwnerThread.trim()
+      && !isLegacyHostOwnerThread(recordedDecision.priorOwnerThread)
+      ? recordedDecision.priorOwnerThread
+      : undefined);
 }
 
 function printLifecycleResult(command: string, result: LifecycleResult, output: CliOutput): void {
@@ -583,7 +776,10 @@ export async function run(
           id: options.id,
           directory: options.cwd,
           actor: options.actor,
-          ownerThread: options.ownerThread,
+          ...(options.ownerThread === undefined ? {} : { ownerThread: options.ownerThread }),
+          ...(options.hostHandle === undefined ? {} : { hostHandle: options.hostHandle }),
+          ...(options.threadId === undefined ? {} : { threadId: options.threadId }),
+          ...(options.waitAuthority === undefined ? {} : { waitAuthority: options.waitAuthority }),
           evidence: options.evidence,
           ...(injectedAdapter ? { adapter: injectedAdapter } : {}),
           ...(options.ttlSeconds === undefined ? {} : { ttlSeconds: options.ttlSeconds }),
@@ -593,6 +789,9 @@ export async function run(
           action: "complete",
           task: result.task,
           ownerThread: result.ownerThread,
+          waitAuthority: result.waitAuthority,
+          ...(result.hostHandle === undefined ? {} : { hostHandle: result.hostHandle }),
+          ...(result.threadId === undefined ? {} : { threadId: result.threadId }),
           lease: result.lease,
           authorization: result.authorization,
           hostNotificationRequired: result.authorization.hostNotificationRequired === true,
@@ -704,6 +903,9 @@ export async function run(
         task: result.task,
         reservation: result.reservation,
         ownerThread: result.ownerThread,
+        waitAuthority: result.waitAuthority,
+        ...(result.hostHandle === undefined ? {} : { hostHandle: result.hostHandle }),
+        ...(result.threadId === undefined ? {} : { threadId: result.threadId }),
         lease: result.lease,
         authorization: result.authorization,
         ...(isRecord(result.authorization) && (result.authorization.proposalRequired === true || result.authorization.approvalRequired === true)
@@ -732,6 +934,29 @@ export async function run(
         taskIds: options.taskIds,
         threadIds: options.threadIds
       });
+      const preflightBudgets = await refreshWaitBudgets(selection, options.cwd, dependencies);
+      const preflightBudgetGate = preflightBudgets.find(item => item.task.budget?.thresholdStatus === "decision-required");
+      if (preflightBudgetGate) {
+        const report = budgetPreflightWaitReport(selection);
+        const budgetRecords = preflightBudgets.map(waitBudgetData);
+        const budgetWarnings = preflightBudgets.flatMap(waitBudgetWarnings);
+        const nextCommand = waitBudgetDecisionNextCommand(preflightBudgetGate);
+        if (options.json) {
+          const { warnings, diagnostics, ...data } = report;
+          printJsonEnvelope(successEnvelope("wait", {
+            selection,
+            ...data,
+            budgets: budgetRecords,
+            ...(budgetRecords.length === 1 ? { budget: budgetRecords[0] } : {}),
+            ...(nextCommand ? { nextCommand } : {})
+          }, { warnings: [...warnings, ...budgetWarnings], diagnostics }), output, view);
+        } else {
+          output.log(formatWaitReport(report, selection));
+          for (const budget of budgetRecords) output.log(`Budget ${String(budget.taskId)}: ${String(budget.thresholdStatus)}.`);
+          printWarnings([...report.warnings, ...budgetWarnings], output);
+        }
+        return 1;
+      }
       const resolvedHostAdapter = dependencies.hostWaitAdapter
         || resolveHostDelegationAdapter({
           ...(dependencies.hostDelegationAdapter ? { hostDelegationAdapter: dependencies.hostDelegationAdapter } : {}),
@@ -753,7 +978,7 @@ export async function run(
         || (retainedWaitClient ? () => retainedWaitClient : undefined);
       let report: Awaited<ReturnType<typeof waitForThreads>>;
       try {
-        report = await waitForThreads({ ...options, threadIds: selection.threadIds }, {
+        report = await waitForThreads({ ...options, threadIds: selection.threadIds, ...(selection.hostWaitHandles ? { hostWaitHandles: selection.hostWaitHandles } : {}) }, {
           ...(waitClientFactory ? { clientFactory: waitClientFactory } : {}),
           ...(dependencies.waitAdapterFactory ? { adapterFactory: dependencies.waitAdapterFactory } : {}),
           ...(resolvedHostAdapter ? { hostAdapter: resolvedHostAdapter } : {}),
@@ -763,19 +988,33 @@ export async function run(
         await retainedWaitClient?.close();
         throw error;
       }
-      const nextCommand = waitRecoveryNextCommand(selection, report);
+      // Refresh again after runtime observation so usage produced during the wait is durably recorded.
+      const budgetRefreshes = await refreshWaitBudgets(selection, options.cwd, dependencies);
+      const budgetRecords = budgetRefreshes.map(waitBudgetData);
+      const budgetGate = budgetRefreshes.find(item => item.task.budget?.thresholdStatus === "decision-required");
+      const nextCommand = waitBudgetDecisionNextCommand(budgetGate)
+        || waitRecoveryNextCommand(selection, report);
+      const budgetWarnings = budgetRefreshes.flatMap(waitBudgetWarnings);
+      const budgetDecisionRequired = budgetRefreshes.some(item => item.task.budget?.thresholdStatus === "decision-required");
       if (options.json) {
         const { warnings, diagnostics, ...data } = report;
         printJsonEnvelope(successEnvelope("wait", {
           selection,
           ...data,
+          ...(budgetRecords.length > 0 ? {
+            budgets: budgetRecords,
+            ...(budgetRecords.length === 1 ? { budget: budgetRecords[0] } : {})
+          } : {}),
           ...(nextCommand ? { nextCommand } : {})
-        }, { warnings, diagnostics }), output, view);
+        }, { warnings: [...warnings, ...budgetWarnings], diagnostics }), output, view);
       } else {
         output.log(formatWaitReport(report, selection));
-        printWarnings(report.warnings, output);
+        for (const budget of budgetRecords) {
+          output.log(`Budget ${String(budget.taskId)}: ${String(budget.thresholdStatus)}.`);
+        }
+        printWarnings([...report.warnings, ...budgetWarnings], output);
       }
-      return report.incomplete ? 1 : 0;
+      return report.incomplete || budgetDecisionRequired ? 1 : 0;
     }
 
     if (command === "status") {
@@ -1077,7 +1316,10 @@ export async function run(
     if (command === "init") {
       const options = parseLifecycleArgs(args.slice(1), { allowDryRun: true, allowForce: true, allowProfile: true });
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      return emitLifecycle("init", options, output, initProject, dependencies, view);
+      const initDependencies = options.profile === undefined
+        ? { ...dependencies, profileSelector: createInitProfileSelector(dependencies) }
+        : dependencies;
+      return emitLifecycle("init", options, output, initProject, initDependencies, view);
     }
     if (command === "upgrade") {
       const options = parseLifecycleArgs(args.slice(1), { allowDryRun: true, allowForce: true, allowProfile: true });
@@ -1112,20 +1354,7 @@ export async function run(
     if (command === "doctor") {
       const options = parseLifecycleArgs(args.slice(1));
       if (isHelpOptions(options)) { output.log(HELP); return 0; }
-      const usageClientFactory = dependencies.clientFactory;
-      const doctorClientFactory = dependencies.doctorClientFactory || (usageClientFactory
-        ? options => {
-            const client: unknown = usageClientFactory(options);
-            if (!isDoctorClient(client)) {
-              throw new SynodError(ERROR_CODES.INTERNAL, "The shared CLI client factory did not return a doctor-compatible client.");
-            }
-            return client;
-          }
-        : undefined);
-      const result = await doctorProject(options, {
-        ...(doctorClientFactory ? { clientFactory: doctorClientFactory } : {}),
-        ...(dependencies.doctorRuntimeResolver ? { runtimeResolver: dependencies.doctorRuntimeResolver } : {})
-      });
+      const result = await doctorProject(options, doctorDependenciesForCli(dependencies));
       if (options.json) {
         const { warnings, diagnostics, ...data } = result;
         const envelope = result.healthy

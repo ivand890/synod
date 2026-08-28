@@ -54,6 +54,9 @@ import {
   createLeaseBaselinesLedger,
   isCorrectionPolicy,
   isEndedTaskLease,
+  isLeaseWaitAuthority,
+  isLeaseOwnerIdentity,
+  isValidCodexThreadId,
   isLeaseBaselineReference,
   isPlannedLeaseScopes,
   isTaskLease,
@@ -75,6 +78,7 @@ import {
   type LeaseBaselinesLedger,
   type LeaseBaselineReference,
   type LeaseScope,
+  type LeaseWaitAuthority,
   type TaskLease,
   type TaskLeaseReservation,
   TASK_PROPOSAL_PATH_STATES_VERSION,
@@ -227,6 +231,9 @@ export interface TaskRecoveryRecord {
     priorGeneration: number;
     newOwnerThread?: string;
     newGeneration?: number;
+    waitAuthority?: LeaseWaitAuthority;
+    hostHandle?: string;
+    threadId?: string;
     reason: string;
   };
 }
@@ -594,16 +601,20 @@ function latestBudgetDecision(task: OrchestrationTask): TaskBudget["decisions"][
     && item.observation.id === observation.event.id);
 }
 
-function assertBudgetAllowsExecution(task: OrchestrationTask, action: string): void {
-  if (task.budget?.thresholdStatus !== "decision-required") return;
-  throw new SynodError(ERROR_CODES.BUDGET_DECISION_REQUIRED, `Task ${task.id} requires a supervisor decision before ${action}.`, {
+export function budgetDecisionRequiredError(task: Pick<OrchestrationTask, "id" | "budget">, action: string): SynodError {
+  return new SynodError(ERROR_CODES.BUDGET_DECISION_REQUIRED, `Task ${task.id} requires a supervisor decision before ${action}.`, {
     details: {
       taskId: task.id,
       action,
-      policyRevision: task.budget.policy.revision,
-      observation: task.budget.observations.at(-1)?.event
+      policyRevision: task.budget?.policy.revision,
+      observation: task.budget?.observations.at(-1)?.event
     }
   });
+}
+
+function assertBudgetAllowsExecution(task: OrchestrationTask, action: string): void {
+  if (task.budget?.thresholdStatus !== "decision-required") return;
+  throw budgetDecisionRequiredError(task, action);
 }
 
 function assertBudgetStructuralDecision(task: OrchestrationTask, action: "split" | "supersede"): void {
@@ -2571,6 +2582,9 @@ export function validateOrchestrationState(
     )) {
       invalidState(`Task ${id} lease does not match its canonical task generation, revision, or executor.`, { taskId: id });
     }
+    if (task.lease && !isLeaseOwnerIdentity(task.lease)) {
+      invalidState(`Task ${id} lease contains an invalid authority-specific owner identity.`, { taskId: id });
+    }
     if (task.leaseReservation && (
       task.leaseReservation.generation !== task.leaseGeneration
       || task.leaseReservation.taskId !== task.id
@@ -2578,6 +2592,9 @@ export function validateOrchestrationState(
       || task.leaseReservation.executor !== task.executor
     )) {
       invalidState(`Task ${id} lease reservation does not match its canonical task generation, revision, or executor.`, { taskId: id });
+    }
+    if (task.leaseReservation && !isLeaseOwnerIdentity(task.leaseReservation, { allowUnbound: true })) {
+      invalidState(`Task ${id} lease reservation contains an invalid authority-specific owner identity.`, { taskId: id });
     }
     if (task.lease && task.leaseReservation) {
       invalidState(`Task ${id} cannot hold both a lease reservation and an active writer lease.`, { taskId: id });
@@ -4330,6 +4347,37 @@ export async function observeTaskBudget({
   }, dependencies);
 }
 
+export interface TaskBudgetRefresh {
+  task: OrchestrationTask;
+  report?: TaskBudgetReport;
+  observation?: TaskBudgetObservation;
+}
+
+/** Refresh a task budget for an execution boundary and retain any hard gate. */
+export async function refreshTaskBudget({
+  directory = ".",
+  id,
+  actor = "supervisor"
+}: { directory?: string; id?: string; actor?: string } = {}, dependencies: OrchestrationDependencies = {}): Promise<TaskBudgetRefresh | undefined> {
+  const targetDirectory = path.resolve(directory);
+  const taskId = taskIdValue(id);
+  const canonical = await readOrchestration(targetDirectory);
+  const task = canonical.state.tasks[taskId];
+  if (!task) return undefined;
+  if (!task.budget) return { task };
+  if (task.budget.thresholdStatus === "decision-required") {
+    const observation = task.budget.observations
+      .filter(item => item.policyRevision === task.budget!.policy.revision)
+      .at(-1);
+    return {
+      task,
+      ...(observation ? { observation } : {})
+    };
+  }
+  const observed = await observeTaskBudget({ directory: targetDirectory, id: taskId, actor }, dependencies);
+  return { task: observed.task, observation: observed.observation, report: observed.report };
+}
+
 export interface DecideTaskBudgetOptions {
   directory?: string;
   id?: string;
@@ -5522,13 +5570,19 @@ function requireLeaseIdentity(
     generation,
     revision,
     expectedHeartbeatAt,
-    ownerThread
+    ownerThread,
+    waitAuthority,
+    hostHandle,
+    threadId
   }: {
     leaseId?: unknown;
     generation?: unknown;
     revision?: unknown;
     expectedHeartbeatAt?: unknown;
     ownerThread?: unknown;
+    waitAuthority?: unknown;
+    hostHandle?: unknown;
+    threadId?: unknown;
   },
   { requireOwner = true }: { requireOwner?: boolean } = {}
 ): TaskLease {
@@ -5557,10 +5611,35 @@ function requireLeaseIdentity(
       details: { taskId: task.id, expectedHeartbeatAt: lease.heartbeatAt, actualHeartbeatAt: expectedHeartbeatAt }
     });
   }
-  if (requireOwner && String(ownerThread || "").trim() !== lease.ownerThread) {
+  const compatibilityOwner = ownerThread ?? hostHandle ?? threadId;
+  if (requireOwner && String(compatibilityOwner || "").trim() !== lease.ownerThread) {
     throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${task.id} lease owner does not match.`, {
       details: { taskId: task.id, expectedOwnerThread: lease.ownerThread, actualOwnerThread: ownerThread }
     });
+  }
+  if (waitAuthority !== undefined || hostHandle !== undefined || threadId !== undefined) {
+    const effectiveAuthority = waitAuthority
+      ?? (hostHandle !== undefined ? "host" : threadId !== undefined ? "appServer" : undefined);
+    if (!isLeaseOwnerIdentity({
+      waitAuthority: effectiveAuthority,
+      ownerThread,
+      hostHandle,
+      threadId
+    })) {
+      throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "Lease owner identity is invalid.", {
+        details: { waitAuthority: effectiveAuthority, hostHandle, threadId, ownerThread }
+      });
+    }
+    if (effectiveAuthority !== lease.waitAuthority
+      || (hostHandle !== undefined && hostHandle !== lease.hostHandle)
+      || (threadId !== undefined && threadId !== lease.threadId)) {
+      throw new SynodError(ERROR_CODES.LEASE_STALE, `Task ${task.id} lease owner identity does not match.`, {
+        details: {
+          expected: { waitAuthority: lease.waitAuthority, hostHandle: lease.hostHandle, threadId: lease.threadId },
+          actual: { waitAuthority: effectiveAuthority, hostHandle, threadId }
+        }
+      });
+    }
   }
   return lease;
 }
@@ -5795,6 +5874,8 @@ export interface ReserveLeaseOptions {
   writeTree?: unknown[];
   observer?: boolean;
   role?: DelegationRole;
+  /** Runtime owner authority, persisted before a delegated owner is bound. */
+  waitAuthority?: LeaseWaitAuthority;
   reservationTtlSeconds?: number;
   actor?: string;
 }
@@ -5808,6 +5889,7 @@ export async function reserveTaskLease({
   writeTree = [],
   observer,
   role,
+  waitAuthority,
   reservationTtlSeconds = DEFAULT_LEASE_RESERVATION_TTL_SECONDS,
   actor = "supervisor"
 }: ReserveLeaseOptions = {}, dependencies: OrchestrationDependencies = {}) {
@@ -5828,6 +5910,11 @@ export async function reserveTaskLease({
   if (role !== undefined && !isDelegationRole(role)) {
     throw new SynodError(ERROR_CODES.DELEGATION_ROLE_INVALID, `Unsupported delegation role: ${String(role)}.`, {
       details: { role, allowed: ["implementer", "reviewer", "verifier"] }
+    });
+  }
+  if (waitAuthority !== undefined && !isLeaseWaitAuthority(waitAuthority)) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `Unsupported lease wait authority: ${String(waitAuthority)}.`, {
+      details: { waitAuthority, allowed: ["host", "appServer"] }
     });
   }
   const approvalRole = role === "reviewer" || role === "verifier" ? role : undefined;
@@ -5915,6 +6002,7 @@ export async function reserveTaskLease({
         worktreeFingerprint: context.snapshot.worktreeFingerprint,
         lastEvent: state.lastEvent
       },
+      ...(waitAuthority === undefined ? {} : { waitAuthority }),
       status: "RESERVED"
     };
     if (approvalRole) {
@@ -5955,7 +6043,8 @@ export async function reserveTaskLease({
           reservedAt: reservation.reservedAt,
           expiresAt: reservation.expiresAt,
           baselineHash: reservation.baseline.snapshotContentHash,
-          writeAuthorized: false
+          writeAuthorized: false,
+          ...(reservation.waitAuthority === undefined ? {} : { waitAuthority: reservation.waitAuthority })
         }
       },
       result: { task, reservation, writeAuthorized: false as const }
@@ -5973,11 +6062,96 @@ export interface LeaseReservationIdentityOptions {
   expectedReservedAt?: string;
   baselineHash?: string;
   ownerThread?: string;
+  /** Authority-specific owner identity. `ownerThread` remains a compatibility alias. */
+  waitAuthority?: LeaseWaitAuthority;
+  hostHandle?: string;
+  threadId?: string;
   ttlSeconds?: number;
   heartbeatIntervalSeconds?: number;
   evidence?: unknown[];
   actor?: string;
   reason?: string;
+}
+
+interface LeaseBindingIdentity {
+  ownerThread: string;
+  waitAuthority?: LeaseWaitAuthority;
+  hostHandle?: string;
+  threadId?: string;
+}
+
+/**
+ * Resolve a lease's structured owner identity before entering commitMutation.
+ * A reservation may establish the authority first; the owner is then bound
+ * without translating a host handle into a thread ID (or vice versa).
+ */
+function leaseBindingIdentity(
+  {
+    ownerThread,
+    waitAuthority,
+    hostHandle,
+    threadId
+  }: Pick<LeaseReservationIdentityOptions, "ownerThread" | "waitAuthority" | "hostHandle" | "threadId">,
+  inheritedAuthority?: LeaseWaitAuthority
+): LeaseBindingIdentity {
+  const owner = ownerThread === undefined ? "" : String(ownerThread).trim();
+  const host = hostHandle === undefined ? undefined : String(hostHandle).trim();
+  const thread = threadId === undefined ? undefined : String(threadId);
+  if (hostHandle !== undefined && (!host || host !== String(hostHandle).trim())) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "Host delegation requires a non-empty opaque host handle.", {
+      details: { hostHandle }
+    });
+  }
+  if (threadId !== undefined && !isValidCodexThreadId(thread)) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "Delegation threadId must be an exact Codex thread identifier, not a host label or filesystem path.", {
+      details: { threadId }
+    });
+  }
+  const authority = waitAuthority ?? inheritedAuthority
+    ?? (host !== undefined ? "host" : thread !== undefined ? "appServer" : undefined);
+  if (authority !== undefined && authority !== "host" && authority !== "appServer") {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `Unsupported lease wait authority: ${String(authority)}.`, {
+      details: { waitAuthority: authority, allowed: ["host", "appServer"] }
+    });
+  }
+  if (authority === "host") {
+    const handle = host || owner;
+    if (!handle) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "Binding a host reservation requires --host-handle (or the --owner-thread compatibility alias).");
+    }
+    if (owner && owner !== handle) {
+      throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "ownerThread must match the opaque hostHandle compatibility alias.", {
+        details: { ownerThread: owner, hostHandle: handle }
+      });
+    }
+    return {
+      ownerThread: handle,
+      waitAuthority: "host",
+      hostHandle: handle,
+      ...(thread === undefined ? {} : { threadId: thread })
+    };
+  }
+  if (authority === "appServer") {
+    if (host !== undefined) {
+      throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "App Server delegation cannot bind an opaque hostHandle.", {
+        details: { hostHandle: host }
+      });
+    }
+    const exactThread = thread || owner;
+    if (!exactThread || !isValidCodexThreadId(exactThread)) {
+      throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "App Server delegation requires an exact valid threadId.", {
+        details: { threadId: exactThread || null }
+      });
+    }
+    if (owner && owner !== exactThread) {
+      throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "ownerThread must match the exact App Server threadId compatibility alias.", {
+        details: { ownerThread: owner, threadId: exactThread }
+      });
+    }
+    return { ownerThread: exactThread, waitAuthority: "appServer", threadId: exactThread };
+  }
+  if (!owner) throw new SynodError(ERROR_CODES.LEASE_INVALID, "Binding a writer reservation requires --owner-thread or an authority-specific owner identity.");
+  return { ownerThread: owner };
 }
 
 export async function bindTaskLease({
@@ -5990,16 +6164,25 @@ export async function bindTaskLease({
   expectedReservedAt,
   baselineHash,
   ownerThread,
+  waitAuthority,
+  hostHandle,
+  threadId,
   ttlSeconds = DEFAULT_LEASE_TTL_SECONDS,
   heartbeatIntervalSeconds = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
   evidence = [],
   actor = "supervisor"
 }: LeaseReservationIdentityOptions = {}, dependencies: OrchestrationDependencies = {}) {
   const taskId = taskIdValue(id);
-  const owner = String(ownerThread || "").trim();
+  // Validate caller-supplied identity before commitMutation so malformed host
+  // labels cannot create a mutation or invoke a host-side preflight.
+  const suppliedIdentity = leaseBindingIdentity({
+    ...(ownerThread === undefined ? {} : { ownerThread }),
+    ...(waitAuthority === undefined ? {} : { waitAuthority }),
+    ...(hostHandle === undefined ? {} : { hostHandle }),
+    ...(threadId === undefined ? {} : { threadId })
+  });
   const ttl = parseLeaseDuration(ttlSeconds, "ttlSeconds");
   const heartbeat = parseLeaseDuration(heartbeatIntervalSeconds, "heartbeatIntervalSeconds");
-  if (!owner) throw new SynodError(ERROR_CODES.LEASE_INVALID, "Binding a writer reservation requires --owner-thread.");
   if (ttl < MIN_LEASE_TTL_SECONDS || ttl > MAX_LEASE_TTL_SECONDS || heartbeat >= ttl) {
     throw new SynodError(ERROR_CODES.LEASE_INVALID, "Lease heartbeat/expiry policy is outside the supported bounds.", {
       details: { ttlSeconds: ttl, heartbeatIntervalSeconds: heartbeat, minimumTtlSeconds: MIN_LEASE_TTL_SECONDS, maximumTtlSeconds: MAX_LEASE_TTL_SECONDS }
@@ -6013,6 +6196,12 @@ export async function bindTaskLease({
     const reservation = requireLeaseReservationIdentity(task, {
       reservationToken, leaseId, generation, revision, expectedReservedAt, baselineHash
     });
+    const identity = leaseBindingIdentity({
+      ...(ownerThread === undefined ? {} : { ownerThread }),
+      ...(waitAuthority === undefined ? {} : { waitAuthority }),
+      ...(hostHandle === undefined ? {} : { hostHandle }),
+      ...(threadId === undefined ? {} : { threadId })
+    }, reservation.waitAuthority);
     assertReservationEligible(task, reservation.role);
     const approvalRole = reservation.role === "reviewer" || reservation.role === "verifier" ? reservation.role : undefined;
     if (approvalRole && reservation.observer !== true) {
@@ -6062,7 +6251,7 @@ export async function bindTaskLease({
       generation: reservation.generation,
       taskId,
       taskRevision: reservation.taskRevision,
-      ownerThread: owner,
+      ownerThread: identity.ownerThread,
       executor: reservation.executor,
       ...(reservation.role === undefined ? {} : { role: reservation.role }),
       scopes: reservation.scopes,
@@ -6073,6 +6262,9 @@ export async function bindTaskLease({
       heartbeatIntervalSeconds: heartbeat,
       ttlSeconds: ttl,
       baseline: reservation.baseline,
+      ...(identity.waitAuthority === undefined ? {} : { waitAuthority: identity.waitAuthority }),
+      ...(identity.hostHandle === undefined ? {} : { hostHandle: identity.hostHandle }),
+      ...(identity.threadId === undefined ? {} : { threadId: identity.threadId }),
       status: "ACTIVE"
     };
     delete task.leaseReservation;
@@ -6093,6 +6285,9 @@ export async function bindTaskLease({
           leaseId: lease.id,
           generation: lease.generation,
           ownerThread: lease.ownerThread,
+          ...(lease.waitAuthority === undefined ? {} : { waitAuthority: lease.waitAuthority }),
+          ...(lease.hostHandle === undefined ? {} : { hostHandle: lease.hostHandle }),
+          ...(lease.threadId === undefined ? {} : { threadId: lease.threadId }),
           reservedAt: reservation.reservedAt,
           acquiredAt: lease.acquiredAt,
           baselineHash: lease.baseline.snapshotContentHash,
@@ -6173,6 +6368,9 @@ export interface AcquireLeaseOptions {
   directory?: string;
   id?: string;
   ownerThread?: string;
+  waitAuthority?: LeaseWaitAuthority;
+  hostHandle?: string;
+  threadId?: string;
   read?: unknown[];
   write?: unknown[];
   readTree?: unknown[];
@@ -6187,6 +6385,9 @@ export async function acquireTaskLease({
   directory = ".",
   id,
   ownerThread,
+  waitAuthority,
+  hostHandle,
+  threadId,
   read = [],
   write = [],
   readTree = [],
@@ -6197,10 +6398,14 @@ export async function acquireTaskLease({
   actor = "supervisor"
 }: AcquireLeaseOptions = {}, dependencies: OrchestrationDependencies = {}) {
   const taskId = taskIdValue(id);
-  const owner = String(ownerThread || "").trim();
+  const identity = leaseBindingIdentity({
+    ...(ownerThread === undefined ? {} : { ownerThread }),
+    ...(waitAuthority === undefined ? {} : { waitAuthority }),
+    ...(hostHandle === undefined ? {} : { hostHandle }),
+    ...(threadId === undefined ? {} : { threadId })
+  });
   const ttl = parseLeaseDuration(ttlSeconds, "ttlSeconds");
   const heartbeat = parseLeaseDuration(heartbeatIntervalSeconds, "heartbeatIntervalSeconds");
-  if (!owner) throw new SynodError(ERROR_CODES.LEASE_INVALID, "A writer lease requires --owner-thread.");
   if (observer !== undefined && observer !== true) {
     throw new SynodError(ERROR_CODES.LEASE_INVALID, "Observer mode must be requested with a true observer flag.");
   }
@@ -6322,8 +6527,11 @@ export async function acquireTaskLease({
       generation: task.leaseGeneration,
       taskId,
       taskRevision: task.revision,
-      ownerThread: owner,
+      ownerThread: identity.ownerThread,
       executor: task.executor,
+      ...(identity.waitAuthority === undefined ? {} : { waitAuthority: identity.waitAuthority }),
+      ...(identity.hostHandle === undefined ? {} : { hostHandle: identity.hostHandle }),
+      ...(identity.threadId === undefined ? {} : { threadId: identity.threadId }),
       scopes,
       ...(observerRequested ? { observer: true as const } : {}),
       acquiredAt: context.timestamp,
@@ -6382,6 +6590,9 @@ export interface LeaseIdentityOptions {
   revision?: number;
   expectedHeartbeatAt?: string;
   ownerThread?: string;
+  waitAuthority?: LeaseWaitAuthority;
+  hostHandle?: string;
+  threadId?: string;
   actor?: string;
   reason?: string;
 }
@@ -6394,6 +6605,9 @@ export async function heartbeatTaskLease({
   revision,
   expectedHeartbeatAt,
   ownerThread,
+  waitAuthority,
+  hostHandle,
+  threadId,
   actor = "supervisor"
 }: LeaseIdentityOptions = {}, dependencies: OrchestrationDependencies = {}) {
   const taskId = taskIdValue(id);
@@ -6401,7 +6615,16 @@ export async function heartbeatTaskLease({
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
     assertBudgetAllowsExecution(task, "writer lease heartbeat");
-    const lease = requireLeaseIdentity(task, { leaseId, generation, revision, expectedHeartbeatAt, ownerThread });
+    const lease = requireLeaseIdentity(task, {
+      leaseId,
+      generation,
+      revision,
+      expectedHeartbeatAt,
+      ownerThread,
+      waitAuthority,
+      hostHandle,
+      threadId
+    });
     if (Date.parse(context.timestamp) >= Date.parse(lease.expiresAt)) {
       throw new SynodError(ERROR_CODES.LEASE_STALE, "The writer lease has expired and cannot be renewed by its former owner.", {
         details: { taskId, expiresAt: lease.expiresAt, observedAt: context.timestamp }
@@ -6430,13 +6653,25 @@ export async function releaseTaskLease({
   revision,
   expectedHeartbeatAt,
   ownerThread,
+  waitAuthority,
+  hostHandle,
+  threadId,
   actor = "supervisor"
 }: LeaseIdentityOptions = {}, dependencies: OrchestrationDependencies = {}) {
   const taskId = taskIdValue(id);
   return commitMutation(path.resolve(directory), "lease.released", { actor, taskId }, (state, context) => {
     const task = state.tasks[taskId];
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
-    const lease = requireLeaseIdentity(task, { leaseId, generation, revision, expectedHeartbeatAt, ownerThread });
+    const lease = requireLeaseIdentity(task, {
+      leaseId,
+      generation,
+      revision,
+      expectedHeartbeatAt,
+      ownerThread,
+      waitAuthority,
+      hostHandle,
+      threadId
+    });
     if (Date.parse(context.timestamp) >= Date.parse(lease.expiresAt)) {
       throw new SynodError(ERROR_CODES.LEASE_STALE, "The writer lease has expired and must be ended by the supervisor.", {
         details: { taskId, expiresAt: lease.expiresAt, observedAt: context.timestamp }
@@ -6534,6 +6769,9 @@ export async function recoverTaskLease({
   revision,
   expectedHeartbeatAt,
   ownerThread,
+  waitAuthority,
+  hostHandle,
+  threadId,
   actor = "supervisor",
   reason,
   decision
@@ -6582,12 +6820,34 @@ export async function recoverTaskLease({
       });
     }
     const nextOwner = action === "resume" ? ended.ownerThread : requestedOwner;
+    const nextIdentity = action === "resume" || action === "reassign"
+      ? leaseBindingIdentity({
+          ownerThread: nextOwner,
+          ...(waitAuthority === undefined ? {} : { waitAuthority }),
+          ...(hostHandle === undefined ? {} : { hostHandle }),
+          ...(threadId === undefined ? {} : { threadId })
+        }, ended.waitAuthority)
+      : undefined;
+    if (nextIdentity && action === "resume" && nextIdentity.ownerThread !== ended.ownerThread) {
+      throw new SynodError(ERROR_CODES.LEASE_INVALID, "Resume must retain the abandoned lease owner identity.", {
+        details: {
+          taskId,
+          expected: {
+            ownerThread: ended.ownerThread,
+            waitAuthority: ended.waitAuthority,
+            hostHandle: ended.hostHandle,
+            threadId: ended.threadId
+          },
+          actual: nextIdentity
+        }
+      });
+    }
     if (action === "resume" && requestedOwner && requestedOwner !== ended.ownerThread) {
       throw new SynodError(ERROR_CODES.LEASE_INVALID, "Resume must retain the abandoned lease owner thread.", {
         details: { taskId, expectedOwnerThread: ended.ownerThread, actualOwnerThread: requestedOwner }
       });
     }
-    if (action === "reassign" && (!nextOwner || nextOwner === ended.ownerThread)) {
+    if (action === "reassign" && (!nextIdentity?.ownerThread || nextIdentity.ownerThread === ended.ownerThread)) {
       throw new SynodError(ERROR_CODES.LEASE_INVALID, "Reassignment requires a different --owner-thread.", {
         details: { taskId, priorOwnerThread: ended.ownerThread }
       });
@@ -6627,7 +6887,7 @@ export async function recoverTaskLease({
         generation: task.leaseGeneration,
         taskId,
         taskRevision: task.revision,
-        ownerThread: nextOwner,
+        ownerThread: nextIdentity?.ownerThread || nextOwner,
         executor: task.executor,
         scopes: ended.scopes,
         acquiredAt: context.timestamp,
@@ -6635,6 +6895,9 @@ export async function recoverTaskLease({
         expiresAt: leaseDeadline(context.timestamp, ended.ttlSeconds),
         heartbeatIntervalSeconds: ended.heartbeatIntervalSeconds,
         ttlSeconds: ended.ttlSeconds,
+        ...(nextIdentity?.waitAuthority === undefined ? {} : { waitAuthority: nextIdentity.waitAuthority }),
+        ...(nextIdentity?.hostHandle === undefined ? {} : { hostHandle: nextIdentity.hostHandle }),
+        ...(nextIdentity?.threadId === undefined ? {} : { threadId: nextIdentity.threadId }),
         baseline: {
           path: LEASE_BASELINES_PATH,
           snapshotContentHash: context.snapshot.contentHash,
@@ -6671,6 +6934,9 @@ export async function recoverTaskLease({
       priorOwnerThread: ended.ownerThread,
       priorGeneration: ended.generation,
       ...(nextLease ? { newOwnerThread: nextLease.ownerThread, newGeneration: nextLease.generation } : {}),
+      ...(nextLease?.waitAuthority === undefined ? {} : { waitAuthority: nextLease.waitAuthority }),
+      ...(nextLease?.hostHandle === undefined ? {} : { hostHandle: nextLease.hostHandle }),
+      ...(nextLease?.threadId === undefined ? {} : { threadId: nextLease.threadId }),
       reason: explanation
     };
     task.updatedAt = context.timestamp;
@@ -6688,6 +6954,9 @@ export async function recoverTaskLease({
           proposal: { path: sealed.proposal.path, bundleId: sealed.proposal.bundleId },
           foreignPaths: sealed.foreign.map(item => item.path),
           ...(nextLease ? { newOwnerThread: nextLease.ownerThread, newGeneration: nextLease.generation } : {}),
+          ...(nextLease?.waitAuthority === undefined ? {} : { waitAuthority: nextLease.waitAuthority }),
+          ...(nextLease?.hostHandle === undefined ? {} : { hostHandle: nextLease.hostHandle }),
+          ...(nextLease?.threadId === undefined ? {} : { threadId: nextLease.threadId }),
           reason: explanation
         }
       },

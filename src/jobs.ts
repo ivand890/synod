@@ -1,4 +1,5 @@
 import type { ThreadStatus, WaitAuthority } from "./wait.js";
+import { isValidCodexThreadId } from "./leases.js";
 
 /** The first (and currently only) durable job-contract schema. */
 export const JOB_CONTRACT_SCHEMA_VERSION = 1 as const;
@@ -30,6 +31,7 @@ export interface ThreadJobHandle {
   registeredAt: string;
   waitAuthority: RuntimeWaitAuthority;
   threadId: string;
+  hostHandle?: string;
 }
 
 export interface TaskJobHandle {
@@ -44,6 +46,7 @@ export interface TaskJobHandle {
   leaseId: string;
   leaseGeneration: number;
   ownerThread: string;
+  hostHandle?: string;
 }
 
 export type JobHandle = ThreadJobHandle | TaskJobHandle;
@@ -85,6 +88,7 @@ interface JobEventIdentity {
   jobId: string;
   kind: JobKind;
   threadId: string;
+  hostHandle?: string;
 }
 
 interface ThreadJobEventIdentity extends JobEventIdentity {
@@ -222,13 +226,13 @@ function jsonArray(value: unknown, path: string): unknown[] {
   return value;
 }
 
-function exactKeys(value: Record<string, unknown>, expected: readonly string[], path: string): void {
-  const expectedSet = new Set(expected);
+function exactKeys(value: Record<string, unknown>, expected: readonly string[], path: string, optional: readonly string[] = []): void {
+  const allowedSet = new Set([...expected, ...optional]);
   const keys = Reflect.ownKeys(value);
-  if (keys.some(key => typeof key !== "string" || !expectedSet.has(key))) {
+  if (keys.some(key => typeof key !== "string" || !allowedSet.has(key))) {
     return fail(`unknown field; expected exactly ${expected.join(", ")}`, path);
   }
-  if (keys.length !== expected.length) {
+  if (keys.length < expected.length || keys.length > expected.length + optional.length) {
     return fail(`missing field; expected exactly ${expected.join(", ")}`, path);
   }
 }
@@ -375,7 +379,7 @@ function parseProvenance(value: unknown, expectedAuthority: WaitAuthority, path:
 function parseHandleValue(value: unknown): JobHandle {
   const item = record(value, "handle");
   const itemKind = kind(item.kind, "handle.kind");
-  exactKeys(item, itemKind === "task" ? HANDLE_TASK_KEYS : HANDLE_BASE_KEYS, "handle");
+  exactKeys(item, itemKind === "task" ? HANDLE_TASK_KEYS : HANDLE_BASE_KEYS, "handle", ["hostHandle"]);
   const base = {
     schemaVersion: schemaVersion(item.schemaVersion, "handle.schemaVersion"),
     kind: itemKind,
@@ -384,16 +388,27 @@ function parseHandleValue(value: unknown): JobHandle {
     waitAuthority: authority(item.waitAuthority, "handle.waitAuthority"),
     threadId: identifier(item.threadId, "handle.threadId")
   } as const;
+  if (base.waitAuthority === "appServer" && !isValidCodexThreadId(base.threadId)) {
+    return fail("App Server authority requires an exact UUID threadId", "handle.threadId");
+  }
   if (base.kind === "thread" && base.waitAuthority === "canonical") {
     return fail("canonical authority requires task identity", "handle.waitAuthority");
   }
   if (itemKind === "thread") return {
     ...base,
     kind: "thread",
-    waitAuthority: base.waitAuthority as RuntimeWaitAuthority
+    waitAuthority: base.waitAuthority as RuntimeWaitAuthority,
+    ...(item.hostHandle === undefined ? {} : { hostHandle: identifier(item.hostHandle, "handle.hostHandle") })
   };
   const ownerThread = identifier(item.ownerThread, "handle.ownerThread");
-  if (ownerThread !== base.threadId) return fail("ownerThread must equal threadId", "handle.ownerThread");
+  const hostHandle = item.hostHandle === undefined ? undefined : identifier(item.hostHandle, "handle.hostHandle");
+  if (base.waitAuthority === "host") {
+    if (!hostHandle) return fail("host authority requires hostHandle", "handle.hostHandle");
+    if (ownerThread !== hostHandle) return fail("ownerThread must equal hostHandle", "handle.ownerThread");
+  } else if (ownerThread !== base.threadId) return fail("ownerThread must equal threadId", "handle.ownerThread");
+  if (base.waitAuthority !== "host" && hostHandle !== undefined) {
+    return fail("hostHandle requires host authority", "handle.hostHandle");
+  }
   return {
     ...base,
     kind: "task",
@@ -401,14 +416,15 @@ function parseHandleValue(value: unknown): JobHandle {
     taskRevision: revision(item.taskRevision, "handle.taskRevision"),
     leaseId: identifier(item.leaseId, "handle.leaseId"),
     leaseGeneration: integer(item.leaseGeneration, "handle.leaseGeneration"),
-    ownerThread
+    ownerThread,
+    ...(hostHandle === undefined ? {} : { hostHandle })
   };
 }
 
 function parseEventValue(value: unknown): JobEvent {
   const item = record(value, "event");
   const itemKind = kind(item.kind, "event.kind");
-  exactKeys(item, itemKind === "task" ? EVENT_TASK_KEYS : EVENT_BASE_KEYS, "event");
+  exactKeys(item, itemKind === "task" ? EVENT_TASK_KEYS : EVENT_BASE_KEYS, "event", ["hostHandle"]);
   const itemAuthority = authority(item.waitAuthority, "event.waitAuthority");
   const status = parseStatus(item.status, "event.status");
   const observedAt = timestamp(item.observedAt, "event.observedAt");
@@ -430,6 +446,9 @@ function parseEventValue(value: unknown): JobEvent {
     waitAuthority: itemAuthority,
     provenance: parseProvenance(item.provenance, itemAuthority, "event.provenance")
   } as const;
+  if (itemAuthority === "appServer" && !isValidCodexThreadId(base.threadId)) {
+    return fail("App Server authority requires an exact UUID threadId", "event.threadId");
+  }
   if (itemAuthority === "canonical" && (status.type !== "notObserved" || base.outcome !== "incomplete")) {
     return fail("canonical authority may only record notObserved/incomplete", "event.status");
   }
@@ -439,9 +458,23 @@ function parseEventValue(value: unknown): JobEvent {
   if (base.kind === "thread" && base.waitAuthority === "canonical") {
     return fail("canonical authority requires task identity", "event.waitAuthority");
   }
-  if (itemKind === "thread") return { ...base, kind: "thread" } as JobEvent;
+  const hostHandle = item.hostHandle === undefined ? undefined : identifier(item.hostHandle, "event.hostHandle");
+  if (itemAuthority === "host" && hostHandle === undefined && itemKind === "thread") {
+    // Runtime events may retain only their observed thread identity; a host
+    // handle is optional on event records for compatibility with old streams.
+  }
+  if (itemAuthority !== "host" && hostHandle !== undefined) {
+    return fail("hostHandle requires host authority", "event.hostHandle");
+  }
+  if (itemKind === "thread") return {
+    ...base,
+    kind: "thread",
+    ...(hostHandle === undefined ? {} : { hostHandle })
+  } as JobEvent;
   const ownerThread = identifier(item.ownerThread, "event.ownerThread");
-  if (ownerThread !== base.threadId) return fail("ownerThread must equal threadId", "event.ownerThread");
+  if (itemAuthority === "host") {
+    if (hostHandle !== undefined && ownerThread !== hostHandle) return fail("ownerThread must equal hostHandle", "event.ownerThread");
+  } else if (ownerThread !== base.threadId) return fail("ownerThread must equal threadId", "event.ownerThread");
   return {
     ...base,
     kind: "task",
@@ -449,7 +482,8 @@ function parseEventValue(value: unknown): JobEvent {
     taskRevision: revision(item.taskRevision, "event.taskRevision"),
     leaseId: identifier(item.leaseId, "event.leaseId"),
     leaseGeneration: integer(item.leaseGeneration, "event.leaseGeneration"),
-    ownerThread
+    ownerThread,
+    ...(hostHandle === undefined ? {} : { hostHandle })
   } as JobEvent;
 }
 
@@ -489,16 +523,16 @@ export function isJobEvent(value: unknown): value is JobEvent {
 
 function eventIdentity(event: JobEvent): readonly unknown[] {
   if (event.kind === "task") {
-    return [event.jobId, event.kind, event.threadId, event.taskId, event.taskRevision, event.leaseId, event.leaseGeneration, event.ownerThread, event.waitAuthority];
+    return [event.jobId, event.kind, event.threadId, event.taskId, event.taskRevision, event.leaseId, event.leaseGeneration, event.ownerThread, event.waitAuthority, event.hostHandle];
   }
-  return [event.jobId, event.kind, event.threadId, event.waitAuthority];
+  return [event.jobId, event.kind, event.threadId, event.waitAuthority, event.hostHandle];
 }
 
 function handleIdentity(handle: JobHandle): readonly unknown[] {
   if (handle.kind === "task") {
-    return [handle.jobId, handle.kind, handle.threadId, handle.taskId, handle.taskRevision, handle.leaseId, handle.leaseGeneration, handle.ownerThread, handle.waitAuthority];
+    return [handle.jobId, handle.kind, handle.threadId, handle.taskId, handle.taskRevision, handle.leaseId, handle.leaseGeneration, handle.ownerThread, handle.waitAuthority, handle.hostHandle];
   }
-  return [handle.jobId, handle.kind, handle.threadId, handle.waitAuthority];
+  return [handle.jobId, handle.kind, handle.threadId, handle.waitAuthority, handle.hostHandle];
 }
 
 function compareIdentity(left: readonly unknown[], right: readonly unknown[], path: string): void {

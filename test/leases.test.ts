@@ -3,7 +3,9 @@ import test from "node:test";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
 import {
   isCorrectionPolicy,
+  isPathLikeLegacyOwnerThread,
   isPlannedLeaseScopes,
+  isValidCodexThreadId,
   isTaskLease,
   isTaskLeaseReservation,
   leaseScopesOverlap,
@@ -11,6 +13,27 @@ import {
   normalizeLeaseScopes,
   normalizePlannedLeaseScopes
 } from "../src/leases.js";
+import { bindTaskLease } from "../src/orchestration.js";
+
+test("structured Codex thread IDs require UUIDs while legacy owner labels remain distinguishable", () => {
+  const v4 = "11111111-2222-4333-8444-555555555555";
+  const v7 = "018f0c5e-7b4a-7abc-8def-0123456789ab";
+  assert.equal(isValidCodexThreadId(v4), true);
+  assert.equal(isValidCodexThreadId(v7), true);
+  assert.equal(isValidCodexThreadId("thread:legacy"), false);
+  assert.equal(isValidCodexThreadId("/root/syn_price_sample_impl"), false);
+  assert.equal(isPathLikeLegacyOwnerThread("/root/syn_price_sample_impl"), true);
+  assert.equal(isPathLikeLegacyOwnerThread("thread:legacy"), false);
+});
+
+test("invalid structured thread IDs fail before lease bind mutation", async () => {
+  await assert.rejects(
+    bindTaskLease({ id: "T-INVALID", threadId: "/root/syn_price_sample_impl" }),
+    error => error instanceof SynodError
+      && error.code === ERROR_CODES.DELEGATION_INVALID
+      && error.message === "Delegation threadId must be an exact Codex thread identifier, not a host label or filesystem path."
+  );
+});
 
 test("lease reservations validate as a distinct pre-bind authority", () => {
   const reservation = {

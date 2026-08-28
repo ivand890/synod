@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { formatCostReport, projectUsageCost, validatePriceFile } from "../src/costs.js";
 import { ERROR_CODES, SynodError } from "../src/errors.js";
 import { parseUsageArgs } from "../src/command-options.js";
+import { listProfiles } from "../src/profiles.js";
 import { formatUsageReport } from "../src/usage.js";
 import type { UsageReport } from "../src/usage.js";
 
@@ -134,4 +136,24 @@ test("ordinary usage text and JSON-shaped data remain monetary-free by default",
   assert.equal("priceFile" in parseUsageArgs(["--since-event", "1"]), false);
   const priced = parseUsageArgs(["--price-file", "prices.json"]);
   assert.equal("help" in priced ? undefined : priced.priceFile, "prices.json");
+});
+
+test("packaged OpenAI price sample covers every exact built-in profile model", () => {
+  const sample = JSON.parse(readFileSync(new URL("../examples/openai-api-prices-2026-08-27.json", import.meta.url), "utf8"));
+  const prices = validatePriceFile(sample);
+  const builtInModels = new Set(listProfiles().flatMap(profile => [
+    profile.defaultSubagent.model,
+    ...Object.values(profile.roles).map(role => role.model)
+  ]));
+
+  assert.deepEqual(Object.keys(prices.models).sort(), [...builtInModels].sort());
+  assert.deepEqual(prices.models, {
+    "gpt-5.5": { uncachedInputPerMillion: 5, cachedInputPerMillion: 0.5, outputPerMillion: 30 },
+    "gpt-5.6-luna": { uncachedInputPerMillion: 0.2, cachedInputPerMillion: 0.02, outputPerMillion: 1.2 },
+    "gpt-5.6-sol": { uncachedInputPerMillion: 4, cachedInputPerMillion: 0.4, outputPerMillion: 20 },
+    "gpt-5.6-terra": { uncachedInputPerMillion: 2, cachedInputPerMillion: 0.2, outputPerMillion: 12 }
+  });
+  assert.equal(prices.currency, "USD");
+  assert.equal(prices.asOf, "2026-08-27");
+  assert.match(prices.source, /developers\.openai\.com\/api\/docs\/models/);
 });

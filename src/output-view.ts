@@ -64,6 +64,9 @@ function compactLease(value: unknown): unknown {
     "taskId",
     "taskRevision",
     "ownerThread",
+    "waitAuthority",
+    "hostHandle",
+    "threadId",
     "executor",
     "role",
     "observer",
@@ -85,6 +88,9 @@ function compactReservation(value: unknown): unknown {
     "taskId",
     "taskRevision",
     "executor",
+    "waitAuthority",
+    "hostHandle",
+    "threadId",
     "role",
     "observer",
     "reservedAt",
@@ -184,7 +190,7 @@ function compactRecovery(value: unknown): unknown {
   if (!isRecord(value)) return value;
   const result = pick(value, ["status", "detectedAt", "reason", "decision"]);
   if (isRecord(value.endedLease)) {
-    result.endedLease = pick(value.endedLease, ["id", "generation", "taskRevision", "ownerThread", "status"]);
+    result.endedLease = pick(value.endedLease, ["id", "generation", "taskRevision", "ownerThread", "waitAuthority", "hostHandle", "threadId", "status"]);
   }
   if (isRecord(value.proposal)) result.proposal = compactProposal(value.proposal);
   return result;
@@ -239,7 +245,7 @@ function compactTask(value: unknown): unknown {
 
 function compactTaskSelection(value: unknown): unknown {
   if (!isRecord(value)) return value;
-  return pick(value, ["taskId", "state", "revision", "leaseId", "generation", "ownerThread", "expectedHeartbeatAt"]);
+  return pick(value, ["taskId", "state", "revision", "leaseId", "generation", "ownerThread", "waitAuthority", "hostHandle", "threadId", "expectedHeartbeatAt"]);
 }
 
 function compactSelection(value: unknown): unknown {
