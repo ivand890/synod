@@ -2559,6 +2559,54 @@ test("expiry and revocation block active work while fencing stale owners", async
   );
 });
 
+test("resuming a host-owned lease preserves its full structured identity", async () => {
+  const directory = await temporaryProject();
+  const hostHandle = "desktop-session:resume";
+  const threadId = "11111111-2222-4333-8444-555555555555";
+  await initializeGitHead(directory);
+  await addDefaultTask(directory);
+  await transitionTask({ directory, id: "T-001", to: "READY", revision: 0 });
+  const acquired = await acquireTaskLease({
+    directory,
+    id: "T-001",
+    ownerThread: hostHandle,
+    waitAuthority: "host",
+    hostHandle,
+    threadId,
+    write: ["src/work.ts"]
+  }, { clock: () => "2026-08-10T12:00:00.000Z" });
+  await transitionTask({ directory, id: "T-001", to: "ACTIVE", revision: 0 }, {
+    clock: () => "2026-08-10T12:00:01.000Z"
+  });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/work.ts"), "host-owned work\n");
+  await revokeTaskLease({
+    directory,
+    id: "T-001",
+    leaseId: acquired.lease.id,
+    generation: acquired.lease.generation,
+    revision: 0,
+    expectedHeartbeatAt: "2026-08-10T12:00:00.000Z",
+    reason: "host owner stopped"
+  }, { clock: () => "2026-08-10T12:00:02.000Z" });
+
+  const resumed = await recoverTaskLease({
+    directory,
+    id: "T-001",
+    leaseId: acquired.lease.id,
+    generation: acquired.lease.generation,
+    revision: 0,
+    expectedHeartbeatAt: "2026-08-10T12:00:00.000Z",
+    decision: "resume",
+    reason: "resume the same host owner"
+  }, { clock: () => "2026-08-10T12:00:03.000Z" });
+  assert.equal(resumed.lease.ownerThread, hostHandle);
+  assert.equal(resumed.lease.waitAuthority, "host");
+  assert.equal(resumed.lease.hostHandle, hostHandle);
+  assert.equal(resumed.lease.threadId, threadId);
+  assert.equal(resumed.recovery.decision?.threadId, threadId);
+});
+
 test("simultaneous abandoned-owner recovery has one canonical winner", async () => {
   const directory = await temporaryProject();
   await initializeGitHead(directory);

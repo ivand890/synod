@@ -1,4 +1,5 @@
 import { ERROR_CODES, SynodError } from "./errors.js";
+import type { Warning } from "./contracts.js";
 
 export interface ModelRequirement {
   model: string;
@@ -49,9 +50,23 @@ export interface ProfileRequirements {
   roles: Record<string, ModelRequirement>;
 }
 
+export type ProfileSelectionSource = "explicit" | "existing" | "capability" | "fallback";
+
+export interface ProfileSelection {
+  profile: string;
+  source: ProfileSelectionSource;
+  reason?: string;
+  details?: Record<string, unknown>;
+  warning?: Warning;
+}
+
+export const PREFERRED_PROFILE = "synod-5.6";
+export const PORTABLE_PROFILE = "portable";
+export const FALLBACK_PROFILE = PORTABLE_PROFILE;
+
 const profiles: Record<string, ModelProfile> = {
-  "synod-5.6": {
-    id: "synod-5.6",
+  [PREFERRED_PROFILE]: {
+    id: PREFERRED_PROFILE,
     description: "Role-specialized GPT-5.6 profile for current Codex releases.",
     minimumCodexVersion: "0.148.0",
     defaultSubagent: { model: "gpt-5.6-terra", effort: "max" },
@@ -64,8 +79,8 @@ const profiles: Record<string, ModelProfile> = {
       mechanical: { model: "gpt-5.6-luna", effort: "medium" }
     }
   },
-  portable: {
-    id: "portable",
+  [PORTABLE_PROFILE]: {
+    id: PORTABLE_PROFILE,
     description: "Portable profile for the current supported Codex range.",
     minimumCodexVersion: "0.148.0",
     defaultSubagent: { model: "gpt-5.5", effort: "high" },
@@ -80,13 +95,11 @@ const profiles: Record<string, ModelProfile> = {
   }
 };
 
-export const DEFAULT_PROFILE = "portable";
-
 export function listProfiles(): ModelProfile[] {
   return Object.values(profiles).map(profile => structuredClone(profile));
 }
 
-export function getProfile(id: string = DEFAULT_PROFILE): ModelProfile {
+export function getProfile(id: string): ModelProfile {
   const profile = profiles[id];
   if (!profile) {
     throw new SynodError(ERROR_CODES.PROFILE_NOT_FOUND, `Unknown model profile: ${id}`, {

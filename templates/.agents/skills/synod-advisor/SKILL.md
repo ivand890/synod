@@ -28,7 +28,7 @@ On every step run `__SYNOD_COMMAND__ task next --json --view summary` and execut
 - Writer `delegate start` without an injected adapter returns `hostSpawnRequired`. Call `spawn_agent` with the returned read-only contract, then `delegate complete --owner-thread <id>`. Desktop and Codex CLI writers stay host-owned. CLI Path A is read-only.
 - After `delegate complete` succeeds, call `followup_task` for the exact returned `ownerThread` with explicit bind authorization before `wait --task`. `followup_task` is required because it wakes an idle worker; a bind receipt or queued message does not prove the worker resumed.
 - On Desktop without an injected adapter, that incomplete host handoff is expected. Do not start a child App Server.
-- After bind: `wait --task <id>`. If `hostWaitRequired` is true, call `wait_agent` only for the exact `hostWaitThreadIds`. Keep `hostFallbackRequired` / `hostFallbackThreadIds` as compatibility aliases.
+- After bind: `wait --task <id>`. If `hostWaitRequired` is true, call `wait_agent` only for the exact `hostWaitHandles` (or legacy `hostWaitThreadIds`) returned. Keep `hostFallbackRequired` / `hostFallbackThreadIds` as compatibility aliases.
 - Submit with `proposal submit --evidence` only when there is an in-scope owned delta. Empty delivery fails closed: `task.correct` or recover. Do not implement the worker's task yourself.
 - If wait reports a dead owner while the lease is live, run the returned `lease.revoke` argv, then one typed `resume` / `reassign` / `supersede` recover action. Recovery does not accept or discard the sealed proposal.
 

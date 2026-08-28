@@ -21,6 +21,25 @@ export const MAX_RETAINED_LEASE_BASELINES = 64;
 export type LeaseAccess = "read" | "write";
 export type LeaseScopeKind = "file" | "tree";
 
+/** Runtime authority that owns a delegated Codex identity. */
+export type LeaseWaitAuthority = "host" | "appServer";
+
+/**
+ * Structured delegation identity. `hostHandle` is an opaque identity owned by
+ * the host; `threadId` is the exact Codex App Server thread identifier. The
+ * two values are deliberately independent even when a compatibility alias
+ * exposes one of them as `ownerThread`.
+ */
+export interface LeaseOwnerIdentity {
+  waitAuthority: LeaseWaitAuthority;
+  hostHandle?: string;
+  threadId?: string;
+}
+
+/** Compatibility aliases for integrations that use delegation terminology. */
+export type DelegationOwner = LeaseOwnerIdentity;
+export type DelegationOwnerAuthority = LeaseWaitAuthority;
+
 export interface LeaseScope {
   path: string;
   access: LeaseAccess;
@@ -59,6 +78,12 @@ export interface TaskLeaseReservation {
   expiresAt: string;
   ttlSeconds: number;
   baseline: LeaseBaselineBinding;
+  /** Authority is known at reservation time; the owner identity may follow at bind. */
+  waitAuthority?: LeaseWaitAuthority;
+  /** Opaque host identity, populated for host-owned bound leases. */
+  hostHandle?: string;
+  /** Exact App Server thread identity, populated for App Server-owned leases. */
+  threadId?: string;
   status: "RESERVED";
 }
 
@@ -78,6 +103,10 @@ export interface TaskLease {
   heartbeatIntervalSeconds: number;
   ttlSeconds: number;
   baseline: LeaseBaselineBinding;
+  /** Authority-specific owner identity retained alongside ownerThread alias. */
+  waitAuthority?: LeaseWaitAuthority;
+  hostHandle?: string;
+  threadId?: string;
   status: "ACTIVE";
 }
 
@@ -177,6 +206,77 @@ function isUuid(value: unknown): value is string {
 
 function validIsoTimestamp(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && !Number.isNaN(Date.parse(value));
+}
+
+/**
+ * Codex App Server thread IDs are UUIDs. Keep the exact spelling supplied by
+ * Codex (including case) while rejecting host labels and filesystem paths
+ * before they can be persisted or sent to `thread/read`.
+ */
+export function isValidCodexThreadId(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.trim() !== value) return false;
+  if (/^[\u0000-\u001f\u007f]/.test(value) || /[\u0000-\u001f\u007f]/.test(value)) return false;
+  if (value === "." || value === ".." || value.startsWith("./") || value.startsWith("../")) return false;
+  if (value.startsWith("/") || value.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(value)) return false;
+  // Codex 0.150 uses UUID thread IDs. Versions 1-8 cover existing v4 and
+  // current v7 identifiers while retaining the RFC variant bit.
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+/**
+ * Legacy leases predate waitAuthority and used ownerThread for both Codex
+ * IDs and host labels. Every non-UUID owner is therefore an opaque host
+ * handle; only a valid UUID may remain App Server-observable.
+ */
+export function isLegacyHostOwnerThread(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && !isValidCodexThreadId(value);
+}
+
+/**
+ * Compatibility predicate retained for callers that only need to recognize
+ * filesystem-shaped legacy owner labels.
+ */
+export function isPathLikeLegacyOwnerThread(value: unknown): value is string {
+  if (!isLegacyHostOwnerThread(value) || value.trim() !== value) return false;
+  return value === "."
+    || value === ".."
+    || value.startsWith("./")
+    || value.startsWith("../")
+    || value.includes("/")
+    || value.includes("\\");
+}
+
+export function isLeaseWaitAuthority(value: unknown): value is LeaseWaitAuthority {
+  return value === "host" || value === "appServer";
+}
+
+function isNonEmptyIdentity(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.trim() === value;
+}
+
+/** Validate a bound authority-specific identity while retaining old leases. */
+export function isLeaseOwnerIdentity(value: {
+  waitAuthority?: unknown;
+  ownerThread?: unknown;
+  hostHandle?: unknown;
+  threadId?: unknown;
+}, { allowUnbound = false } = {}): boolean {
+  const authority = value.waitAuthority;
+  if (authority === undefined) {
+    return value.hostHandle === undefined && value.threadId === undefined;
+  }
+  if (!isLeaseWaitAuthority(authority)) return false;
+  if (value.hostHandle !== undefined && !isNonEmptyIdentity(value.hostHandle)) return false;
+  if (value.threadId !== undefined && !isValidCodexThreadId(value.threadId)) return false;
+  if (authority === "host") {
+    if (allowUnbound && value.hostHandle === undefined && value.threadId === undefined) return true;
+    if (!isNonEmptyIdentity(value.hostHandle)) return false;
+    return value.ownerThread === undefined || value.ownerThread === value.hostHandle;
+  }
+  if (value.hostHandle !== undefined) return false;
+  if (allowUnbound && value.threadId === undefined) return true;
+  if (!isValidCodexThreadId(value.threadId)) return false;
+  return value.ownerThread === undefined || value.ownerThread === value.threadId;
 }
 
 function isSortedUniqueStringArray(value: unknown): value is string[] {
@@ -411,6 +511,7 @@ export function isTaskLease(value: unknown): value is TaskLease {
     && Date.parse(value.acquiredAt) <= Date.parse(value.heartbeatAt)
     && Date.parse(value.heartbeatAt) < Date.parse(value.expiresAt)
     && isLeaseBaselineBinding(value.baseline)
+    && isLeaseOwnerIdentity(value)
     && value.status === "ACTIVE";
 }
 
@@ -451,6 +552,7 @@ export function isTaskLeaseReservation(value: unknown): value is TaskLeaseReserv
     && value.ttlSeconds <= MAX_LEASE_RESERVATION_TTL_SECONDS
     && Date.parse(value.reservedAt) < Date.parse(value.expiresAt)
     && isLeaseBaselineBinding(value.baseline)
+    && isLeaseOwnerIdentity(value, { allowUnbound: true })
     && value.status === "RESERVED";
 }
 

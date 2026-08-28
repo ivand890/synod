@@ -174,6 +174,7 @@ test("CI installs the pinned toolchain and smokes compiled packages on every sup
   assert.match(workflow, /os: windows-latest\n\s+node-version: 24/);
   assert.match(workflow, /codex-version: "0\.148\.0-alpha\.1"\n\s+expected-status: supported/);
   assert.match(workflow, /codex-version: "0\.148\.0-alpha\.9"\n\s+expected-status: known-good/);
+  assert.match(workflow, /codex-version: "0\.150\.0"\n\s+expected-status: supported/);
   assert.doesNotMatch(workflow, /codex-version: "0\.14(?:1|2|5|7)\.0"/);
   assert.match(workflow, /run: pnpm test:package/);
   assert.match(workflow, /release-closeout:\n\s+name: Release closeout\n\s+runs-on: ubuntu-latest\n\s+timeout-minutes: 30[\s\S]*fetch-depth: 0[\s\S]*pnpm install --frozen-lockfile/);
@@ -230,7 +231,7 @@ test("release source, archived evidence, and product/docs contract stay explicit
   const archived095Closeout = parseJson(archived095CloseoutText);
   assert.ok(isRecord(packageJson));
   assert.ok(isRecord(closeout));
-  assert.equal(packageJson.version, "0.12.1");
+  assert.equal(packageJson.version, "0.12.2");
   assert.equal(closeout.schemaVersion, 1);
   assert.equal(closeout.package, "@ivand890/synod");
   assert.equal(closeout.version, "0.9.3");
@@ -293,17 +294,22 @@ test("release source, archived evidence, and product/docs contract stay explicit
     archivedV012CloseoutSha256,
     "v0.12.0 closeout archive must remain byte-stable",
   );
-  assert.equal(currentCloseout.version, "0.12.1");
-  assert.equal(currentCloseout.tag, "v0.12.1");
+  assert.equal(currentCloseout.version, "0.12.2");
+  assert.equal(currentCloseout.tag, "v0.12.2");
   assert.ok(isRecord(currentCloseout.sourcePreparation));
-  assert.equal(currentCloseout.sourcePreparation.status, "closed");
-  assert.equal(currentCloseout.sourcePreparation.tagSha, "937c7d713523e4de587e7a6951716d72a9681131");
+  assert.equal(currentCloseout.sourcePreparation.status, "prepared");
+  assert.equal(Object.hasOwn(currentCloseout.sourcePreparation, "tagSha"), false);
   assert.ok(isRecord(currentCloseout.publicVerification));
-  assert.equal(currentCloseout.publicVerification.status, "verified");
+  assert.equal(currentCloseout.publicVerification.status, "pending");
   assert.ok(isRecord(currentCloseout.documentation));
-  assert.equal(currentCloseout.documentation.status, "verified");
-  assert.equal(closeoutText, archivedLatestCloseoutText, "v0.12.1 root and versioned closeout must remain byte-identical");
-  assert.deepEqual(currentCloseout, archivedLatestCloseout);
+  assert.equal(currentCloseout.documentation.status, "pending");
+  assert.notEqual(closeoutText, archivedLatestCloseoutText, "pending v0.12.2 root must not reuse verified v0.12.1 evidence");
+  assert.ok(isRecord(archivedLatestCloseout));
+  assert.equal(archivedLatestCloseout.version, "0.12.1");
+  assert.equal(archivedLatestCloseout.tag, "v0.12.1");
+  assert.ok(isRecord(archivedLatestCloseout.publicVerification));
+  assert.equal(archivedLatestCloseout.publicVerification.status, "verified");
+  assert.notDeepEqual(currentCloseout, archivedLatestCloseout);
   assert.notDeepEqual(currentCloseout, archivedPublishedCloseout);
   assert.notDeepEqual(currentCloseout, archivedCurrentCloseout);
   assert.ok(isRecord(archivedPreviousCloseout));
@@ -370,6 +376,12 @@ test("release source, archived evidence, and product/docs contract stay explicit
     rule: "Advance these paths together only when publicVerification is verified.",
   });
 
+  assert.match(changelog, /^## \[0\.12\.2\] - 2026-08-27$/m);
+  assert.match(changelog, /selects `synod-5\.6` when every required model/);
+  assert.match(changelog, /opaque host handles, exact Codex thread UUIDs/);
+  assert.match(changelog, /Task-aware waits and host delegation boundaries now refresh/);
+  assert.match(changelog, /tested `0\.148\.x`[\s\S]*`0\.150\.x` minor lines/);
+  assert.match(changelog, /packaged, dated OpenAI API price-file example/);
   assert.match(changelog, /^## \[0\.12\.1\] - 2026-08-27$/m);
   assert.match(changelog, /authorization preflight before bind/);
   assert.match(changelog, /CLI Path A stays read-only/);
@@ -384,7 +396,8 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.match(changelog, /Project-local `status` now accepts the `--task`, `--active-only`, and/);
   assert.match(changelog, /^## \[0\.9\.3\] - 2026-08-14$/m);
   assert.match(changelog, /^## \[0\.9\.4\] - 2026-08-15$/m);
-  assert.match(changelog, /\[Unreleased\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.12\.1\.\.\.HEAD/);
+  assert.match(changelog, /\[Unreleased\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.12\.2\.\.\.HEAD/);
+  assert.match(changelog, /\[0\.12\.2\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.12\.1\.\.\.v0\.12\.2/);
   assert.match(changelog, /\[0\.12\.1\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.12\.0\.\.\.v0\.12\.1/);
   assert.match(changelog, /\[0\.12\.0\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.11\.0\.\.\.v0\.12\.0/);
   assert.match(changelog, /\[0\.11\.0\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.5\.\.\.v0\.11\.0/);
@@ -392,16 +405,16 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.match(changelog, /\[0\.9\.4\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.3\.\.\.v0\.9\.4/);
   assert.match(changelog, /\[0\.9\.3\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.2\.\.\.v0\.9\.3/);
   assert.match(roadmap, /Current public release: `v0\.12\.1`/);
-  assert.match(roadmap, /Current source release: `v0\.12\.1`/);
+  assert.match(roadmap, /Current source release: `v0\.12\.2`/);
   assert.match(roadmap, /Last verified public release at this update: `v0\.12\.1`/);
   assert.match(roadmap, /release-closeouts\/v0\.11\.0\.json/);
   assert.match(roadmap, /release-closeouts\/v0\.12\.0\.json/);
   assert.match(roadmap, /release-closeouts\/v0\.12\.1\.json/);
   assert.match(roadmap, /(?:prior|earlier) `v0\.9\.5`[\s\S]*release-closeouts\/v0\.9\.5\.json/);
   assert.match(roadmap, /signed tag and GitHub Release `isImmutable: true` provide the external\s+release anchors/);
-  assert.match(roadmap, /root `RELEASE-CLOSEOUT\.json` records the same closed and\s+verified `v0\.12\.1` evidence/);
-  assert.doesNotMatch(roadmap, /public latest remains/);
-  assert.match(roadmap, /Status: delivered and publicly verified/);
+  assert.match(roadmap, /root `RELEASE-CLOSEOUT\.json` is the prepared\/pending\s+source record for `v0\.12\.2`/);
+  assert.match(roadmap, /public latest remains `v0\.12\.1`/);
+  assert.match(roadmap, /Status: `v0\.12\.2` is source-prepared/);
   assert.doesNotMatch(roadmap, /last verified public package remains `v0\.9\.2`/i);
   assert.doesNotMatch(roadmap, /public verification remains `v0\.9\.2`/i);
   assert.match(roadmap, /\| SYN-093-VERSIONS-001 \|/);
@@ -438,13 +451,16 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.match(readme, /(?:prior|earlier)[\s\S]*release-closeouts\/v0\.9\.5\.json/);
   assert.match(readme, /release-closeouts\/v0\.12\.1\.json/);
   assert.match(readme, /public and pinned `@ivand890\/synod@0\.12\.1`/);
-  assert.match(readme, /root[\s\S]*RELEASE-CLOSEOUT\.json[\s\S]*same verified[\s\S]*public `v0\.12\.1` evidence/);
-  assert.match(readme, /source tree contains the\s+same v0\.12\.1 surfaces/);
+  assert.match(readme, /root[\s\S]*RELEASE-CLOSEOUT\.json[\s\S]*prepared\/pending[\s\S]*`v0\.12\.2`/);
+  assert.match(readme, /source tree is prepared\s+as `v0\.12\.2`/);
   assert.match(readme, /The v0\.12\.0 source surfaces remain available in this release/);
   assert.match(readme, /0\.9\.5 hotfix, retained since v0\.11\.0, makes[\s\S]*mixed selectors still\s+fail closed/);
-  assert.match(readme, /v0\.12\.1 release requires Node\.js `>=22`/);
-  assert.match(readme, /public\/pinned\s+`v0\.12\.1` `doctor` support expression/);
+  assert.match(readme, /v0\.12\.2 source requires Node\.js `>=22`/);
+  assert.match(readme, /source prepared as `v0\.12\.2` has this `doctor` support expression/);
+  assert.match(readme, /support expression[\s\S]*>=0\.148\.0-0 <0\.149\.0 \|\| >=0\.150\.0-0 <0\.151\.0/);
   assert.match(readme, /Known-good and exercised in CI: `0\.148\.0-alpha\.9`/);
+  assert.match(readme, /numeric major\/minor is exactly[\s\S]*`0\.148` or `0\.150`/);
+  assert.match(readme, /untested `0\.149\.x` gap/);
   assert.doesNotMatch(readme, /candidate support expression `>=0\.142\.0 <0\.148\.0/);
   assert.match(readme, /synod task correct/);
   assert.match(readme, /Git-lane provenance/);
@@ -472,7 +488,7 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.equal(product.match(/^\d+\. /gm)?.length, 5);
   assert.match(product, /WCAG 2\.2 AA/);
   assert.match(product, /`JobHandle` and `JobEvent`/);
-  assert.match(product, /public `v0\.12\.1` release/);
+  assert.match(product, /source prepared as `v0\.12\.2`[\s\S]*last verified public release remains `v0\.12\.1`/);
   assert.match(product, /CLI App Server Path A[\s\S]*read-only observer turns only/);
   assert.match(product, /Writer leases stay[\s\S]*host-owned/);
   assert.doesNotMatch(product, /reserve, spawn, bind, and authorize/);
@@ -485,7 +501,7 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.doesNotMatch(product, /standalone CLI fails closed or returns an incomplete handoff/);
   assert.match(product, /0\.9\.5 hotfix, retained since 0\.11\.0, also makes the `--task`,\s+`--active-only`, and\s+`--changed-since-checkpoint` selectors/);
   assert.match(product, /Node\.js `>=22`/);
-  assert.match(product, /numeric major and\s+minor are `0\.148`/);
+  assert.match(product, /numeric major and\s+minor are `0\.148` or `0\.150`/);
 
   const lifecycle = "READY → reserve → read-only spawn → bind-driven ACTIVE → explicit write authorization → task-aware wait → proposal submit → REVIEW → ACCEPTED → VERIFIED → DONE";
   assert.ok(readme.includes(lifecycle), "README must show the lease-fenced executable lifecycle");
@@ -508,8 +524,7 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.match(releasing, /`release-closeouts\/v0\.12\.0\.json`/);
   assert.match(releasing, /`release-closeouts\/v0\.11\.0\.json`/);
   assert.match(releasing, /(?:prior|earlier)\s+`v0\.9\.5` evidence[\s\S]*`release-closeouts\/v0\.9\.5\.json`/);
-  assert.match(releasing, /root `RELEASE-CLOSEOUT\.json` records the same closed and verified public\s+`v0\.12\.1` evidence/);
-  assert.doesNotMatch(releasing, /Public latest remains/);
+  assert.match(releasing, /root `RELEASE-CLOSEOUT\.json` is the prepared\/pending source record for\s+`v0\.12\.2`/);
   assert.doesNotMatch(releasing, /pre-tag candidate record/);
   assert.match(releasing, /registry-installed package result/);
   assert.match(releasing, /local tarball smoke belongs under\s+`sourcePreparation\.localPackageSmoke`/);
@@ -583,6 +598,11 @@ test("release closeout validation is strict across pre-tag and post-publication 
   const archivedLatest = parseJson(archivedLatestText);
   const expected = {
     expectedPackage: "@ivand890/synod",
+    expectedVersion: "0.12.2",
+    expectedTag: "v0.12.2",
+  } as const;
+  const publishedLatest = {
+    expectedPackage: "@ivand890/synod",
     expectedVersion: "0.12.1",
     expectedTag: "v0.12.1",
   } as const;
@@ -607,28 +627,22 @@ test("release closeout validation is strict across pre-tag and post-publication 
     expectedTag: "v0.9.4",
   } as const;
   assert.ok(isRecord(root) && isRecord(root.publicVerification));
-  assert.equal(root.publicVerification.status, "verified");
+  assert.equal(root.publicVerification.status, "pending");
   assert.ok(isRecord(root.sourcePreparation));
-  assert.equal(root.sourcePreparation.status, "closed");
-  assert.equal(root.sourcePreparation.tagSha, "937c7d713523e4de587e7a6951716d72a9681131");
-  assert.throws(
-    () => validateReleaseCloseout(root, { phase: "pre-tag", ...expected }),
-    error => error instanceof ReleaseCloseoutValidationError && /sourcePreparation/.test(error.message),
-  );
+  assert.equal(root.sourcePreparation.status, "prepared");
+  assert.equal(Object.hasOwn(root.sourcePreparation, "tagSha"), false);
   assert.deepEqual(validateReleaseCloseout(root, {
-    phase: "post-publication",
+    phase: "pre-tag",
     ...expected,
-    expectedTagSha: "937c7d713523e4de587e7a6951716d72a9681131",
   }), {
-    phase: "post-publication",
+    phase: "pre-tag",
     package: "@ivand890/synod",
-    version: "0.12.1",
-    tag: "v0.12.1",
-    tagSha: "937c7d713523e4de587e7a6951716d72a9681131",
+    version: "0.12.2",
+    tag: "v0.12.2",
   });
   assert.deepEqual(validateReleaseCloseoutFile("release-closeouts/v0.12.1.json", {
     phase: "post-publication",
-    ...expected,
+    ...publishedLatest,
     expectedTagSha: "937c7d713523e4de587e7a6951716d72a9681131",
   }), {
     phase: "post-publication",
@@ -670,7 +684,7 @@ test("release closeout validation is strict across pre-tag and post-publication 
     tag: "v0.9.5",
     tagSha: "494f1ebd85b1c51dde522e7a7ec6e334dadc4e30",
   });
-  assert.deepEqual(root, archivedLatest);
+  assert.notDeepEqual(root, archivedLatest);
   assert.notDeepEqual(root, archivedPublished);
   assert.notDeepEqual(root, archivedCurrent);
   assert.ok(isRecord(archivedPrevious));

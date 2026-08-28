@@ -5,10 +5,12 @@ import { resolveCodexRuntime, type ResolvedCodexRuntime } from "./codex-runtime.
 import { ERROR_CODES, SynodError, asSynodError, withErrorDetails } from "./errors.js";
 import {
   bindTaskLease,
+  budgetDecisionRequiredError,
   cancelTaskLeaseReservation,
   expireTaskLeaseReservation,
   heartbeatTaskLease,
   readOrchestration,
+  refreshTaskBudget,
   releaseTaskLease,
   reserveTaskLease,
   revokeTaskLease,
@@ -16,8 +18,16 @@ import {
   type LeaseReservationIdentityOptions,
   type ReserveLeaseOptions
 } from "./orchestration.js";
-import type { OrchestrationDependencies } from "./orchestration.js";
-import { normalizeLeaseScopePath, type LeaseScope, type TaskLease, type TaskLeaseReservation } from "./leases.js";
+import type { OrchestrationDependencies, OrchestrationTask } from "./orchestration.js";
+import {
+  isLeaseWaitAuthority,
+  isValidCodexThreadId,
+  normalizeLeaseScopePath,
+  type LeaseScope,
+  type LeaseWaitAuthority,
+  type TaskLease,
+  type TaskLeaseReservation
+} from "./leases.js";
 import {
   waitForThreads,
   type HostWaitAdapter,
@@ -40,11 +50,13 @@ export interface HostDelegationReservationFence {
   revision: number;
   expectedReservedAt: string;
   baselineHash: string;
+  waitAuthority?: LeaseWaitAuthority;
 }
 
 export interface HostDelegationReadOnlyContract {
   taskId: string;
   taskRevision: number;
+  waitAuthority?: LeaseWaitAuthority;
   role?: DelegationRole;
   objective: string;
   acceptance: ReadonlyArray<string>;
@@ -81,6 +93,8 @@ export type HostDelegationSpawnResult =
       ownerId?: HostOwnerIdentifier;
       owner?: HostOwnerIdentifier;
       threadId?: HostOwnerIdentifier;
+      hostHandle?: HostOwnerIdentifier;
+      waitAuthority?: LeaseWaitAuthority;
       [key: string]: unknown;
     };
 
@@ -90,6 +104,9 @@ export interface HostDelegationLeaseFence {
   revision: number;
   expectedHeartbeatAt: string;
   ownerThread: HostOwnerIdentifier;
+  waitAuthority?: LeaseWaitAuthority;
+  hostHandle?: HostOwnerIdentifier;
+  threadId?: string;
 }
 
 export interface HostDelegationAuthorizeRequest {
@@ -97,6 +114,9 @@ export interface HostDelegationAuthorizeRequest {
   taskId: string;
   directory: string;
   ownerThread: HostOwnerIdentifier;
+  waitAuthority?: LeaseWaitAuthority;
+  hostHandle?: HostOwnerIdentifier;
+  threadId?: string;
   writeAuthorized: boolean;
   role?: DelegationRole;
   reservation: TaskLeaseReservation;
@@ -119,6 +139,8 @@ export interface HostAuthorizationReceipt {
  * post-bind authorization receipt, but it does not create a Codex process.
  */
 export interface HostDelegationAdapter extends HostWaitAdapter {
+  /** Host adapters own opaque handles; the Synod App Server adapter sets appServer. */
+  waitAuthority?: LeaseWaitAuthority;
   spawn(request: HostDelegationSpawnRequest): Promise<HostDelegationSpawnResult>;
   authorize(request: HostDelegationAuthorizeRequest): Promise<HostAuthorizationReceipt | unknown>;
   /** Resolves only after pending spawn/activation operations can no longer grant authority. */
@@ -157,6 +179,7 @@ export interface HostDelegationDependencies extends OrchestrationDependencies {
   hostAdapterFactory?: () => HostWaitAdapter;
   hostDelegationAdapter?: HostDelegationAdapter;
   hostDelegationAdapterFactory?: () => HostDelegationAdapter;
+  refreshBudget?: typeof refreshTaskBudget;
   hostRuntimeResolver?: () => ResolvedCodexRuntime;
   env?: NodeJS.ProcessEnv;
   read?: typeof readOrchestration;
@@ -218,6 +241,9 @@ export interface HostDelegationResult {
   reservationFence: HostDelegationReservationFence;
   spawn: HostDelegationSpawnResult;
   ownerThread: HostOwnerIdentifier;
+  waitAuthority: LeaseWaitAuthority;
+  hostHandle?: HostOwnerIdentifier;
+  threadId?: string;
   role: DelegationRole;
   lease: TaskLease;
   leaseFence: HostDelegationLeaseFence;
@@ -237,6 +263,7 @@ function taskIdentifier(options: HostDelegationOptions): string {
 
 interface PreparedDelegationReservation {
   role: DelegationRole;
+  task?: OrchestrationTask;
   read: unknown[];
   write: unknown[];
   readTree: unknown[];
@@ -325,7 +352,7 @@ async function prepareDelegationReservation(
       details: { taskId: id, role, expectedPaths: expected, requestedPaths: requested }
     });
   }
-  return { role, read: requested, write: [], readTree: [], writeTree: [], observer: true };
+  return { role, task, read: requested, write: [], readTree: [], writeTree: [], observer: true };
 }
 
 function reservationFence(reservation: TaskLeaseReservation): HostDelegationReservationFence {
@@ -335,7 +362,8 @@ function reservationFence(reservation: TaskLeaseReservation): HostDelegationRese
     generation: reservation.generation,
     revision: reservation.taskRevision,
     expectedReservedAt: reservation.reservedAt,
-    baselineHash: reservation.baseline.snapshotContentHash
+    baselineHash: reservation.baseline.snapshotContentHash,
+    ...(reservation.waitAuthority === undefined ? {} : { waitAuthority: reservation.waitAuthority })
   };
 }
 
@@ -345,18 +373,87 @@ function leaseFence(lease: TaskLease): HostDelegationLeaseFence {
     generation: lease.generation,
     revision: lease.taskRevision,
     expectedHeartbeatAt: lease.heartbeatAt,
-    ownerThread: lease.ownerThread
+    ownerThread: lease.ownerThread,
+    ...(lease.waitAuthority === undefined ? {} : { waitAuthority: lease.waitAuthority }),
+    ...(lease.hostHandle === undefined ? {} : { hostHandle: lease.hostHandle }),
+    ...(lease.threadId === undefined ? {} : { threadId: lease.threadId })
   };
 }
 
-function ownerFromSpawn(value: HostDelegationSpawnResult): HostOwnerIdentifier | undefined {
-  if (typeof value === "string") return value.trim() || undefined;
-  if (!value || typeof value !== "object") return undefined;
-  for (const key of ["ownerThread", "ownerId", "owner", "threadId"] as const) {
-    const candidate = value[key];
-    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+interface SpawnOwnerIdentity {
+  ownerThread: HostOwnerIdentifier;
+  waitAuthority: LeaseWaitAuthority;
+  hostHandle?: HostOwnerIdentifier;
+  threadId?: string;
+}
+
+function ownerFromSpawn(
+  value: HostDelegationSpawnResult,
+  adapterAuthority: LeaseWaitAuthority = "host"
+): SpawnOwnerIdentity | undefined {
+  if (typeof value === "string") {
+    const ownerThread = value.trim();
+    return ownerThread ? { ownerThread, waitAuthority: adapterAuthority, ...(adapterAuthority === "host" ? { hostHandle: ownerThread } : { threadId: ownerThread }) } : undefined;
   }
-  return undefined;
+  if (!value || typeof value !== "object") return undefined;
+  const reportedAuthority = value.waitAuthority === undefined ? adapterAuthority : value.waitAuthority;
+  if (!isLeaseWaitAuthority(reportedAuthority)) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "Host spawn returned an unsupported waitAuthority.", {
+      details: { waitAuthority: value.waitAuthority }
+    });
+  }
+  const hostHandle = value.hostHandle === undefined
+    ? undefined
+    : typeof value.hostHandle === "string" && value.hostHandle.trim()
+      ? value.hostHandle.trim()
+      : undefined;
+  const threadId = value.threadId === undefined
+    ? undefined
+    : typeof value.threadId === "string" && value.threadId.trim()
+      ? value.threadId
+      : undefined;
+  if (value.hostHandle !== undefined && hostHandle === undefined) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "Host spawn returned an invalid opaque hostHandle.", {
+      details: { hostHandle: value.hostHandle }
+    });
+  }
+  if (value.threadId !== undefined && (threadId === undefined || !isValidCodexThreadId(threadId))) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "Host spawn returned an invalid exact threadId.", {
+      details: { threadId: value.threadId }
+    });
+  }
+  const compatibilityOwner = [value.ownerThread, value.ownerId, value.owner]
+    .find(candidate => typeof candidate === "string" && candidate.trim()) as string | undefined;
+  if (reportedAuthority === "appServer") {
+    if (hostHandle !== undefined) {
+      throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "App Server spawn cannot return an opaque hostHandle.", {
+        details: { hostHandle }
+      });
+    }
+    const exact = threadId || compatibilityOwner?.trim();
+    if (!exact || !isValidCodexThreadId(exact)) {
+      throw new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "App Server spawn returned no exact threadId.");
+    }
+    if (compatibilityOwner !== undefined && compatibilityOwner.trim() !== exact) {
+      throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "App Server spawn owner aliases must match the exact threadId.", {
+        details: { ownerThread: compatibilityOwner.trim(), threadId: exact }
+      });
+    }
+    return { ownerThread: exact, waitAuthority: "appServer", threadId: exact };
+  }
+  const handle = hostHandle || compatibilityOwner?.trim() || (threadId ? threadId.trim() : undefined);
+  if (!handle) return undefined;
+  if (compatibilityOwner !== undefined && compatibilityOwner.trim() !== handle) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "Host spawn owner aliases must match the opaque hostHandle.", {
+      details: { ownerThread: compatibilityOwner.trim(), hostHandle: handle }
+    });
+  }
+  return {
+    ownerThread: handle,
+    waitAuthority: "host",
+    hostHandle: handle,
+    ...(threadId === undefined ? {} : { threadId })
+  };
 }
 
 function authorizationReceipt(value: unknown): HostAuthorizationReceipt {
@@ -871,8 +968,23 @@ export async function startHostDelegation(
   if (typeof adapter.spawn !== "function" || typeof adapter.authorize !== "function" || typeof adapter.close !== "function") {
     throw new SynodError(ERROR_CODES.HOST_ADAPTER_INVALID, "The injected host adapter must expose spawn, authorize, and cancellable close methods.");
   }
+  if (adapter.waitAuthority !== undefined && !isLeaseWaitAuthority(adapter.waitAuthority)) {
+    throw new SynodError(ERROR_CODES.HOST_ADAPTER_INVALID, "The injected host adapter returned an unsupported waitAuthority.", {
+      details: { waitAuthority: adapter.waitAuthority }
+    });
+  }
+  const adapterAuthority: LeaseWaitAuthority = adapter.waitAuthority || "host";
   const id = taskIdentifier(options);
   const prepared = await prepareDelegationReservation(id, options, dependencies);
+  const refresh = dependencies.refreshBudget || refreshTaskBudget;
+  const budget = prepared.task && !prepared.task.budget ? undefined : await refresh({
+    directory: options.directory || ".",
+    id,
+    ...(options.actor === undefined ? {} : { actor: options.actor })
+  }, dependencies);
+  if (budget?.task.budget?.thresholdStatus === "decision-required") {
+    throw budgetDecisionRequiredError(budget.task, "host delegation");
+  }
   const reserve = dependencies.reserve || reserveTaskLease;
   const reserved = await reserve({
     id,
@@ -883,6 +995,7 @@ export async function startHostDelegation(
     readTree: prepared.readTree,
     writeTree: prepared.writeTree,
     ...(prepared.observer ? { observer: true } : {}),
+    waitAuthority: adapterAuthority,
     ...(options.reservationTtlSeconds === undefined ? {} : { reservationTtlSeconds: options.reservationTtlSeconds }),
     ...(options.actor === undefined ? {} : { actor: options.actor })
   }, dependencies);
@@ -902,6 +1015,7 @@ export async function startHostDelegation(
   const readOnlyContract: HostDelegationReadOnlyContract = {
     taskId: id,
     taskRevision: reservation.taskRevision,
+    ...(reservation.waitAuthority === undefined ? {} : { waitAuthority: reservation.waitAuthority }),
     role: prepared.role,
     objective: typeof reserved.task.objective === "string" ? reserved.task.objective : "",
     acceptance: reserved.task.acceptance?.criteria || [],
@@ -969,8 +1083,8 @@ export async function startHostDelegation(
     );
   }
   const spawned = spawnOutcome.value;
-  const ownerThread = ownerFromSpawn(spawned);
-  if (!ownerThread) {
+  const ownerIdentity = ownerFromSpawn(spawned, adapterAuthority);
+  if (!ownerIdentity) {
     const deadlineOutcome = await waitUntilReservationExpiry(reservation.expiresAt, clock, options.signal);
     if (deadlineOutcome === "aborted") {
       const failure = withChildLoss(new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Host spawn returned no opaque owner identifier before the reservation expired.", {
@@ -1009,6 +1123,15 @@ export async function startHostDelegation(
       dependencies
     );
   }
+  if (reservation.waitAuthority && reservation.waitAuthority !== ownerIdentity.waitAuthority) {
+    const failure = await closeAdapterAfterSpawnFailure(
+      adapter,
+      new SynodError(ERROR_CODES.DELEGATION_INVALID, "Host spawn owner authority does not match the reserved waitAuthority.", {
+        details: { reserved: reservation.waitAuthority, observed: ownerIdentity.waitAuthority }
+      })
+    );
+    return cancelReservationAfterFailure(failure, ERROR_CODES.DELEGATION_INVALID, "spawn-owner", reservation, options, dependencies);
+  }
   if (clock() >= Date.parse(reservation.expiresAt)) {
     const failure = await closeAdapterAfterSpawnFailure(
       adapter,
@@ -1030,7 +1153,10 @@ export async function startHostDelegation(
     phase: "preflight",
     taskId: id,
     directory: options.directory || ".",
-    ownerThread,
+    ownerThread: ownerIdentity.ownerThread,
+    waitAuthority: ownerIdentity.waitAuthority,
+    ...(ownerIdentity.hostHandle === undefined ? {} : { hostHandle: ownerIdentity.hostHandle }),
+    ...(ownerIdentity.threadId === undefined ? {} : { threadId: ownerIdentity.threadId }),
     writeAuthorized: false,
     role: prepared.role,
     reservation
@@ -1055,7 +1181,10 @@ export async function startHostDelegation(
       directory: options.directory || ".",
       id,
       ...reservedFence,
-      ownerThread,
+      ownerThread: ownerIdentity.ownerThread,
+      waitAuthority: ownerIdentity.waitAuthority,
+      ...(ownerIdentity.hostHandle === undefined ? {} : { hostHandle: ownerIdentity.hostHandle }),
+      ...(ownerIdentity.threadId === undefined ? {} : { threadId: ownerIdentity.threadId }),
       ...(options.ttlSeconds === undefined ? {} : { ttlSeconds: options.ttlSeconds }),
       ...(options.heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds: options.heartbeatIntervalSeconds }),
       evidence: options.evidence || [],
@@ -1069,7 +1198,10 @@ export async function startHostDelegation(
     phase: "activate",
     taskId: id,
     directory: options.directory || ".",
-    ownerThread,
+    ownerThread: ownerIdentity.ownerThread,
+    waitAuthority: ownerIdentity.waitAuthority,
+    ...(ownerIdentity.hostHandle === undefined ? {} : { hostHandle: ownerIdentity.hostHandle }),
+    ...(ownerIdentity.threadId === undefined ? {} : { threadId: ownerIdentity.threadId }),
     writeAuthorized: prepared.role === "implementer",
     role: prepared.role,
     reservation,
@@ -1081,7 +1213,7 @@ export async function startHostDelegation(
     authorization = withApprovalCommand(
       await authorizeHostOwnerBeforeLeaseCleanupWindow(adapter, activationRequest, bound.lease, dependencies),
       id,
-      ownerThread,
+      ownerIdentity.ownerThread,
       approvalProposal(prepared.role, bound.task)
     );
   } catch (error) {
@@ -1121,7 +1253,10 @@ export async function startHostDelegation(
     reservation,
     reservationFence: reservedFence,
     spawn: spawned,
-    ownerThread,
+    ownerThread: ownerIdentity.ownerThread,
+    waitAuthority: bound.lease.waitAuthority || ownerIdentity.waitAuthority,
+    ...(bound.lease.hostHandle === undefined ? {} : { hostHandle: bound.lease.hostHandle }),
+    ...(bound.lease.threadId === undefined ? {} : { threadId: bound.lease.threadId }),
     role: prepared.role,
     lease: bound.lease,
     leaseFence: leaseFence(bound.lease),
@@ -1150,7 +1285,12 @@ export interface HostDelegationWaitResult {
 
 /** Wait through the injected host while renewing only the exact active lease fence. */
 export async function waitForHostDelegation(
-  delegation: Pick<HostDelegationResult, "task" | "lease" | "ownerThread"> & { directory?: string },
+  delegation: Pick<HostDelegationResult, "task" | "lease" | "ownerThread"> & {
+    directory?: string;
+    waitAuthority?: LeaseWaitAuthority;
+    hostHandle?: HostOwnerIdentifier;
+    threadId?: string;
+  },
   adapter: HostDelegationAdapter,
   options: HostDelegationWaitOptions = {},
   dependencies: HostDelegationDependencies = {}
@@ -1161,6 +1301,19 @@ export async function waitForHostDelegation(
   const intervalMs = options.heartbeatIntervalMs ?? delegation.lease.heartbeatIntervalSeconds * 1_000;
   if (!Number.isSafeInteger(intervalMs) || intervalMs <= 0) {
     throw new SynodError(ERROR_CODES.HOST_LIVENESS_FAILED, "Host heartbeat interval must be a positive integer.");
+  }
+  if (delegation.task.budget?.thresholdStatus === "decision-required") {
+    throw budgetDecisionRequiredError(delegation.task, "host wait dispatch");
+  }
+  if (delegation.task.budget) {
+    const refresh = dependencies.refreshBudget || refreshTaskBudget;
+    const refreshed = await refresh({
+      directory: delegation.directory || ".",
+      id: delegation.task.id
+    }, dependencies);
+    if (refreshed?.task.budget?.thresholdStatus === "decision-required") {
+      throw budgetDecisionRequiredError(refreshed.task, "host wait dispatch");
+    }
   }
   const controller = new AbortController();
   const abortForward = () => controller.abort();
@@ -1187,7 +1340,10 @@ export async function waitForHostDelegation(
       generation: fence.generation,
       revision: fence.revision,
       expectedHeartbeatAt: fence.expectedHeartbeatAt,
-      ownerThread: fence.ownerThread
+      ownerThread: fence.ownerThread,
+      ...(fence.waitAuthority === undefined ? {} : { waitAuthority: fence.waitAuthority }),
+      ...(fence.hostHandle === undefined ? {} : { hostHandle: fence.hostHandle }),
+      ...(fence.threadId === undefined ? {} : { threadId: fence.threadId })
     };
     inFlight = (async () => {
       const value = await heartbeat(request, dependencies);
@@ -1229,8 +1385,12 @@ export async function waitForHostDelegation(
   timer = schedule(() => { void pulse(); }, intervalMs);
   try {
     const wait = dependencies.wait || waitForThreads;
+    const hostHandle = delegation.lease.hostHandle || delegation.hostHandle;
+    const threadId = delegation.lease.threadId || delegation.threadId;
+    const structuredHost = (delegation.lease.waitAuthority || delegation.waitAuthority) === "host" && Boolean(hostHandle);
     const waitOptions: WaitForThreadsOptions = {
-      threadIds: [delegation.ownerThread],
+      threadIds: structuredHost ? [] : [threadId || delegation.ownerThread],
+      ...(structuredHost ? { hostWaitHandles: [hostHandle!] } : {}),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
       signal: controller.signal
@@ -1415,6 +1575,7 @@ function readOnlyContractFor(
   return {
     taskId,
     taskRevision: reservation.taskRevision,
+    ...(reservation.waitAuthority === undefined ? {} : { waitAuthority: reservation.waitAuthority }),
     ...(reservation.role === undefined ? {} : { role: reservation.role }),
     objective: typeof task.objective === "string" ? task.objective : "",
     acceptance: task.acceptance?.criteria || [],
@@ -1444,6 +1605,15 @@ export async function startHostDelegationHandoff(
   }
   const id = taskIdentifier(options);
   const prepared = await prepareDelegationReservation(id, options, dependencies);
+  const refresh = dependencies.refreshBudget || refreshTaskBudget;
+  const budget = prepared.task && !prepared.task.budget ? undefined : await refresh({
+    directory: options.directory || ".",
+    id,
+    ...(options.actor === undefined ? {} : { actor: options.actor })
+  }, dependencies);
+  if (budget?.task.budget?.thresholdStatus === "decision-required") {
+    throw budgetDecisionRequiredError(budget.task, "host delegation reservation");
+  }
   const reserve = dependencies.reserve || reserveTaskLease;
   const reserved = await reserve({
     id,
@@ -1454,6 +1624,7 @@ export async function startHostDelegationHandoff(
     readTree: prepared.readTree,
     writeTree: prepared.writeTree,
     ...(prepared.observer ? { observer: true } : {}),
+    waitAuthority: "host",
     ...(options.reservationTtlSeconds === undefined ? {} : { reservationTtlSeconds: options.reservationTtlSeconds }),
     ...(options.actor === undefined ? {} : { actor: options.actor })
   }, dependencies);
@@ -1492,7 +1663,10 @@ export async function completeHostDelegation(
     directory?: string;
     id?: string;
     taskId?: string;
-    ownerThread: string;
+    ownerThread?: string;
+    hostHandle?: string;
+    threadId?: string;
+    waitAuthority?: LeaseWaitAuthority;
     actor?: string;
     evidence?: unknown[];
     adapter?: HostDelegationAdapter;
@@ -1502,9 +1676,31 @@ export async function completeHostDelegation(
   dependencies: HostDelegationDependencies = {}
 ): Promise<HostDelegationResult> {
   const id = taskIdentifier(options);
+  // Validate the optional exact thread ID before reading/authorizing/binding;
+  // this is intentionally a stable typed pre-mutation failure for host labels.
+  const suppliedThreadId = options.threadId === undefined ? undefined : String(options.threadId);
+  if (suppliedThreadId !== undefined && !isValidCodexThreadId(suppliedThreadId)) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "Delegation threadId must be an exact Codex thread identifier, not a host label or filesystem path.", {
+      details: { threadId: suppliedThreadId }
+    });
+  }
+  const suppliedHostHandle = options.hostHandle === undefined ? undefined : String(options.hostHandle).trim();
+  if (options.hostHandle !== undefined && !suppliedHostHandle) {
+    throw new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Host delegation complete requires a non-empty opaque hostHandle.");
+  }
+  if (options.waitAuthority !== undefined && !isLeaseWaitAuthority(options.waitAuthority)) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "Host delegation complete received an unsupported waitAuthority.", {
+      details: { waitAuthority: options.waitAuthority }
+    });
+  }
   const ownerThread = String(options.ownerThread || "").trim();
-  if (!ownerThread) {
-    throw new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Host delegation complete requires an opaque owner thread.");
+  if (!ownerThread && !suppliedHostHandle && !suppliedThreadId) {
+    throw new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Host delegation complete requires --host-handle or the --owner-thread compatibility alias.");
+  }
+  if (suppliedHostHandle && ownerThread && suppliedHostHandle !== ownerThread) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "ownerThread must match hostHandle when supplied as a compatibility alias.", {
+      details: { ownerThread, hostHandle: suppliedHostHandle }
+    });
   }
   if (options.adapter && (
     typeof options.adapter.authorize !== "function"
@@ -1528,13 +1724,69 @@ export async function completeHostDelegation(
       details: { taskId: id, reservation: reservation ?? null }
     });
   }
+  const authority = options.waitAuthority || reservation.waitAuthority || (suppliedHostHandle || !suppliedThreadId ? "host" : "appServer");
+  if (authority === "host" && suppliedThreadId !== undefined && !suppliedHostHandle && !ownerThread) {
+    throw new SynodError(ERROR_CODES.HOST_OWNER_MISSING, "Host delegation complete requires an opaque hostHandle when a threadId is supplied.");
+  }
+  if (authority === "appServer" && suppliedHostHandle !== undefined) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "App Server delegation cannot bind an opaque hostHandle.", {
+      details: { hostHandle: suppliedHostHandle }
+    });
+  }
+  const identity: {
+    waitAuthority: LeaseWaitAuthority;
+    ownerThread: string;
+    hostHandle?: string;
+    threadId?: string;
+  } = authority === "host"
+    ? {
+        waitAuthority: "host" as const,
+        hostHandle: suppliedHostHandle || ownerThread,
+        ...(suppliedThreadId === undefined ? {} : { threadId: suppliedThreadId }),
+        ownerThread: suppliedHostHandle || ownerThread
+      }
+    : {
+        waitAuthority: "appServer" as const,
+        threadId: suppliedThreadId || ownerThread,
+        ownerThread: suppliedThreadId || ownerThread
+      };
+  if (!identity.ownerThread || (identity.waitAuthority === "appServer" && !isValidCodexThreadId(identity.threadId))) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "App Server delegation requires an exact valid threadId.", {
+      details: { threadId: identity.threadId || null }
+    });
+  }
+  if (reservation.waitAuthority && reservation.waitAuthority !== identity.waitAuthority) {
+    throw new SynodError(ERROR_CODES.DELEGATION_INVALID, "Delegation owner authority does not match the reserved waitAuthority.", {
+      details: { reserved: reservation.waitAuthority, supplied: identity.waitAuthority }
+    });
+  }
+  // A completion handoff may otherwise authorize a host before bind discovers
+  // a newly-crossed hard budget. Refresh the canonical budget before any host
+  // preflight or lease mutation when a budget is configured.
+  if (task.budget?.thresholdStatus === "decision-required") {
+    throw budgetDecisionRequiredError(task, "host delegation bind");
+  }
+  if (task.budget && !dependencies.read) {
+    const refresh = dependencies.refreshBudget || refreshTaskBudget;
+    const refreshed = await refresh({
+      directory: targetDirectory,
+      id,
+      ...(options.actor === undefined ? {} : { actor: options.actor })
+    }, dependencies);
+    if (refreshed?.task.budget?.thresholdStatus === "decision-required") {
+      throw budgetDecisionRequiredError(refreshed.task, "host delegation bind");
+    }
+  }
   const reservedFence = reservationFence(reservation);
   const completeRole = reservation.role ?? "implementer";
   const authorizeRequest: HostDelegationAuthorizeRequest = {
     phase: "preflight",
     taskId: id,
     directory: targetDirectory,
-    ownerThread,
+    ownerThread: identity.ownerThread,
+    waitAuthority: identity.waitAuthority,
+    ...(identity.hostHandle === undefined ? {} : { hostHandle: identity.hostHandle }),
+    ...(identity.threadId === undefined ? {} : { threadId: identity.threadId }),
     writeAuthorized: false,
     ...(reservation.role === undefined ? {} : { role: reservation.role }),
     reservation
@@ -1561,7 +1813,10 @@ export async function completeHostDelegation(
       directory: targetDirectory,
       id,
       ...reservedFence,
-      ownerThread,
+      ownerThread: identity.ownerThread,
+      waitAuthority: identity.waitAuthority,
+      ...(identity.hostHandle === undefined ? {} : { hostHandle: identity.hostHandle }),
+      ...(identity.threadId === undefined ? {} : { threadId: identity.threadId }),
       ...(options.ttlSeconds === undefined ? {} : { ttlSeconds: options.ttlSeconds }),
       ...(options.heartbeatIntervalSeconds === undefined ? {} : { heartbeatIntervalSeconds: options.heartbeatIntervalSeconds }),
       evidence: options.evidence || [],
@@ -1582,7 +1837,10 @@ export async function completeHostDelegation(
       phase: "activate",
       taskId: id,
       directory: targetDirectory,
-      ownerThread,
+      ownerThread: identity.ownerThread,
+      waitAuthority: identity.waitAuthority,
+      ...(identity.hostHandle === undefined ? {} : { hostHandle: identity.hostHandle }),
+      ...(identity.threadId === undefined ? {} : { threadId: identity.threadId }),
       writeAuthorized: completeRole === "implementer",
       ...(reservation.role === undefined ? {} : { role: reservation.role }),
       reservation,
@@ -1593,7 +1851,7 @@ export async function completeHostDelegation(
       authorization = withApprovalCommand(
         await authorizeHostOwnerBeforeLeaseCleanupWindow(options.adapter, activationRequest, bound.lease, dependencies),
         id,
-        ownerThread,
+        identity.ownerThread,
         approvalProposal(completeRole, bound.task)
       );
     } catch (error) {
@@ -1636,7 +1894,7 @@ export async function completeHostDelegation(
     authorization = withApprovalCommand(
       { status: "accepted", hostNotificationRequired: true },
       id,
-      ownerThread,
+      identity.ownerThread,
       approvalProposal(completeRole, bound.task)
     );
   }
@@ -1645,8 +1903,11 @@ export async function completeHostDelegation(
     task: bound.task,
     reservation,
     reservationFence: reservedFence,
-    spawn: ownerThread,
-    ownerThread,
+    spawn: identity.ownerThread,
+    ownerThread: identity.ownerThread,
+    waitAuthority: bound.lease.waitAuthority || identity.waitAuthority,
+    ...(bound.lease.hostHandle === undefined ? {} : { hostHandle: bound.lease.hostHandle }),
+    ...(bound.lease.threadId === undefined ? {} : { threadId: bound.lease.threadId }),
     role: reservation.role ?? "implementer",
     lease: bound.lease,
     leaseFence: leaseFence(bound.lease),

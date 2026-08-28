@@ -225,7 +225,7 @@ test("keeps the primary agent supervisory and delegates routine implementation",
   assert.match(skill, /lease.revoke/);
   assert.match(skill, /Do not load `STATE\.md`/);
   assert.match(skill, /wait --task <id>/);
-  assert.match(skill, /wait_agent` only for the exact `hostWaitThreadIds/);
+  assert.match(skill, /wait_agent` only for the exact `hostWaitHandles` \(or legacy `hostWaitThreadIds`\)/);
   assert.match(skill, /hostFallbackRequired` \/ `hostFallbackThreadIds` as compatibility aliases/);
   assert.match(skill, /On Desktop without an injected adapter/);
   assert.match(skill, /Do not start a child App Server/);

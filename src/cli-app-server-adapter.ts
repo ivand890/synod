@@ -1644,6 +1644,7 @@ export function createCliAppServerAdapter(
   };
 
   return {
+    waitAuthority: "appServer",
     spawn,
     authorize,
     async wait() {

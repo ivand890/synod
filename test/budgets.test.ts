@@ -10,6 +10,7 @@ import { ERROR_CODES, SynodError } from "../src/errors.js";
 import { run } from "../src/cli.js";
 import { formatHandoff, generateHandoff } from "../src/handoff.js";
 import { initProject } from "../src/lifecycle.js";
+import { startHostDelegation } from "../src/host-delegation.js";
 import {
   ORCHESTRATION_EVENTS_PATH,
   ORCHESTRATION_STATE_PATH,
@@ -23,6 +24,7 @@ import {
   observeTaskBudget,
   orchestrationStatus,
   readOrchestration,
+  refreshTaskBudget,
   reportTaskBudget,
   reserveTaskLease,
   setTaskBudgetPolicy,
@@ -367,6 +369,126 @@ test("records a hard crossing, gates execution, and resumes only through an exac
     }),
     error => error instanceof SynodError && error.code === ERROR_CODES.BUDGET_STALE
   );
+});
+
+test("refresh records a hard crossing and delegate start stops before reservation or spawn", async () => {
+  const directory = await project();
+  await task(directory);
+  const { start } = await configure(directory);
+  let usageCalls = 0;
+  let spawned = 0;
+  await assert.rejects(
+    startHostDelegation({
+      directory,
+      id: "T-BUDGET",
+      write: ["src/budget-delegation.ts"],
+      adapter: {
+        async spawn() { spawned += 1; return "thread:budget"; },
+        async authorize() { return { status: "authorized" }; },
+        async close() {}
+      }
+    }, {
+      usageCollector: async () => {
+        usageCalls += 1;
+        return usageReport(start, 120);
+      }
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.BUDGET_DECISION_REQUIRED
+  );
+  assert.equal(usageCalls, 2);
+  assert.equal(spawned, 0);
+  const afterDelegation = await readOrchestration(directory);
+  assert.equal(afterDelegation.state.tasks["T-BUDGET"]?.leaseReservation, undefined);
+  assert.equal(afterDelegation.state.tasks["T-BUDGET"]?.budget?.observations.length, 1);
+  assert.equal(afterDelegation.state.tasks["T-BUDGET"]?.budget?.thresholdStatus, "decision-required");
+
+  const refreshed = await refreshTaskBudget({ directory, id: "T-BUDGET" }, {
+    usageCollector: async () => {
+      throw new Error("an existing hard gate must not collect usage again");
+    }
+  });
+  assert.equal(refreshed?.observation?.thresholdStatus, "decision-required");
+});
+
+test("refresh honors a continuation allowance and preserves stale/incomplete failures", async () => {
+  const directory = await project();
+  await task(directory);
+  const { start } = await configure(directory);
+  const observed = await observeTaskBudget({ directory, id: "T-BUDGET" }, {
+    usageCollector: collector(usageReport(start, 120))
+  });
+  await decideTaskBudget({
+    directory,
+    id: "T-BUDGET",
+    observation: observed.observation.event.id,
+    action: "continue",
+    addedAllowance: 50,
+    reason: "Finish the bounded work",
+    evidence: ["review:budget"]
+  });
+
+  const continued = await refreshTaskBudget({ directory, id: "T-BUDGET" }, {
+    usageCollector: collector(usageReport(start, 140))
+  });
+  assert.equal(continued?.task.budget?.thresholdStatus, "soft-exceeded");
+  assert.equal(continued?.observation?.totalTokens, 140);
+
+  await assert.rejects(
+    refreshTaskBudget({ directory, id: "T-BUDGET" }, {
+      usageCollector: collector(usageReport(start, 140, { session: "different-root" }))
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.BUDGET_STALE
+  );
+  await assert.rejects(
+    refreshTaskBudget({ directory, id: "T-BUDGET" }, {
+      usageCollector: collector(usageReport(start, 140, { resets: 1 }))
+    }),
+    error => error instanceof SynodError && error.code === ERROR_CODES.BUDGET_REPORT_INCOMPLETE
+  );
+});
+
+test("task-aware wait refreshes a budget and returns its durable decision gate", async () => {
+  const directory = await project();
+  await task(directory);
+  const { start } = await configure(directory);
+  await transitionTask({ directory, id: "T-BUDGET", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-BUDGET", ownerThread: "thread:budget-wait", write: ["src/budget-wait.ts"] });
+  await transitionTask({ directory, id: "T-BUDGET", to: "ACTIVE", revision: 0 });
+  const messages: string[] = [];
+  let waitStarts = 0;
+  let waitReads = 0;
+  const output = {
+    log(...values: unknown[]) { messages.push(values.join(" ")); },
+    warn(...values: unknown[]) { messages.push(values.join(" ")); },
+    error(...values: unknown[]) { messages.push(values.join(" ")); }
+  };
+  const code = await run(["wait", "--task", "T-BUDGET", "--cwd", directory, "--json"], output, {
+    usageCollector: collector(usageReport(start, 120)),
+    waitAdapterFactory: () => ({
+      async start() { waitStarts += 1; },
+      capabilities: () => ({ notification: false, cursor: false }),
+      async read(threadIds: string[]) {
+        waitReads += 1;
+        return { statuses: threadIds.map(threadId => ({ threadId, status: { type: "idle" as const } })) };
+      },
+      async close() {}
+    })
+  });
+
+  assert.equal(code, 1);
+  assert.equal(waitStarts, 0);
+  assert.equal(waitReads, 0);
+  const envelope = JSON.parse(messages.find(message => message.startsWith("{")) || "{}");
+  assert.equal(envelope.ok, true);
+  assert.equal(envelope.data.budget.thresholdStatus, "decision-required");
+  assert.equal(envelope.data.budget.decisionRequired, true);
+  assert.equal(envelope.data.budget.totalTokens, 120);
+  assert.equal(envelope.data.nextCommand.operation, "budget.decide");
+  assert.equal(envelope.warnings[0]?.code, "SYNOD_BUDGET_HARD_EXCEEDED");
+  const canonical = await readOrchestration(directory);
+  assert.equal(canonical.events.at(-1)?.type, "task.budget-observed");
+  assert.equal(canonical.state.tasks["T-BUDGET"]?.budget?.observations.length, 1);
+  assert.equal(canonical.state.tasks["T-BUDGET"]?.budget?.thresholdStatus, "decision-required");
 });
 
 test("a hard budget decision recorded after reserve prevents owner binding", async () => {

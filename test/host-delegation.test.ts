@@ -83,6 +83,7 @@ function dependencies({
   release,
   revoke,
   heartbeat,
+  refreshBudget = async () => ({ task }),
   setTimeout: scheduleTimeout,
   clearTimeout: clearScheduledTimeout,
   clock = () => Date.parse("2026-08-15T00:00:00.000Z")
@@ -95,6 +96,7 @@ function dependencies({
   release?: (options: Record<string, unknown>) => Promise<unknown>;
   revoke?: (options: Record<string, unknown>) => Promise<unknown>;
   heartbeat?: (options: Record<string, unknown>) => Promise<unknown>;
+  refreshBudget?: HostDelegationDependencies["refreshBudget"];
   setTimeout?: HostDelegationDependencies["setTimeout"];
   clearTimeout?: HostDelegationDependencies["clearTimeout"];
   clock?: () => number;
@@ -109,6 +111,7 @@ function dependencies({
   if (release) result.release = release as unknown as NonNullable<HostDelegationDependencies["release"]>;
   if (revoke) result.revoke = revoke as unknown as NonNullable<HostDelegationDependencies["revoke"]>;
   if (heartbeat) result.heartbeat = heartbeat as unknown as NonNullable<HostDelegationDependencies["heartbeat"]>;
+  if (refreshBudget) result.refreshBudget = refreshBudget;
   if (scheduleTimeout) result.setTimeout = scheduleTimeout;
   if (clearScheduledTimeout) result.clearTimeout = clearScheduledTimeout;
   return result;
@@ -259,7 +262,7 @@ test("never-resolving spawn expires the reservation and ignores a late owner", a
   const shortReservation = {
     ...reservation,
     reservedAt: new Date(Date.now() - 1_000).toISOString(),
-    expiresAt: new Date(Date.now() + 10).toISOString()
+    expiresAt: new Date(Date.now() + 100).toISOString()
   } as TaskLeaseReservation;
   const adapter: HostDelegationAdapter = {
     async spawn() {
@@ -310,7 +313,7 @@ test("missing owner fails closed and expires without binding", async () => {
   const nearExpiryReservation = {
     ...reservation,
     reservedAt: new Date(Date.now() - 1_000).toISOString(),
-    expiresAt: new Date(Date.now() + 15).toISOString()
+    expiresAt: new Date(Date.now() + 100).toISOString()
   } as TaskLeaseReservation;
   const adapter: HostDelegationAdapter = {
     async spawn() { return {}; },
@@ -804,6 +807,25 @@ test("Codex handoff reserves and complete binds the stored fence", async () => {
   assert.equal(completed.ownerThread, "opaque-owner");
   assert.equal(completed.authorization.status, "accepted");
   assert.equal(completed.authorization.hostNotificationRequired, true);
+});
+
+test("malformed structured thread IDs fail before host completion reads or mutates the lease", async () => {
+  let reads = 0;
+  await assert.rejects(
+    completeHostDelegation({
+      id: "T-HOST",
+      threadId: "/root/syn_price_sample_impl"
+    }, {
+      read: async () => {
+        reads += 1;
+        throw new Error("read must not occur after pre-mutation validation");
+      }
+    }),
+    error => error instanceof SynodError
+      && error.code === ERROR_CODES.DELEGATION_INVALID
+      && error.message === "Delegation threadId must be an exact Codex thread identifier, not a host label or filesystem path."
+  );
+  assert.equal(reads, 0);
 });
 
 test("correction handoff requires evidence on host completion when start supplied none", async () => {

@@ -1,10 +1,12 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { CodexAppServerClient } from "./app-server.js";
 import type { AppServerDiagnostics, AppServerEvent } from "./app-server.js";
+import type { BudgetThresholdStatus } from "./budgets.js";
 import { resolveCodexRuntime } from "./codex-runtime.js";
 import { WARNING_CODES, warning } from "./contracts.js";
 import type { Warning, WarningCode } from "./contracts.js";
 import { ERROR_CODES, SynodError, asSynodError } from "./errors.js";
+import { isLegacyHostOwnerThread, isPathLikeLegacyOwnerThread, isValidCodexThreadId } from "./leases.js";
 import { validateOrchestrationReadOnly } from "./orchestration.js";
 import { errorMessage, isRecord } from "./validation.js";
 
@@ -35,6 +37,10 @@ export interface ThreadStatusAdapter {
 
 export interface HostWaitRequest {
   threadIds: string[];
+  /** Opaque host handles are kept separate from Codex thread IDs. */
+  hostWaitHandles?: string[];
+  /** Compatibility alias accepted by host integrations. */
+  hostHandles?: string[];
   cwd?: string;
   timeoutMs: number;
   pollIntervalMs: number;
@@ -170,6 +176,8 @@ export interface HostWaitAdapter {
 
 export interface WaitForThreadsOptions {
   threadIds: string[];
+  hostWaitHandles?: string[];
+  hostHandles?: string[];
   cwd?: string;
   timeoutMs?: number;
   pollIntervalMs?: number;
@@ -207,6 +215,8 @@ export interface WaitReport {
   /** Positive host handoff contract. The legacy fallback fields below are aliases. */
   hostWaitRequired: boolean;
   hostWaitThreadIds: string[];
+  /** Positive host-owned handoff identities; never sent to thread/read. */
+  hostWaitHandles?: string[];
   hostFallbackRequired: boolean;
   hostFallbackThreadIds: string[];
   statuses: ObservedThreadStatus[];
@@ -241,7 +251,15 @@ export interface WaitTaskSelection {
   leaseId: string;
   generation: number;
   ownerThread: string;
+  waitAuthority?: "host" | "appServer";
+  hostHandle?: string;
+  threadId?: string;
   expectedHeartbeatAt: string;
+  budget?: {
+    policyRevision: number;
+    thresholdStatus: BudgetThresholdStatus;
+    decisionRequired: boolean;
+  };
 }
 
 export interface WaitSelection {
@@ -251,6 +269,7 @@ export interface WaitSelection {
   requestedThreadIds: string[];
   tasks: WaitTaskSelection[];
   threadIds: string[];
+  hostWaitHandles?: string[];
 }
 
 export interface WaitSelectionOptions {
@@ -276,11 +295,18 @@ interface WaitSelectableTask {
     status: string;
     expiresAt: string;
     heartbeatAt?: string;
+    waitAuthority?: "host" | "appServer";
+    hostHandle?: string;
+    threadId?: string;
   };
   leaseReservation?: { id: string; generation: number };
   recovery?: {
     status: string;
     endedLease: { id: string; generation: number };
+  };
+  budget?: {
+    policy: { revision: number };
+    thresholdStatus: BudgetThresholdStatus;
   };
 }
 
@@ -434,6 +460,21 @@ export async function resolveWaitSelection({
           details: { taskId, leaseId: lease.id, generation: lease.generation, expiresAt: lease.expiresAt }
         });
       }
+      const legacyHostHandle = lease.waitAuthority === undefined && isLegacyHostOwnerThread(lease.ownerThread)
+        ? lease.ownerThread
+        : undefined;
+      const effectiveWaitAuthority = lease.waitAuthority || (legacyHostHandle ? "host" : undefined);
+      const effectiveHostHandle = lease.hostHandle || legacyHostHandle;
+      if (effectiveWaitAuthority === "appServer" && !isValidCodexThreadId(lease.threadId)) {
+        throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `Task ${taskId} App Server lease is missing its exact threadId.`, {
+          details: { taskId, threadId: lease.threadId ?? null }
+        });
+      }
+      if (effectiveWaitAuthority === "host" && !effectiveHostHandle) {
+        throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `Task ${taskId} host lease is missing its opaque hostHandle.`, {
+          details: { taskId, hostHandle: effectiveHostHandle ?? null }
+        });
+      }
       tasks.push({
         taskId,
         state: task.state,
@@ -441,16 +482,33 @@ export async function resolveWaitSelection({
         leaseId: lease.id,
         generation: lease.generation,
         ownerThread: lease.ownerThread,
-        expectedHeartbeatAt: lease.heartbeatAt || lease.expiresAt
+        ...(effectiveWaitAuthority === undefined ? {} : { waitAuthority: effectiveWaitAuthority }),
+        ...(effectiveHostHandle === undefined ? {} : { hostHandle: effectiveHostHandle }),
+        ...(lease.threadId === undefined ? {} : { threadId: lease.threadId }),
+        expectedHeartbeatAt: lease.heartbeatAt || lease.expiresAt,
+        ...(task.budget ? {
+          budget: {
+            policyRevision: task.budget.policy.revision,
+            thresholdStatus: task.budget.thresholdStatus,
+            decisionRequired: task.budget.thresholdStatus === "decision-required"
+          }
+        } : {})
       });
     }
   }
+  const hostWaitHandles = tasks
+    .filter(task => task.waitAuthority === "host" && task.hostHandle)
+    .map(task => task.hostHandle!);
+  const runtimeThreadIds = tasks
+    .filter(task => task.waitAuthority !== "host")
+    .map(task => task.threadId || task.ownerThread);
   return {
     ...(requestedTaskIds.length > 0 ? { waitAuthority: "canonical" as const } : {}),
     requestedTaskIds,
     requestedThreadIds,
     tasks,
-    threadIds: [...new Set([...tasks.map(task => task.ownerThread), ...requestedThreadIds])]
+    threadIds: [...new Set([...runtimeThreadIds, ...requestedThreadIds])],
+    ...(hostWaitHandles.length > 0 ? { hostWaitHandles: [...new Set(hostWaitHandles)] } : {})
   };
 }
 
@@ -604,10 +662,14 @@ function hostHandoffReport(
   runtime: WaitRuntime,
   startedAt: number,
   now: () => number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  hostWaitHandles: string[] = []
 ): WaitReport {
   const aborted = Boolean(signal?.aborted);
-  const hostWaitThreadIds = aborted ? [] : [...threadIds];
+  const handles = aborted ? [] : [...new Set(hostWaitHandles)];
+  // `hostWaitThreadIds` is retained only for callers that supplied legacy
+  // thread IDs. Structured host handles never get copied into this alias.
+  const hostWaitThreadIds = aborted || handles.length > 0 ? [] : [...threadIds];
   const statuses = threadIds.map(threadId => ({
     threadId,
     // Desktop host state is intentionally not observed by this CLI. Keep the
@@ -626,11 +688,12 @@ function hostHandoffReport(
     incomplete: true,
     approvalNeeded: false,
     userInputNeeded: false,
-    hostWaitRequired: hostWaitThreadIds.length > 0,
+    hostWaitRequired: hostWaitThreadIds.length > 0 || handles.length > 0,
     hostWaitThreadIds,
+    hostWaitHandles: handles,
     // Preserve the 0.9.x compatibility aliases while making the positive
     // handoff vocabulary authoritative for new callers.
-    hostFallbackRequired: hostWaitThreadIds.length > 0,
+    hostFallbackRequired: hostWaitThreadIds.length > 0 || handles.length > 0,
     hostFallbackThreadIds: [...hostWaitThreadIds],
     statuses,
     warnings: [],
@@ -644,8 +707,9 @@ function hostHandoffReport(
       codexExecutableSource: runtime.executableSource,
       waitAuthority: "host",
       observation: "host-handoff",
-      hostWaitRequired: hostWaitThreadIds.length > 0,
-      hostWaitThreadIds: [...hostWaitThreadIds]
+      hostWaitRequired: hostWaitThreadIds.length > 0 || handles.length > 0,
+      hostWaitThreadIds: [...hostWaitThreadIds],
+      hostWaitHandles: handles
     }
   };
 }
@@ -658,7 +722,7 @@ function normalizeHostWaitResult(value: unknown, threadIds: string[]): HostWaitR
   const byId = new Map(statuses.map(item => [item.threadId, item.status]));
   const evidence = waitLossEvidence(candidate);
   return {
-    statuses: projectStatuses(threadIds, byId),
+    statuses: threadIds.length > 0 ? projectStatuses(threadIds, byId) : statuses,
     ...(candidate.mode === "notification" || candidate.mode === "cursor" || candidate.mode === "poll"
       ? { mode: candidate.mode }
       : {}),
@@ -683,6 +747,8 @@ async function waitThroughHost(
   now: () => number
 ): Promise<WaitReport> {
   const ids = [...new Set(options.threadIds.map(value => String(value).trim()).filter(Boolean))];
+  const handles = [...new Set([...(options.hostWaitHandles || []), ...(options.hostHandles || [])]
+    .map(value => String(value).trim()).filter(Boolean))];
   const startedAt = now();
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const deadline = startedAt + timeoutMs;
@@ -719,6 +785,7 @@ async function waitThroughHost(
           const outcome = await boundedOperation(
             () => observe({
               threadIds: ids,
+              ...(handles.length > 0 ? { hostWaitHandles: handles } : {}),
               ...(options.cwd ? { cwd: options.cwd } : {}),
               timeoutMs: remaining,
               pollIntervalMs,
@@ -753,6 +820,7 @@ async function waitThroughHost(
               userInputNeeded: final.userInputNeeded,
               hostWaitRequired: false,
               hostWaitThreadIds: [],
+              hostWaitHandles: handles,
               hostFallbackRequired: false,
               hostFallbackThreadIds: [],
               statuses,
@@ -789,6 +857,7 @@ async function waitThroughHost(
         userInputNeeded: false,
         hostWaitRequired: false,
         hostWaitThreadIds: [],
+        hostWaitHandles: handles,
         hostFallbackRequired: false,
         hostFallbackThreadIds: [],
         statuses,
@@ -797,6 +866,7 @@ async function waitThroughHost(
         diagnostics: {
           waitAuthority: "host",
           observation: "host-adapter",
+          hostWaitHandles: handles,
           ...(timedOut ? reportDiagnostics("wait-timeout", undefined) : {})
         }
       };
@@ -835,23 +905,39 @@ async function waitThroughHost(
 
 export async function waitForThreads({
   threadIds,
+  hostWaitHandles,
+  hostHandles,
   cwd,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   signal
 }: WaitForThreadsOptions, dependencies: WaitDependencies = {}): Promise<WaitReport> {
   const cleanupTimeoutMs = dependencies.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS;
-  const ids = [...new Set(threadIds.map(value => String(value).trim()).filter(Boolean))];
-  if (ids.length === 0 || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0
+  const requestedIds = [...new Set(threadIds.map(value => String(value).trim()).filter(Boolean))];
+  // A pre-authority lease may contain a collaboration path such as
+  // `/root/worker`. Treat that legacy value as an opaque host handle at the
+  // boundary, so no adapter/client can accidentally send it to thread/read.
+  const legacyHostIds = requestedIds.filter(isPathLikeLegacyOwnerThread);
+  const ids = requestedIds.filter((value): boolean => !isPathLikeLegacyOwnerThread(value));
+  const handles = [...new Set([...(hostWaitHandles || []), ...(hostHandles || []), ...legacyHostIds]
+    .map(value => String(value).trim()).filter(Boolean))];
+  if ((ids.length === 0 && handles.length === 0) || !Number.isSafeInteger(timeoutMs) || timeoutMs <= 0
     || !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs <= 0 || pollIntervalMs > MAX_POLL_INTERVAL_MS
     || !Number.isSafeInteger(cleanupTimeoutMs) || cleanupTimeoutMs <= 0) {
-    throw new SynodError(ERROR_CODES.WAIT_INVALID, "Wait requires thread IDs, a positive timeout, and a poll interval of at most 5000ms.");
+    throw new SynodError(ERROR_CODES.WAIT_INVALID, "Wait requires thread IDs or host handles, a positive timeout, and a poll interval of at most 5000ms.");
   }
   const now = dependencies.clock || (() => Date.now());
   const startedAt = now();
   const host = dependencies.hostAdapterFactory?.() || dependencies.hostAdapter;
   if (host && (host.wait || host.observe)) {
-    return waitThroughHost({ threadIds: ids, ...(cwd ? { cwd } : {}), timeoutMs, pollIntervalMs, ...(signal ? { signal } : {}) }, host, cleanupTimeoutMs, now);
+    return waitThroughHost({ threadIds: ids, ...(handles.length > 0 ? { hostWaitHandles: handles } : {}), ...(cwd ? { cwd } : {}), timeoutMs, pollIntervalMs, ...(signal ? { signal } : {}) }, host, cleanupTimeoutMs, now);
+  }
+  // Host handles are not Codex thread IDs. If the host cannot perform the
+  // direct wait, hand them back without constructing an App Server or calling
+  // thread/read with an opaque handle.
+  if (ids.length === 0 && handles.length > 0 && !host?.wait && !host?.observe) {
+    const runtime = (dependencies.runtimeResolver || resolveCodexRuntime)();
+    return hostHandoffReport(ids, runtime, startedAt, now, signal, handles);
   }
   let hostAuthority = false;
   let adapter = dependencies.adapterFactory?.();
@@ -884,7 +970,7 @@ export async function waitForThreads({
     // child App Server/client is constructed; the CLI cannot invoke the host
     // primitive, so it returns an explicit incomplete handoff instead.
     if (runtime.surface === "desktop") {
-      return hostHandoffReport(ids, runtime, startedAt, now, signal);
+      return hostHandoffReport(ids, runtime, startedAt, now, signal, handles);
     }
     const clientOptions = { ...(cwd ? { cwd } : {}), codexBin: runtime.executable };
     adapter = appServerThreadStatusAdapter(
@@ -1031,12 +1117,13 @@ export async function waitForThreads({
       elapsedMs: Math.max(0, now() - startedAt),
       timedOut,
       aborted,
-      incomplete: timedOut || aborted || final.incomplete,
+      incomplete: timedOut || aborted || final.incomplete || handles.length > 0,
       approvalNeeded: final.approvalNeeded,
       userInputNeeded: final.userInputNeeded,
-      hostWaitRequired: hostWaitThreadIds.length > 0,
+      hostWaitRequired: hostWaitThreadIds.length > 0 || handles.length > 0,
       hostWaitThreadIds,
-      hostFallbackRequired: hostWaitThreadIds.length > 0,
+      hostWaitHandles: handles,
+      hostFallbackRequired: hostWaitThreadIds.length > 0 || handles.length > 0,
       hostFallbackThreadIds: [...hostWaitThreadIds],
       statuses,
       ...(childLoss ? { childLoss } : {}),
@@ -1045,7 +1132,11 @@ export async function waitForThreads({
       diagnostics: {
         ...(childLoss ? { childLoss } : {}),
         ...reportDiagnostics(lossCause, evidence),
-        ...(observedAuthority !== waitAuthority ? { waitAuthority: observedAuthority } : {})
+        ...(observedAuthority !== waitAuthority ? { waitAuthority: observedAuthority } : {}),
+        ...(handles.length > 0 ? {
+          hostWaitRequired: true,
+          hostWaitHandles: handles
+        } : {})
       }
     };
   } catch (error) {
@@ -1115,7 +1206,8 @@ export function formatWaitReport(report: WaitReport, selection?: WaitSelection):
     `Timed out: ${report.timedOut ? "yes" : "no"}; aborted: ${report.aborted ? "yes" : "no"}; approval needed: ${report.approvalNeeded ? "yes" : "no"}; user input needed: ${report.userInputNeeded ? "yes" : "no"}`
   );
   if (report.hostWaitRequired) {
-    lines.push(`Host wait required: ${report.hostWaitThreadIds.join(", ")}`);
+    const handles = report.hostWaitHandles || [];
+    lines.push(`Host wait required: ${[...report.hostWaitThreadIds, ...handles].join(", ")}`);
   }
   if (report.childLoss) lines.push(`Child loss: ${report.childLoss}`);
   for (const item of report.statuses) {

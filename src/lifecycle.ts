@@ -25,7 +25,8 @@ import type { ManagedManifest, ManifestEntry, ManifestOwnership } from "./manife
 import { migrateManifest } from "./migrations/index.js";
 import { packageName, packageVersion } from "./package.js";
 import { inspectLocalRuntime, readLocalRuntimeDescriptor } from "./local-runtime.js";
-import { DEFAULT_PROFILE, getProfile } from "./profiles.js";
+import { FALLBACK_PROFILE, getProfile } from "./profiles.js";
+import type { ProfileSelection } from "./profiles.js";
 import {
   agentsBlockSeparator,
   appendAgentsBlock,
@@ -93,12 +94,14 @@ export interface LifecycleResult extends Record<string, unknown> {
   conflicts: string[];
   warnings: Warning[];
   operations: Array<{ action: "write" | "delete"; path: string }>;
+  profileSelection?: Omit<ProfileSelection, "warning">;
 }
 
 export interface LifecycleDependencies extends TransactionHooks, Record<string, unknown> {
   localRuntimePlan?: LocalRuntimePlan;
   platform?: NodeJS.Platform;
   pruneEmptyDirectories?: (targetDirectory: string, relativePaths: string[]) => Promise<void>;
+  profileSelector?: (context: { directory: string; dryRun: boolean }) => Promise<ProfileSelection | undefined> | ProfileSelection | undefined;
 }
 
 export interface ProjectCheck {
@@ -217,6 +220,20 @@ function resultFromPlan(
   };
 }
 
+function unavailableProfileSelection(targetDirectory: string): ProfileSelection {
+  return {
+    profile: FALLBACK_PROFILE,
+    source: "fallback",
+    reason: "capability-selection-unavailable",
+    details: { fallbackProfile: FALLBACK_PROFILE, targetDirectory },
+    warning: warning(
+      WARNING_CODES.PROFILE_FALLBACK,
+      `No capability profile was provided; using ${FALLBACK_PROFILE}.`,
+      { fallbackProfile: FALLBACK_PROFILE, reason: "capability-selection-unavailable", targetDirectory }
+    )
+  };
+}
+
 async function applyPlannedTransaction(
   targetDirectory: string,
   operations: TransactionOperation[],
@@ -320,11 +337,12 @@ async function planAgentsInit(
 }
 
 export async function initProject(
-  { directory = ".", dryRun = false, force = false, profile: requestedProfile }: {
+  { directory = ".", dryRun = false, force = false, profile: requestedProfile, profileSelection: providedProfileSelection }: {
     directory?: string;
     dryRun?: boolean;
     force?: boolean;
     profile?: string;
+    profileSelection?: ProfileSelection;
   } = {},
   dependencies: LifecycleDependencies = {}
 ): Promise<LifecycleResult> {
@@ -337,7 +355,14 @@ export async function initProject(
   } : undefined);
   const existingManifest = await readManifest(targetDirectory, { required: false });
   const existingProfile = existingManifest?.schemaVersion === 1 ? undefined : existingManifest?.profile;
-  const profileId = requestedProfile || existingProfile || DEFAULT_PROFILE;
+  const profileSelection = requestedProfile !== undefined
+    ? { profile: requestedProfile, source: "explicit" as const }
+    : existingProfile !== undefined
+      ? { profile: existingProfile, source: "existing" as const }
+      : providedProfileSelection
+        || await dependencies.profileSelector?.({ directory: targetDirectory, dryRun })
+        || unavailableProfileSelection(targetDirectory);
+  const profileId = profileSelection.profile;
   if (existingManifest && (
     existingManifest.schemaVersion !== MANIFEST_SCHEMA_VERSION ||
     existingManifest.templateVersion !== packageVersion ||
@@ -416,6 +441,7 @@ export async function initProject(
   const states: LifecycleState[] = [];
   const warnings: Warning[] = [];
   const conflicts: string[] = [];
+  if (profileSelection?.warning) warnings.push(profileSelection.warning);
 
   const agentsPlan = await planAgentsInit(targetDirectory, templates.agentsBlock, force, previous.get("AGENTS.md"));
   states.push(agentsPlan.state);
@@ -559,7 +585,10 @@ export async function initProject(
     runtimeVersion: localRuntimePlan?.runtimeVersion || null,
     runtimeAction: localRuntimePlan?.action || null,
     templateVersion: packageVersion,
-    profile: profile.id
+    profile: profile.id,
+    profileSelection: Object.fromEntries(
+      Object.entries(profileSelection).filter(([key]) => key !== "warning")
+    )
   });
   if (!dryRun && conflicts.length === 0) {
     await applyPlannedTransaction(targetDirectory, operations, dependencies, result);
@@ -591,7 +620,7 @@ export async function upgradeProject(
       details: { installed: installed.templateVersion, cli: packageVersion }
     });
   }
-  const profile = getProfile(requestedProfile || installed.profile || DEFAULT_PROFILE);
+  const profile = getProfile(requestedProfile ?? installed.profile);
   const templates = await loadTemplateSet(packageVersion, profile);
   const previous = manifestFileMap(installed);
   const legacyOrchestrationPaths = [ORCHESTRATION_STATE_PATH, ORCHESTRATION_EVENTS_PATH, ORCHESTRATION_STATUS_PATH];

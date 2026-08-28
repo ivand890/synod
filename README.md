@@ -4,7 +4,7 @@
 
 Open Codex in this repo. Send these three messages:
 
-1. `Install synod in this project with pnpm dlx @ivand890/synod init --profile synod-5.6.`
+1. `Install synod in this project with pnpm dlx @ivand890/synod init.`
 2. `Restart Codex.`
 3. `Using synod, implement <what you want>.`
 
@@ -20,9 +20,9 @@ externally immutable. Post-publication evidence is recorded in the versioned
 [`release-closeouts/v0.11.0.json`](release-closeouts/v0.11.0.json) and the
 earlier `v0.9.5` evidence in
 [`release-closeouts/v0.9.5.json`](release-closeouts/v0.9.5.json). The root
-[`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) records the same verified
-public `v0.12.1` evidence. The phase-2 live verifier runs on the protected
-closeout PR, not the tag workflow; the tag
+[`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) is the prepared/pending source
+record for `v0.12.2`; it does not yet claim public verification. The phase-2 live verifier
+runs on the protected closeout PR, not the tag workflow; the tag
 workflow validates only the strict prepared/pending source record before
 publication.
 
@@ -30,10 +30,21 @@ publication.
 
 The public and pinned `@ivand890/synod@0.12.1` is the release described above.
 A project using `pnpm dlx @ivand890/synod@0.12.1`, or a project runtime pinned
-to `0.12.1`, exposes the released command surface. The source tree contains the
-same v0.12.1 surfaces and their regression tests; future source increments
-remain unavailable to a pinned runtime until a corresponding release is
-published and that project is explicitly upgraded.
+to `0.12.1`, exposes the released command surface. The source tree is prepared
+as `v0.12.2` with the following additions, which remain unavailable to a pinned
+runtime until the release is published and that project is explicitly
+upgraded:
+
+- Capability-driven fresh initialization that selects `synod-5.6` only after
+  its model/reasoning contract is confirmed, with a structured `portable`
+  fallback and no override of explicit or existing profile selection.
+- Structured delegation identity that separates host-owned opaque handles from
+  exact App Server thread UUIDs and records the responsible wait authority.
+- Automatic configured-budget refresh at delegation and task-aware wait
+  boundaries, with hard crossings stopping execution until an explicit
+  canonical decision.
+- Codex `0.150.x` compatibility alongside `0.148.x`, with the untested
+  `0.149.x` gap still failing closed, plus a packaged dated price-file example.
 
 The v0.12.0 source surfaces remain available in this release:
 
@@ -68,15 +79,14 @@ The v0.11.0 source surfaces remain available in this release:
   Server; unsupported or non-Codex contexts fail closed.
 - The explicit `--include-local-docs` recovery-bundle path.
 
-These commands are available in the public v0.12.1 release. The public/pinned
-`v0.12.1` `doctor` support expression is
-`>=0.148.0-0 <0.149.0 (all 0.148.x variants)`.
-Every valid `0.148.x` semantic version is accepted, including prerelease,
-stable, patch, and build-metadata variants; `0.148.0-alpha.9` is known-good.
-Valid versions below `0.148` or at and above `0.149`, plus invalid semver, are
-unsupported.
+The source prepared as `v0.12.2` has this `doctor` support expression:
+`>=0.148.0-0 <0.149.0 || >=0.150.0-0 <0.151.0 (all 0.148.x and 0.150.x variants)`.
+Every valid `0.148.x` and `0.150.x` semantic version is accepted, including
+prerelease, stable, patch, and build-metadata variants; `0.148.0-alpha.9` is
+known-good and exercised in CI. Valid versions below `0.148`, the untested
+`0.149.x` gap, or at and above `0.151`, plus invalid semver, are unsupported.
 
-The v0.12.1 release requires Node.js `>=22`; Node 20 is unsupported. Its CI
+The v0.12.2 source requires Node.js `>=22`; Node 20 is unsupported. Its CI
 tests Node 22 and 24 on Ubuntu, plus Node 24 package smoke on macOS and
 Windows.
 
@@ -105,7 +115,13 @@ cd your-project
 pnpm dlx @ivand890/synod init
 ```
 
-Fresh installs default to the conservative `portable` profile. Run `pnpm dlx @ivand890/synod doctor` (or `synod doctor` with the optional global installation) before opting into `synod-5.6` so the exact model and reasoning capabilities are verified for the installed Codex runtime and account.
+Fresh installs probe the active Codex App Server before mutation and select
+`synod-5.6` only when every required model and reasoning effort is available.
+If capability discovery fails or the complete profile is unavailable, Synod
+selects `portable` and emits structured `SYNOD_PROFILE_FALLBACK` provenance.
+An explicit `--profile` and an existing installed profile bypass automatic
+selection. `--dry-run` performs the same read-only selection and reports the
+plan without writing.
 
 The examples below use the shorter `synod` form, which requires the optional global installation. Without it, prefix each command with `pnpm dlx @ivand890/synod`, for example `pnpm dlx @ivand890/synod doctor`.
 
@@ -319,7 +335,11 @@ synod budget report T-001
 synod budget observe T-001
 ```
 
-`budget report` is read-only. `budget observe` records the normalized report and its rollout provenance. A soft crossing warns; a recorded hard crossing requires one exact supervisor decision without changing task state, acceptance, verification, or lease ownership:
+`budget report` is read-only. `budget observe` records the normalized report
+and its rollout provenance. Delegation and task-aware wait boundaries refresh a
+configured budget automatically before execution; a soft crossing warns, while
+a newly recorded hard crossing requires one exact supervisor decision without
+changing task state, acceptance, verification, or lease ownership:
 
 ```bash
 synod budget decide T-001 --observation <event-id> --decision continue \
@@ -505,13 +525,15 @@ Whole-session and live canonical reports are explicitly `incomplete` persisted s
 
 Usage reporting never writes canonical records, acknowledges a checkpoint, changes Git, or uploads telemetry. Normalized facts and reports do not retain prompts, messages, reasoning text, tool arguments, or tool outputs. Input includes cached input, and output includes reasoning output; the total therefore does not add those subsets twice. Token counts are usage evidence rather than billing data.
 
-For an optional local estimate, pass a dated caller-owned price file to a complete closed usage report:
+For an optional local estimate, pass a dated caller-owned price file to a complete closed usage report. The repository includes a packaged example covering every model in the built-in profiles:
 
 ```bash
-synod usage --since-event 12 --until-event 18 --price-file ./prices-2026-08.json
+synod usage --since-event 12 --until-event 18 --price-file ./examples/openai-api-prices-2026-08-27.json
 ```
 
 Price-file schema 1 contains `currency`, `asOf`, optional `validUntil`, a `source` reference, and an exact `models` map with `uncachedInputPerMillion`, `cachedInputPerMillion`, and `outputPerMillion`. Synod computes uncached input as input minus cached input and charges output once; reasoning remains visible as raw evidence because it is already included in output. Unknown models produce an explicit partial report with no grand total. Invalid currency/date/rates, stale validity, incomplete usage, or inconsistent inclusive counters fail closed. Without `--price-file`, text and JSON contain no monetary fields. Synod never fetches prices, converts currency, applies tax or credits, or contacts a billing provider.
+
+The checked-in example is standard USD text-token pricing observed on 2026-08-27 from the official OpenAI model pages listed in its `source` field. It does not encode conditional pricing: requests above 272K input tokens can use model-specific input/output multipliers, cache writes can be 1.25x, `gpt-5.5` regional processing adds 10%, and `gpt-5.6-sol` promotional pricing is listed through at least 2026-11-21. Confirm those conditions and the current rates with OpenAI before relying on an estimate; Synod intentionally does not apply these surcharges.
 
 This command requires a locally installed `codex` executable with App Server support. Startup performs a minimal `thread/list` capability probe. Cleanup sends `SIGTERM`, waits up to two seconds, uses a bounded `SIGKILL` fallback, and detaches unresponsive process handles when exit still cannot be confirmed.
 
@@ -526,11 +548,31 @@ synod wait --task T-API --task T-UI --timeout-seconds 300 --json
 synod wait --task T-API --thread thread:reviewer --poll-interval-ms 1000 --json
 ```
 
-`--task` is repeatable and may be combined with repeatable `--thread`; duplicate owner identities collapse into one multi-thread wait. JSON preserves each selected task's revision, lease ID, generation, and owner alongside the resolved unique thread list. Task selection reads canonical state only: it does not observe a thread, claim completion, heartbeat a lease, or advance acceptance. A `canonical` authority on a selection/event therefore means identity provenance, never a runtime observation.
+`--task` is repeatable and may be combined with repeatable `--thread`; duplicate
+owner identities collapse into one multi-owner wait. JSON preserves each
+selected task's revision, lease ID, generation, compatibility `ownerThread`,
+structured `hostHandle` or `threadId`, and wait authority. Opaque host handles
+are handed only to the host; exact UUID thread IDs are the only identities sent
+to App Server observation. Task selection reads canonical state only: it does
+not observe a thread, claim completion, heartbeat a lease, or advance
+acceptance. A `canonical` authority on a selection/event therefore means
+identity provenance, never a runtime observation.
 
 Wait authority and transport are separate fields. `waitAuthority` identifies who owns the observation—`appServer` for a Synod-started App Server, `host` for the Codex host that owns a Desktop thread, or `canonical` for read-only task identity—and `mode` identifies the bounded transport: `notification`, `cursor`, `poll`, or `handoff`. Synod resolves the active Codex surface before starting an App Server and prefers status notifications, with a polling fallback bounded to at most five seconds.
 
-Desktop is host authority, not an accidental App Server fallback. The wait path hands off before constructing a child App Server and returns `mode: "handoff"`, `waitAuthority: "host"`, `hostWaitRequired: true`, and the exact `hostWaitThreadIds`; `hostFallbackRequired` and `hostFallbackThreadIds` remain compatibility aliases. The CLI cannot invoke the Desktop host primitive, so this result stays incomplete until the host performs its direct wait. Conversely, a separate App Server reporting `notLoaded` means that server has not loaded the thread; it is incomplete attention with `waitAuthority: "appServer"`, not proof that the thread finished. There is no Synod thread/resume observer. Text and JSON also report wake/fallback counts, elapsed time, timeout/abort state, and approval or user-input requirements. Every path bounds startup, waiting, listener removal, and client cleanup.
+Desktop is host authority, not an accidental App Server fallback. The wait path
+hands off before constructing a child App Server and returns `mode: "handoff"`,
+`waitAuthority: "host"`, `hostWaitRequired: true`, and exact opaque
+`hostWaitHandles`; `hostWaitThreadIds`, `hostFallbackRequired`, and
+`hostFallbackThreadIds` remain compatibility aliases for legacy leases. The CLI
+cannot invoke the Desktop host primitive, so this result stays incomplete until
+the host performs its direct wait. Conversely, a separate App Server reporting
+`notLoaded` means that server has not loaded the exact UUID thread; it is
+incomplete attention with `waitAuthority: "appServer"`, not proof that the
+thread finished. There is no Synod thread/resume observer. Text and JSON also
+report wake/fallback counts, elapsed time, timeout/abort state, and approval or
+user-input requirements. Every path bounds startup, waiting, listener removal,
+and client cleanup.
 
 `doctor` remains a diagnostic capability check: it may probe the active executable and its App Server and fails closed when Desktop resolution is unavailable. That probe does not change the wait authority or turn a handoff into an observation.
 
@@ -538,7 +580,8 @@ Desktop is host authority, not an accidental App Server fallback. The wait path 
 
 The package exports a strict schema-1 `JobHandle`/`JobEvent` contract through
 `@ivand890/synod/src/jobs.js`. Handles bind a task or thread to its explicit
-wait authority and identity; events bind ordered observations to that handle
+wait authority and structured identity, including an optional host handle
+separate from the exact App Server thread UUID; events bind ordered observations to that handle
 with authority-specific provenance. App Server provenance has `transport`,
 canonical provenance has `sourceSequence`, and host provenance has `observationId`.
 The `mode` field belongs to `WaitReport`, not `JobEvent`.
@@ -565,7 +608,7 @@ Every command with `--json` emits exactly one JSON document. Envelope schema ver
   "data": {},
   "warnings": [],
   "diagnostics": {
-    "synodVersion": "0.12.1",
+    "synodVersion": "0.12.2",
     "nodeVersion": "24.12.0",
     "platform": "darwin",
     "codexVersion": "0.142.0"
@@ -587,7 +630,9 @@ synod task next --json --view summary
 
 Lifecycle errors include stable codes for invalid/unsupported manifests, invalid or conflicting local runtimes, failed runtime installation or execution, required upgrades, conflicts, unsafe paths, destination races, transaction rollback, and unsupported downgrades. Orchestration errors identify invalid state/logs, state-log mismatch, held locks, invalid tasks or transitions, stale revisions, missing evidence, checkpoint drift, lease conflicts and fencing, proposal validation, correction exhaustion, wait failures, and worktree reconciliation. Recovery errors distinguish invalid or corrupted bundles, existing export destinations, required untracked opt-in, unsupported dirty submodules, wrong restore bases, dirty destinations, restore failures, invalid journals, and rollback failures. Existing command, App Server, session, and JSON codes remain stable within envelope schema version 1.
 
-Warnings identify preserved user state, available upgrades, missing user-owned files, incompatible profiles, unsupported Codex versions, and bounded App Server cleanup fallbacks.
+Warnings identify preserved user state, available upgrades, missing user-owned
+files, automatic profile fallback, incompatible profiles, unsupported Codex
+versions, token-budget crossings, and bounded App Server cleanup fallbacks.
 
 ## Model profiles and Codex compatibility
 
@@ -598,8 +643,8 @@ synod profiles
 synod profiles --json
 ```
 
-- `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. Its global subagent fallback is Terra because current Codex 0.148 validates that fallback against the narrower spawn override set before applying a selected custom-agent file; Luna remains valid inside the implementer and mechanical agent files. The profile requires Codex 0.148.0 or later within the supported 0.148.x line, including eligible previews such as `0.148.0-alpha.1`, and verifies the fallback plus each role model and reasoning effort through `model/list`.
-- `portable` uses GPT-5.5 at role-specific reasoning efforts. It is the conservative fallback for the supported 0.148.x line and account-specific model catalogs.
+- `synod-5.6` uses Sol for supervision, Luna for cost-efficient implementation/mechanical work, and Terra for exploration/review/verification. Its global subagent fallback is Terra because current supported Codex lines validate that fallback against the narrower spawn override set before applying a selected custom-agent file; Luna remains valid inside the implementer and mechanical agent files. The profile supports Codex 0.148.x and 0.150.x, including eligible previews such as `0.148.0-alpha.1`, and verifies the fallback plus each role model and reasoning effort through `model/list`.
+- `portable` uses GPT-5.5 at role-specific reasoning efforts. It is the conservative fallback for the supported 0.148.x and 0.150.x lines and account-specific model catalogs.
 
 `synod doctor` identifies whether Synod is running from Codex CLI or Codex Desktop and probes that surface's own App Server executable. It resolves the active Codex process from the process ancestry, falling back to `codex` from `PATH` for a standalone CLI invocation. An explicit `SYNOD_CODEX_BIN` still takes precedence. If Desktop is detected but its executable cannot be resolved, `doctor` fails closed instead of silently reporting the CLI version as the Desktop version. This diagnostic executable/App Server probe is separate from wait authority and does not observe thread completion.
 
@@ -607,17 +652,17 @@ CLI and Desktop may share `~/.codex` while running different Codex versions. Ins
 
 It then classifies that surface's Codex version independently from model availability:
 
-- Public/pinned `v0.12.1` support expression:
-  `>=0.148.0-0 <0.149.0 (all 0.148.x variants)`.
+- Source-prepared `v0.12.2` support expression:
+  `>=0.148.0-0 <0.149.0 || >=0.150.0-0 <0.151.0 (all 0.148.x and 0.150.x variants)`.
 - Known-good and exercised in CI: `0.148.0-alpha.9`.
-- Supported: every valid semantic version whose numeric major/minor
-  is exactly `0.148`, including stable, patch, prerelease, and build metadata.
+- Supported: every valid semantic version whose numeric major/minor is exactly
+  `0.148` or `0.150`, including stable, patch, prerelease, and build metadata.
   This version classification alone does not assert profile availability.
-- Unsupported: valid versions below `0.148`, valid versions at or
-  above `0.149`, and invalid semantic versions.
+- Unsupported: valid versions below `0.148`, the untested `0.149.x` gap, valid
+  versions at or above `0.151`, and invalid semantic versions.
 
-The public numeric version range plus the numeric 0.148 minor-line classifier
-determine `codex.status` and version eligibility; only the
+The source-prepared disjoint numeric version range plus the numeric 0.148/0.150
+minor-line classifier determine `codex.status` and version eligibility; only the
 matrix-tested preview is `known-good`. Live App Server and model probes
 independently determine `modelCompatible` and profile compatibility. Overall
 health requires both an eligible version and the selected profile's required
@@ -645,6 +690,6 @@ pnpm test:codex-compatibility # requires explicit SYNOD_EXPECTED_* environment v
 pnpm pack --pack-destination dist
 ```
 
-Source uses strict TypeScript 7 with explicit `.js` ESM specifiers and compiles into `dist`; published consumers execute JavaScript and do not need TypeScript. The v0.12.1 CI exercises the installed tarball on Node 22 and 24 on Ubuntu, plus Node 24 on macOS and Windows.
+Source uses strict TypeScript 7 with explicit `.js` ESM specifiers and compiles into `dist`; published consumers execute JavaScript and do not need TypeScript. The v0.12.2 CI exercises the installed tarball on Node 22 and 24 on Ubuntu, plus Node 24 on macOS and Windows.
 
 Every change lands through a pull request with required CI. Protected `vX.Y.Z` tags publish both npm and GitHub releases, with exact-commit and `latest` parity enforced before the workflow succeeds; see [RELEASING.md](RELEASING.md).

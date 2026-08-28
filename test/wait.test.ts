@@ -117,23 +117,25 @@ const idle = (threadId: string): ObservedThreadStatus => ({ threadId, status: { 
 
 test("task-aware selection resolves exact active lease owners read-only and deduplicates mixed selectors", async () => {
   let reads = 0;
+  const apiThread = "11111111-2222-4333-8444-555555555555";
+  const uiThread = "22222222-3333-4444-8555-666666666666";
   const canonical = { state: { tasks: {
     "T-API": {
       state: "ACTIVE",
       revision: 2,
-      lease: { id: "lease:api", generation: 3, ownerThread: "thread:shared", status: "ACTIVE", expiresAt: "2030-01-01T00:00:00.000Z", heartbeatAt: "2029-12-31T00:00:00.000Z" }
+      lease: { id: "lease:api", generation: 3, ownerThread: apiThread, status: "ACTIVE", expiresAt: "2030-01-01T00:00:00.000Z", heartbeatAt: "2029-12-31T00:00:00.000Z" }
     },
     "T-UI": {
       state: "ACTIVE",
       revision: 1,
-      lease: { id: "lease:ui", generation: 1, ownerThread: "thread:ui", status: "ACTIVE", expiresAt: "2030-01-01T00:00:00.000Z", heartbeatAt: "2029-12-31T00:00:00.000Z" }
+      lease: { id: "lease:ui", generation: 1, ownerThread: uiThread, status: "ACTIVE", expiresAt: "2030-01-01T00:00:00.000Z", heartbeatAt: "2029-12-31T00:00:00.000Z" }
     }
   } } };
   const before = structuredClone(canonical);
   const selection = await resolveWaitSelection({
     directory: "/tmp/project",
     taskIds: ["t-api", "T-API", "t-ui"],
-    threadIds: ["thread:shared", "thread:reader", "thread:reader"]
+    threadIds: [apiThread, "thread:reader", "thread:reader"]
   }, {
     canonicalReader: async directory => {
       reads += 1;
@@ -147,10 +149,229 @@ test("task-aware selection resolves exact active lease owners read-only and dedu
   assert.equal(selection.waitAuthority, "canonical");
   assert.deepEqual(selection.requestedTaskIds, ["T-API", "T-UI"]);
   assert.deepEqual(selection.tasks, [
-    { taskId: "T-API", state: "ACTIVE", revision: 2, leaseId: "lease:api", generation: 3, ownerThread: "thread:shared", expectedHeartbeatAt: "2029-12-31T00:00:00.000Z" },
-    { taskId: "T-UI", state: "ACTIVE", revision: 1, leaseId: "lease:ui", generation: 1, ownerThread: "thread:ui", expectedHeartbeatAt: "2029-12-31T00:00:00.000Z" }
+    { taskId: "T-API", state: "ACTIVE", revision: 2, leaseId: "lease:api", generation: 3, ownerThread: apiThread, expectedHeartbeatAt: "2029-12-31T00:00:00.000Z" },
+    { taskId: "T-UI", state: "ACTIVE", revision: 1, leaseId: "lease:ui", generation: 1, ownerThread: uiThread, expectedHeartbeatAt: "2029-12-31T00:00:00.000Z" }
   ]);
-  assert.deepEqual(selection.threadIds, ["thread:shared", "thread:ui", "thread:reader"]);
+  assert.deepEqual(selection.threadIds, [apiThread, uiThread, "thread:reader"]);
+});
+
+test("mixed legacy host handles stay separate while App Server IDs remain observable", async () => {
+  const legacyPath = "/root/syn_price_sample_impl";
+  const legacyCodexThreadId = "11111111-2222-4333-8444-555555555555";
+  const canonical = { state: { tasks: {
+    "T-HOST-LEGACY": {
+      state: "ACTIVE",
+      revision: 1,
+      lease: {
+        id: "lease:legacy-host",
+        generation: 1,
+        ownerThread: legacyPath,
+        status: "ACTIVE",
+        expiresAt: "2030-01-01T00:00:00.000Z",
+        heartbeatAt: "2029-12-31T00:00:00.000Z"
+      }
+    },
+    "T-LEGACY-CODEX": {
+      state: "ACTIVE",
+      revision: 1,
+      lease: {
+        id: "lease:legacy-codex",
+        generation: 1,
+        ownerThread: legacyCodexThreadId,
+        status: "ACTIVE",
+        expiresAt: "2030-01-01T00:00:00.000Z",
+        heartbeatAt: "2029-12-31T00:00:00.000Z"
+      }
+    }
+  } } };
+  const selection = await resolveWaitSelection({
+    taskIds: ["T-HOST-LEGACY", "T-LEGACY-CODEX"]
+  }, { canonicalReader: async () => canonical });
+
+  assert.deepEqual(selection.hostWaitHandles, [legacyPath]);
+  assert.deepEqual(selection.threadIds, [legacyCodexThreadId]);
+  assert.equal(selection.tasks[0]?.waitAuthority, "host");
+  assert.equal(selection.tasks[0]?.hostHandle, legacyPath);
+
+  let observedIds: string[] | undefined;
+  const report = await waitForThreads({
+    threadIds: selection.threadIds,
+    hostWaitHandles: selection.hostWaitHandles,
+    timeoutMs: 100
+  }, {
+    runtimeResolver: () => ({ surface: "cli", executable: "codex", resolved: true }),
+    adapterFactory: () => ({
+      async start() {},
+      capabilities: () => ({ notification: false, cursor: false }),
+      async read(ids: string[]) {
+        observedIds = ids;
+        return { statuses: [{ threadId: legacyCodexThreadId, status: { type: "idle" as const } }] };
+      },
+      async close() {}
+    })
+  });
+  assert.deepEqual(observedIds, [legacyCodexThreadId]);
+  assert.equal(report.waitAuthority, "appServer");
+  assert.equal(report.incomplete, true);
+  assert.equal(report.hostWaitRequired, true);
+  assert.deepEqual(report.hostWaitHandles, [legacyPath]);
+  assert.deepEqual(report.hostWaitThreadIds, []);
+});
+
+test("every non-UUID legacy owner becomes an opaque host handle", async () => {
+  const hostHandle = "opaque-owner";
+  const canonical = { state: { tasks: {
+    "T-OPAQUE-LEGACY": {
+      state: "ACTIVE",
+      revision: 1,
+      lease: {
+        id: "lease:opaque-legacy",
+        generation: 1,
+        ownerThread: hostHandle,
+        status: "ACTIVE",
+        expiresAt: "2030-01-01T00:00:00.000Z",
+        heartbeatAt: "2029-12-31T00:00:00.000Z"
+      }
+    }
+  } } };
+  const selection = await resolveWaitSelection({ taskIds: ["T-OPAQUE-LEGACY"] }, {
+    canonicalReader: async () => canonical
+  });
+
+  assert.deepEqual(selection.threadIds, []);
+  assert.deepEqual(selection.hostWaitHandles, [hostHandle]);
+  assert.equal(selection.tasks[0]?.waitAuthority, "host");
+  assert.equal(selection.tasks[0]?.hostHandle, hostHandle);
+
+  let constructed = 0;
+  const report = await waitForThreads({
+    threadIds: selection.threadIds,
+    hostWaitHandles: selection.hostWaitHandles,
+    timeoutMs: 100
+  }, {
+    runtimeResolver: () => ({ surface: "cli", executable: "codex", resolved: true }),
+    clientFactory: () => {
+      constructed += 1;
+      throw new Error("opaque legacy owner must not construct App Server");
+    }
+  });
+  assert.equal(constructed, 0);
+  assert.equal(report.waitAuthority, "host");
+  assert.equal(report.hostWaitRequired, true);
+  assert.deepEqual(report.hostWaitHandles, [hostHandle]);
+  assert.deepEqual(report.hostWaitThreadIds, []);
+});
+
+test("a valid UUID legacy owner remains App Server-observable unchanged", async () => {
+  const threadId = "018f0c5e-7b4a-7abc-8def-0123456789ab";
+  const selection = await resolveWaitSelection({ taskIds: ["T-LEGACY-UUID"] }, {
+    canonicalReader: async () => ({ state: { tasks: {
+      "T-LEGACY-UUID": {
+        state: "ACTIVE",
+        revision: 1,
+        lease: {
+          id: "lease:legacy-uuid",
+          generation: 1,
+          ownerThread: threadId,
+          status: "ACTIVE",
+          expiresAt: "2030-01-01T00:00:00.000Z",
+          heartbeatAt: "2029-12-31T00:00:00.000Z"
+        }
+      }
+    } } })
+  });
+
+  assert.deepEqual(selection.threadIds, [threadId]);
+  assert.equal(selection.hostWaitHandles, undefined);
+  let observed: string[] | undefined;
+  await waitForThreads({ threadIds: selection.threadIds, timeoutMs: 100 }, {
+    adapterFactory: () => ({
+      async start() {},
+      capabilities: () => ({ notification: false, cursor: false }),
+      async read(ids: string[]) {
+        observed = ids;
+        return { statuses: [{ threadId, status: { type: "idle" as const } }] };
+      },
+      async close() {}
+    })
+  });
+  assert.deepEqual(observed, [threadId]);
+});
+
+test("exact App Server lease thread IDs are preserved while host handles stay separate", async () => {
+  const threadId = "11111111-2222-4333-8444-555555555555";
+  const hostHandle = "desktop-session:opaque-42";
+  const selection = await resolveWaitSelection({ taskIds: ["T-EXACT", "T-HOST"] }, {
+    canonicalReader: async () => ({ state: { tasks: {
+      "T-EXACT": {
+        state: "ACTIVE",
+        revision: 1,
+        lease: {
+          id: "lease:exact",
+          generation: 1,
+          ownerThread: threadId,
+          waitAuthority: "appServer",
+          threadId,
+          status: "ACTIVE",
+          expiresAt: "2030-01-01T00:00:00.000Z",
+          heartbeatAt: "2029-12-31T00:00:00.000Z"
+        }
+      },
+      "T-HOST": {
+        state: "ACTIVE",
+        revision: 1,
+        lease: {
+          id: "lease:host",
+          generation: 1,
+          ownerThread: hostHandle,
+          waitAuthority: "host",
+          hostHandle,
+          status: "ACTIVE",
+          expiresAt: "2030-01-01T00:00:00.000Z",
+          heartbeatAt: "2029-12-31T00:00:00.000Z"
+        }
+      }
+    } } })
+  });
+  assert.deepEqual(selection.threadIds, [threadId]);
+  assert.deepEqual(selection.hostWaitHandles, [hostHandle]);
+
+  let observedIds: string[] | undefined;
+  const report = await waitForThreads({
+    threadIds: selection.threadIds,
+    hostWaitHandles: selection.hostWaitHandles,
+    timeoutMs: 100
+  }, {
+    adapterFactory: () => ({
+      async start() {},
+      capabilities: () => ({ notification: false, cursor: false }),
+      async read(ids: string[]) {
+        observedIds = ids;
+        return { statuses: [{ threadId, status: { type: "idle" as const } }] };
+      },
+      async close() {}
+    })
+  });
+  assert.deepEqual(observedIds, [threadId]);
+  assert.deepEqual(report.threadIds, [threadId]);
+  assert.equal(report.incomplete, true);
+  assert.equal(report.hostWaitRequired, true);
+  assert.deepEqual(report.hostWaitHandles, [hostHandle]);
+
+  let observedHostRequest: { threadIds: string[]; hostWaitHandles?: string[]; timeoutMs: number; pollIntervalMs: number } | undefined;
+  await waitForThreads({ threadIds: [], hostWaitHandles: [hostHandle], timeoutMs: 100 }, {
+    hostAdapter: {
+      async wait(request) {
+        observedHostRequest = request;
+        return { statuses: [] };
+      },
+      async close() {}
+    }
+  });
+  assert.deepEqual(observedHostRequest?.threadIds, []);
+  assert.deepEqual(observedHostRequest?.hostWaitHandles, [hostHandle]);
+  assert.equal(observedHostRequest?.pollIntervalMs, 1000);
+  assert.ok((observedHostRequest?.timeoutMs || 0) > 0 && (observedHostRequest?.timeoutMs || 0) <= 100);
 });
 
 test("task-aware selection rejects missing, unbound, recovery-pending, and inactive tasks", async () => {

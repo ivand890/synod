@@ -186,7 +186,7 @@ test("doctor accepts every 0.148 variant and rejects adjacent minor lines", asyn
   assert.equal(candidate.healthy, true);
   assert.equal(candidate.codex.status, "known-good");
   assert.equal(candidate.codex.reason, "tested_in_ci");
-  assert.equal(candidate.codex.range, ">=0.148.0-0 <0.149.0 (all 0.148.x variants)");
+  assert.equal(candidate.codex.range, ">=0.148.0-0 <0.149.0 || >=0.150.0-0 <0.151.0 (all 0.148.x and 0.150.x variants)");
   assert.equal(nextPreview.healthy, true);
   assert.equal(nextPreview.codex.status, "supported");
   assert.equal(nextPreview.codex.reason, "preview_inside_supported_range");
@@ -200,6 +200,19 @@ test("doctor accepts every 0.148 variant and rejects adjacent minor lines", asyn
   assert.equal(below.healthy, false);
   assert.equal(below.codex.status, "unsupported");
   assert.equal(below.codex.reason, "below_supported_range");
+});
+
+test("doctor supports Codex 0.150 without an unsupported-version warning", async () => {
+  const result = await doctorProject(
+    { project: false },
+    { clientFactory: () => fakeClient("0.150.0", models56), runtimeResolver: () => runtime() }
+  );
+
+  assert.equal(result.healthy, true);
+  assert.equal(result.codex.status, "supported");
+  assert.equal(result.codex.reason, "inside_supported_range");
+  assert.equal(result.profiles.find(item => item.id === "synod-5.6")?.compatible, true);
+  assert.ok(!result.warnings.some(item => item.code === WARNING_CODES.CODEX_VERSION_UNSUPPORTED));
 });
 
 test("doctor prefers the surface confirmed by the initialized App Server", async () => {
@@ -254,6 +267,7 @@ test("doctor fails closed above the tested Codex range", async () => {
   assert.equal(result.codex.reason, "above_tested_range");
   assert.equal(result.recommendedProfile, null);
   assert.ok(result.profiles.every(profile => profile.compatible === false));
+  assert.equal(result.profiles.find(profile => profile.id === "synod-5.6")?.modelCompatible, true);
   assert.ok(result.warnings.some(item => item.code === WARNING_CODES.CODEX_VERSION_UNSUPPORTED));
 });
 
