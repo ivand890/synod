@@ -6819,13 +6819,36 @@ export async function recoverTaskLease({
         }
       });
     }
+    if (action === "resume") {
+      const suppliedIdentity = { waitAuthority, hostHandle, threadId };
+      const retainedIdentity = {
+        waitAuthority: ended.waitAuthority,
+        hostHandle: ended.hostHandle,
+        threadId: ended.threadId
+      };
+      for (const key of ["waitAuthority", "hostHandle", "threadId"] as const) {
+        if (suppliedIdentity[key] !== undefined && suppliedIdentity[key] !== retainedIdentity[key]) {
+          throw new SynodError(ERROR_CODES.LEASE_INVALID, "Resume must retain the abandoned lease's structured owner identity.", {
+            details: { taskId, field: key, expected: retainedIdentity[key], actual: suppliedIdentity[key] }
+          });
+        }
+      }
+    }
     const nextOwner = action === "resume" ? ended.ownerThread : requestedOwner;
     const nextIdentity = action === "resume" || action === "reassign"
       ? leaseBindingIdentity({
           ownerThread: nextOwner,
-          ...(waitAuthority === undefined ? {} : { waitAuthority }),
-          ...(hostHandle === undefined ? {} : { hostHandle }),
-          ...(threadId === undefined ? {} : { threadId })
+          ...(action === "resume"
+            ? {
+                ...(ended.waitAuthority === undefined ? {} : { waitAuthority: ended.waitAuthority }),
+                ...(ended.hostHandle === undefined ? {} : { hostHandle: ended.hostHandle }),
+                ...(ended.threadId === undefined ? {} : { threadId: ended.threadId })
+              }
+            : {
+                ...(waitAuthority === undefined ? {} : { waitAuthority }),
+                ...(hostHandle === undefined ? {} : { hostHandle }),
+                ...(threadId === undefined ? {} : { threadId })
+              })
         }, ended.waitAuthority)
       : undefined;
     if (nextIdentity && action === "resume" && nextIdentity.ownerThread !== ended.ownerThread) {
