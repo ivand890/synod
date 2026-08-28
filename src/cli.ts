@@ -267,6 +267,7 @@ export interface CliDependencies extends LifecycleDependencies, OrchestrationDep
   hostAdapterEnv?: NodeJS.ProcessEnv;
   waitRuntimeResolver?: () => WaitRuntime;
   waitSelectionResolver?: typeof resolveWaitSelection;
+  refreshBudget?: typeof refreshTaskBudget;
   worktreeDependencies?: TaskWorktreeDependencies;
 }
 
@@ -468,11 +469,13 @@ function waitBudgetDecisionNextCommand(refresh: WaitBudgetRefresh | undefined): 
 async function refreshWaitBudgets(
   selection: WaitSelection,
   directory: string,
-  dependencies: OrchestrationDependencies
+  dependencies: CliDependencies
 ): Promise<WaitBudgetRefresh[]> {
   const refreshes: WaitBudgetRefresh[] = [];
+  const refresh = dependencies.refreshBudget || refreshTaskBudget;
   for (const selectedTask of selection.tasks) {
-    const refreshed = await refreshTaskBudget({ directory, id: selectedTask.taskId }, dependencies);
+    if (!selectedTask.budget) continue;
+    const refreshed = await refresh({ directory, id: selectedTask.taskId }, dependencies);
     if (refreshed?.task.budget) refreshes.push(refreshed);
   }
   return refreshes;

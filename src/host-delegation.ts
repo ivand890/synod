@@ -975,7 +975,8 @@ export async function startHostDelegation(
   const adapterAuthority: LeaseWaitAuthority = adapter.waitAuthority || "host";
   const id = taskIdentifier(options);
   const prepared = await prepareDelegationReservation(id, options, dependencies);
-  const budget = await refreshTaskBudget({
+  const refresh = dependencies.refreshBudget || refreshTaskBudget;
+  const budget = await refresh({
     directory: options.directory || ".",
     id,
     ...(options.actor === undefined ? {} : { actor: options.actor })
@@ -1603,7 +1604,8 @@ export async function startHostDelegationHandoff(
   }
   const id = taskIdentifier(options);
   const prepared = await prepareDelegationReservation(id, options, dependencies);
-  const budget = await refreshTaskBudget({
+  const refresh = dependencies.refreshBudget || refreshTaskBudget;
+  const budget = await refresh({
     directory: options.directory || ".",
     id,
     ...(options.actor === undefined ? {} : { actor: options.actor })

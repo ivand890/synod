@@ -83,6 +83,7 @@ function dependencies({
   release,
   revoke,
   heartbeat,
+  refreshBudget = async () => ({ task }),
   setTimeout: scheduleTimeout,
   clearTimeout: clearScheduledTimeout,
   clock = () => Date.parse("2026-08-15T00:00:00.000Z")
@@ -95,6 +96,7 @@ function dependencies({
   release?: (options: Record<string, unknown>) => Promise<unknown>;
   revoke?: (options: Record<string, unknown>) => Promise<unknown>;
   heartbeat?: (options: Record<string, unknown>) => Promise<unknown>;
+  refreshBudget?: HostDelegationDependencies["refreshBudget"];
   setTimeout?: HostDelegationDependencies["setTimeout"];
   clearTimeout?: HostDelegationDependencies["clearTimeout"];
   clock?: () => number;
@@ -109,6 +111,7 @@ function dependencies({
   if (release) result.release = release as unknown as NonNullable<HostDelegationDependencies["release"]>;
   if (revoke) result.revoke = revoke as unknown as NonNullable<HostDelegationDependencies["revoke"]>;
   if (heartbeat) result.heartbeat = heartbeat as unknown as NonNullable<HostDelegationDependencies["heartbeat"]>;
+  if (refreshBudget) result.refreshBudget = refreshBudget;
   if (scheduleTimeout) result.setTimeout = scheduleTimeout;
   if (clearScheduledTimeout) result.clearTimeout = clearScheduledTimeout;
   return result;
