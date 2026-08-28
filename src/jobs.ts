@@ -406,8 +406,9 @@ function parseHandleValue(value: unknown): JobHandle {
   };
   const ownerThread = identifier(item.ownerThread, "handle.ownerThread");
   if (base.waitAuthority === "host") {
-    if (!hostHandle) return fail("host authority requires hostHandle", "handle.hostHandle");
-    if (ownerThread !== hostHandle) return fail("ownerThread must equal hostHandle", "handle.ownerThread");
+    if (hostHandle === undefined) {
+      if (ownerThread !== base.threadId) return fail("legacy host ownerThread must equal threadId", "handle.ownerThread");
+    } else if (ownerThread !== hostHandle) return fail("ownerThread must equal hostHandle", "handle.ownerThread");
   } else if (ownerThread !== base.threadId) return fail("ownerThread must equal threadId", "handle.ownerThread");
   if (base.waitAuthority !== "host" && hostHandle !== undefined) {
     return fail("hostHandle requires host authority", "handle.hostHandle");
@@ -476,7 +477,9 @@ function parseEventValue(value: unknown): JobEvent {
   } as JobEvent;
   const ownerThread = identifier(item.ownerThread, "event.ownerThread");
   if (itemAuthority === "host") {
-    if (hostHandle !== undefined && ownerThread !== hostHandle) return fail("ownerThread must equal hostHandle", "event.ownerThread");
+    if (hostHandle === undefined) {
+      if (ownerThread !== base.threadId) return fail("legacy host ownerThread must equal threadId", "event.ownerThread");
+    } else if (ownerThread !== hostHandle) return fail("ownerThread must equal hostHandle", "event.ownerThread");
   } else if (ownerThread !== base.threadId) return fail("ownerThread must equal threadId", "event.ownerThread");
   return {
     ...base,

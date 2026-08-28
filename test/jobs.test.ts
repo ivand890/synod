@@ -127,6 +127,14 @@ test("rejects unknown fields and malformed handle identity", () => {
     hostHandle: "opaque-host-handle"
   };
   assert.deepEqual(validateJobHandle(hostHandle), hostHandle);
+  const legacyHostHandle = {
+    ...handle,
+    waitAuthority: "host" as const,
+    threadId: "legacy-host-owner",
+    ownerThread: "legacy-host-owner"
+  };
+  assert.deepEqual(validateJobHandle(legacyHostHandle), legacyHostHandle);
+  assert.throws(() => validateJobHandle({ ...legacyHostHandle, ownerThread: "contradictory-owner" }));
   assert.throws(() => validateJobHandle({ ...handle, jobId: " job" }));
   assert.throws(() => validateJobHandle({ ...handle, registeredAt: "2026-08-14T17:01:00Z" }));
 });
@@ -272,6 +280,15 @@ test("keeps authority semantics explicit and never treats App Server idle as com
     outcome: "incomplete"
   };
   assert.deepEqual(validateJobEvent(hostEvent), hostEvent);
+  const legacyHostTaskEvent = {
+    ...active,
+    threadId: "legacy-host-owner",
+    ownerThread: "legacy-host-owner",
+    waitAuthority: "host",
+    provenance: { authority: "host", sourceId: "desktop:session", observationId: "host-observation:2" }
+  };
+  assert.deepEqual(validateJobEvent(legacyHostTaskEvent), legacyHostTaskEvent);
+  assert.throws(() => validateJobEvent({ ...legacyHostTaskEvent, ownerThread: "contradictory-owner" }));
   assert.throws(() => validateJobHandle({
     schemaVersion: 1,
     kind: "thread",
