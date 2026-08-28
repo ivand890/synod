@@ -10,30 +10,30 @@ Open Codex in this repo. Send these three messages:
 
 Synod installs a persistent, reviewed advisor loop for Codex projects. The selected model profile assigns supervision, atomic implementation, exploration, review, verification, and mechanical work while keeping the primary agent responsible for integration and final evidence.
 
-The public `v0.12.1` release is verified at signed tag commit
-`937c7d713523e4de587e7a6951716d72a9681131`; its matching GitHub Release is
+The public `v0.12.2` release is verified at signed tag commit
+`0ae623f4537daaa62278e70ae077b3231578a88e`; its matching GitHub Release is
 externally immutable. Post-publication evidence is recorded in the versioned
-[`release-closeouts/v0.12.1.json`](release-closeouts/v0.12.1.json). The prior
-`v0.12.0` evidence remains recorded in the versioned
-[`release-closeouts/v0.12.0.json`](release-closeouts/v0.12.0.json), with the
+[`release-closeouts/v0.12.2.json`](release-closeouts/v0.12.2.json). The prior
+`v0.12.1` evidence remains recorded in the versioned
+[`release-closeouts/v0.12.1.json`](release-closeouts/v0.12.1.json), with the
+`v0.12.0` evidence in the versioned
+[`release-closeouts/v0.12.0.json`](release-closeouts/v0.12.0.json), the
 `v0.11.0` evidence in the versioned
 [`release-closeouts/v0.11.0.json`](release-closeouts/v0.11.0.json) and the
 earlier `v0.9.5` evidence in
 [`release-closeouts/v0.9.5.json`](release-closeouts/v0.9.5.json). The root
-[`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) is the prepared/pending source
-record for `v0.12.2`; it does not yet claim public verification. The phase-2 live verifier
-runs on the protected closeout PR, not the tag workflow; the tag
-workflow validates only the strict prepared/pending source record before
-publication.
+[`RELEASE-CLOSEOUT.json`](RELEASE-CLOSEOUT.json) is the matching verified
+closeout record for `v0.12.2`. The phase-2 live verifier runs on the protected
+closeout PR, not the tag workflow; the tag workflow validates only the strict
+prepared/pending source record before publication.
 
 ## Public release and source tree
 
-The public and pinned `@ivand890/synod@0.12.1` is the release described above.
-A project using `pnpm dlx @ivand890/synod@0.12.1`, or a project runtime pinned
-to `0.12.1`, exposes the released command surface. The source tree is prepared
-as `v0.12.2` with the following additions, which remain unavailable to a pinned
-runtime until the release is published and that project is explicitly
-upgraded:
+The public and pinned `@ivand890/synod@0.12.2` is the release described above.
+A project using `pnpm dlx @ivand890/synod@0.12.2`, or a project runtime pinned
+to `0.12.2`, exposes the released command surface. The source tree contains the
+following additions; an older pinned project must be explicitly upgraded to
+use them:
 
 - Capability-driven fresh initialization that selects `synod-5.6` only after
   its model/reasoning contract is confirmed, with a structured `portable`
@@ -79,14 +79,14 @@ The v0.11.0 source surfaces remain available in this release:
   Server; unsupported or non-Codex contexts fail closed.
 - The explicit `--include-local-docs` recovery-bundle path.
 
-The source prepared as `v0.12.2` has this `doctor` support expression:
+The public `v0.12.2` release has this `doctor` support expression:
 `>=0.148.0-0 <0.149.0 || >=0.150.0-0 <0.151.0 (all 0.148.x and 0.150.x variants)`.
 Every valid `0.148.x` and `0.150.x` semantic version is accepted, including
 prerelease, stable, patch, and build-metadata variants; `0.148.0-alpha.9` is
 known-good and exercised in CI. Valid versions below `0.148`, the untested
 `0.149.x` gap, or at and above `0.151`, plus invalid semver, are unsupported.
 
-The v0.12.2 source requires Node.js `>=22`; Node 20 is unsupported. Its CI
+The v0.12.2 release requires Node.js `>=22`; Node 20 is unsupported. Its CI
 tests Node 22 and 24 on Ubuntu, plus Node 24 package smoke on macOS and
 Windows.
 
@@ -652,7 +652,7 @@ CLI and Desktop may share `~/.codex` while running different Codex versions. Ins
 
 It then classifies that surface's Codex version independently from model availability:
 
-- Source-prepared `v0.12.2` support expression:
+- Public `v0.12.2` support expression:
   `>=0.148.0-0 <0.149.0 || >=0.150.0-0 <0.151.0 (all 0.148.x and 0.150.x variants)`.
 - Known-good and exercised in CI: `0.148.0-alpha.9`.
 - Supported: every valid semantic version whose numeric major/minor is exactly
@@ -661,7 +661,7 @@ It then classifies that surface's Codex version independently from model availab
 - Unsupported: valid versions below `0.148`, the untested `0.149.x` gap, valid
   versions at or above `0.151`, and invalid semantic versions.
 
-The source-prepared disjoint numeric version range plus the numeric 0.148/0.150
+The released disjoint numeric version range plus the numeric 0.148/0.150
 minor-line classifier determine `codex.status` and version eligibility; only the
 matrix-tested preview is `known-good`. Live App Server and model probes
 independently determine `modelCompatible` and profile compatibility. Overall

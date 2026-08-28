@@ -32,8 +32,8 @@ separation between host, App Server, and canonical wait authority. The strict
 shapes: they do not add persistence, runners, process ownership, spawn/resume
 observation, or an execution plane.
 
-The source prepared as `v0.12.2` supports the corrected Codex delegation paths;
-the last verified public release remains `v0.12.1`. On a supported Codex CLI
+The public `v0.12.2` release supports the corrected Codex delegation paths. On
+a supported Codex CLI
 without an injected adapter, `delegate start` selects Synod's owned
 CLI App Server Path A for read-only observer turns only. Writer leases stay
 host-owned: Desktop and Codex CLI return `hostSpawnRequired` so the supervisor
@@ -51,13 +51,13 @@ capability discovery, and configured task budgets refresh at delegation and
 wait boundaries before more execution is authorized. The 0.9.5 hotfix, retained since 0.11.0, also makes the `--task`,
 `--active-only`, and `--changed-since-checkpoint` selectors work through an
 initialized project-local bootstrap while incompatible selector combinations
-still fail closed. The prepared source requires Node.js `>=22`, and its Codex
+still fail closed. The public release requires Node.js `>=22`, and its Codex
 support expression accepts every valid semantic version whose numeric major and
 minor are `0.148` or `0.150`, including stable, patch, prerelease, and
 build-metadata variants; `0.148.0-alpha.9` is known-good. The untested
 `0.149.x` gap, versions at or above `0.151`, and future source increments remain
-unavailable to a pinned runtime until a corresponding release and explicit
-project runtime upgrade.
+unavailable to an older pinned runtime until an explicit project runtime
+upgrade.
 
 Human-owned Markdown under `docs/synod/` is local/private supporting context,
 not canonical orchestration state, Git evidence, or release proof. The five

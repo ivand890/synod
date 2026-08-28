@@ -1,9 +1,9 @@
 # Synod Roadmap
 
 Last updated: 2026-08-27
-Current public release: `v0.12.1`
+Current public release: `v0.12.2`
 Current source release: `v0.12.2`
-Last verified public release at this update: `v0.12.1`
+Last verified public release at this update: `v0.12.2`
 
 This roadmap converts the advisor loop's remaining operational risks into
 versioned, testable increments. Entries at or below the last verified public
@@ -11,15 +11,15 @@ release are delivered. Later increments remain unavailable to a public/pinned
 runtime until their release is published and the project is explicitly
 upgraded. Exact CLI spelling remains provisional until an increment is
 implemented and released. Source preparation and post-publication npm, GitHub, registry-installed
-package, and public CLI evidence for `v0.12.1` are captured in the versioned
-`release-closeouts/v0.12.1.json`; the prior `v0.12.0` evidence remains recorded
+package, and public CLI evidence for `v0.12.2` are captured in the versioned
+`release-closeouts/v0.12.2.json`; the prior `v0.12.1` evidence remains recorded
+in `release-closeouts/v0.12.1.json`, the `v0.12.0` evidence remains recorded
 in `release-closeouts/v0.12.0.json`, the `v0.11.0` evidence remains recorded
 in `release-closeouts/v0.11.0.json`, and the earlier `v0.9.5` evidence remains
 recorded in `release-closeouts/v0.9.5.json`.
 The signed tag and GitHub Release `isImmutable: true` provide the external
-release anchors. The root `RELEASE-CLOSEOUT.json` is the prepared/pending
-source record for `v0.12.2`; public latest remains `v0.12.1` until tag
-publication and the protected post-publication closeout are verified.
+release anchors. The root `RELEASE-CLOSEOUT.json` is the matching verified
+closeout record for `v0.12.2`.
 The phase-2 live verifier runs on the protected closeout PR, not the tag
 workflow; the tag workflow validates only the strict prepared/pending source
 record before publication.
@@ -374,8 +374,8 @@ The release also ships bounded delegation and independent approval surfaces;
 future protocol holes return to `v0.12.x` patches rather than opening a new
 feature series.
 
-Status: `v0.12.2` is source-prepared while `v0.12.1` remains the last publicly
-verified package. The patch adds structured host/App Server identities,
+Status: `v0.12.2` is publicly verified. The patch adds structured host/App
+Server identities,
 execution-boundary budget refresh, capability-driven profile selection, Codex
 0.150 compatibility, and a packaged price example to the validated
 concurrency policy and CLI App Server runner, zero-write observer
