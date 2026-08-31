@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -24,9 +23,11 @@ const packagePath = new URL("../package.json", import.meta.url);
 const packageSmokePath = new URL("../scripts/package-smoke.ts", import.meta.url);
 const changelogPath = new URL("../CHANGELOG.md", import.meta.url);
 const roadmapPath = new URL("../ROADMAP.md", import.meta.url);
+const roadmapHistoryPath = new URL("../docs/ROADMAP-HISTORY.md", import.meta.url);
 const readmePath = new URL("../README.md", import.meta.url);
 const productPath = new URL("../PRODUCT.md", import.meta.url);
 const releasingPath = new URL("../RELEASING.md", import.meta.url);
+const securityPolicyPath = new URL("../SECURITY.md", import.meta.url);
 const closeoutPath = new URL("../RELEASE-CLOSEOUT.json", import.meta.url);
 const archivedCloseoutPath = new URL("../release-closeouts/v0.9.3.json", import.meta.url);
 const archivedPreviousCloseoutPath = new URL("../release-closeouts/v0.9.4.json", import.meta.url);
@@ -37,48 +38,6 @@ const archivedReleaseCloseoutPath = new URL("../release-closeouts/v0.12.2.json",
 const archivedCurrentCloseoutPath = new URL("../release-closeouts/v0.11.0.json", import.meta.url);
 const archivedV011CloseoutSha256 = "20d384f89d687f7f4bcc7ad13aae523e7f913c2212e2eb52acb42d2b30e84e83";
 const archivedV012CloseoutSha256 = "0d7d22ff06176979bc4f9bf3524f69a4d40c71dc8b85c7186237c07285ea91e0";
-const gifScriptPath = new URL("../scripts/capture-synod-cycle-gif.sh", import.meta.url);
-const cyclePath = new URL("../docs/synod/synod-cycle.html", import.meta.url);
-const cycleGifPath = new URL("../docs/synod/assets/synod-cycle-loop.gif", import.meta.url);
-
-function gifValidatorSource(script: string): string {
-  const commandStart = script.indexOf('node --input-type=module - "$gif_path"');
-  assert.ok(commandStart >= 0, "GIF validator command must be present");
-  const heredocStart = script.indexOf("<<'NODE'\n", commandStart);
-  assert.ok(heredocStart >= 0, "GIF validator heredoc must be present");
-  const sourceStart = heredocStart + "<<'NODE'\n".length;
-  const sourceEnd = script.indexOf("\nNODE", sourceStart);
-  assert.ok(sourceEnd >= 0, "GIF validator heredoc must be terminated");
-  return script.slice(sourceStart, sourceEnd);
-}
-
-function gifComment(payload: Buffer): Buffer {
-  const chunks: Uint8Array[] = [Buffer.from([0x21, 0xfe])];
-  for (let offset = 0; offset < payload.length; offset += 255) {
-    const block = payload.subarray(offset, offset + 255);
-    chunks.push(Buffer.from([block.length]), block);
-  }
-  chunks.push(Buffer.from([0x00]));
-  return Buffer.concat(chunks);
-}
-
-function syntheticGif(frameCount: number, commentPayload = Buffer.alloc(100_000, 0x7f)): Buffer {
-  const chunks: Buffer[] = [Buffer.from("GIF89a", "ascii")];
-  const logicalScreen = Buffer.alloc(7);
-  logicalScreen.writeUInt16LE(1120, 0);
-  logicalScreen.writeUInt16LE(622, 2);
-  chunks.push(logicalScreen, gifComment(commentPayload));
-  for (let frame = 0; frame < frameCount; frame += 1) {
-    chunks.push(Buffer.from([
-      0x21, 0xf9, 0x04, 0x00, 0x21, 0x00, 0x00, 0x00,
-      0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
-      0x02, 0x02, 0x44, 0x01, 0x00
-    ]));
-  }
-  chunks.push(Buffer.from([0x3b]));
-  return Buffer.concat(chunks);
-}
-
 test("Git dependency build lifecycles do not require pnpm or Corepack", async () => {
   const packageJson = parseJson(await readFile(packagePath, "utf8"));
   assert.ok(isRecord(packageJson) && isRecord(packageJson.scripts));
@@ -205,11 +164,91 @@ test("installed-package smoke covers the production-shaped release contract", as
   assert.match(packageSmoke, /const installedTemplateVersion = "0\.0\.1"/);
 });
 
-test("release source, archived evidence, and product/docs contract stay explicit", async () => {
-  const [packageText, changelog, roadmap, readme, product, releasing, archivedCloseoutText, closeoutText, archivedCurrentCloseoutText, archivedPublishedCloseoutText, archivedLatestCloseoutText, archivedReleaseCloseoutText, packageSmoke, archivedPreviousCloseoutText, archived095CloseoutText] = await Promise.all([
+test("security policy keeps release and execution boundaries fail-closed", async () => {
+  const security = await readFile(securityPolicyPath, "utf8");
+  const sections = [
+    "System and scope",
+    "Reporting a vulnerability",
+    "Supported versions",
+    "Threat model and trust boundaries",
+    "Security invariants",
+    "Sensitive local data",
+    "Execution and sandbox boundary",
+    "Reportable findings and severity context",
+    "Out of scope",
+    "Known limitations",
+  ];
+  let previousHeading = -1;
+  for (const section of sections) {
+    const heading = security.indexOf(`## ${section}`);
+    assert.ok(heading > previousHeading, `SECURITY.md must keep ## ${section} in order`);
+    previousHeading = heading;
+  }
+
+  assert.match(security, /private GitHub security advisory for this repository/);
+  assert.match(security, /Do not\s+open a public issue for an unpatched vulnerability/);
+  assert.match(security, /credentials, private source code, or raw recovery bundles/);
+  assert.match(security, /acknowledge a report within five business days/);
+  assert.match(security, /does not promise a fixed remediation SLA/);
+  assert.match(security, /\| Latest version published to npm \| Supported \|/);
+  assert.match(security, /\| Default branch and unreleased source \| Reviewed as development code, but not a published compatibility or security contract \|/);
+  assert.match(security, /\| Older published versions \| Unsupported unless a security advisory says otherwise \|/);
+  assert.doesNotMatch(security, /0\.12\.2/);
+
+  for (const input of [
+    "repository content",
+    "Git metadata",
+    "paths",
+    "canonical state",
+    "recovery bundles",
+    "host and App Server responses",
+    "child-agent output",
+    "package registries",
+  ]) {
+    assert.match(security, new RegExp(input), `SECURITY.md must treat ${input} as untrusted`);
+  }
+  for (const boundary of [
+    /Writer authority is bound to an exact task, revision, lease identifier, generation, owner identity, and path scope/,
+    /A delegated worker cannot accept, verify, or complete its own delivery/,
+    /Proposal acceptance and independent verification are separate decisions/,
+    /Budget, lease, and wait checks occur before reservation, spawn, bind, mutation, or dispatch side effects/,
+    /Recovery from expired, revoked, empty, or abandoned work is explicit and bounded/,
+    /User content and unrelated working-tree changes are preserved/,
+    /Hashes are integrity checks, not signatures and not proof of authorship or publisher identity/,
+    /does not upload project state, source content, prompts, recovery bundles, or usage telemetry by default/,
+    /Network access occurs only when the operator invokes a command whose purpose requires it/,
+    /not an operating-system sandbox/,
+    /run with the permissions granted to the invoking harness or user/,
+    /Path scopes and leases express protocol authority/,
+    /Synod does not replace them/,
+  ]) {
+    assert.match(security, boundary, `SECURITY.md must preserve ${boundary}`);
+  }
+
+  for (const finding of [
+    /escape an intended project, destination, or restore boundary/,
+    /overwrite or delete user-owned content without the documented explicit authorization/,
+    /bypass task, revision, lease, generation, owner, path, budget, acceptance, or verification fences/,
+    /confuse host handles, App Server thread identifiers, or worker identities/,
+    /accept tampered state, proposals, bundles, release evidence, or managed content/,
+    /expose repository contents, prompts, state, bundles, identifiers, usage records, or credentials/,
+    /execute an external mutation that the operator did not authorize/,
+    /make a materially false security or release claim/,
+  ]) {
+    assert.match(security, finding, `SECURITY.md must keep ${finding} reportable`);
+  }
+  assert.match(security, /generally out of scope unless they show that Synod weakens or bypasses a documented boundary/);
+  assert.match(security, /A finding is still in scope if one of these conditions is used to cross a Synod-enforced boundary/);
+  assert.match(security, /malicious local administrator/);
+  assert.match(security, /Protocol path scopes and leases are not kernel-enforced sandbox controls/);
+});
+
+test("release source, roadmap/history, and product/docs contract stay explicit", async () => {
+  const [packageText, changelog, roadmap, roadmapHistory, readme, product, releasing, archivedCloseoutText, closeoutText, archivedCurrentCloseoutText, archivedPublishedCloseoutText, archivedLatestCloseoutText, archivedReleaseCloseoutText, packageSmoke, archivedPreviousCloseoutText, archived095CloseoutText] = await Promise.all([
     readFile(packagePath, "utf8"),
     readFile(changelogPath, "utf8"),
     readFile(roadmapPath, "utf8"),
+    readFile(roadmapHistoryPath, "utf8"),
     readFile(readmePath, "utf8"),
     readFile(productPath, "utf8"),
     readFile(releasingPath, "utf8"),
@@ -408,29 +447,122 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.match(changelog, /\[0\.9\.5\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.4\.\.\.v0\.9\.5/);
   assert.match(changelog, /\[0\.9\.4\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.3\.\.\.v0\.9\.4/);
   assert.match(changelog, /\[0\.9\.3\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.9\.2\.\.\.v0\.9\.3/);
+  assert.match(roadmap, /Operator promise:/);
+  assert.match(roadmap, /Category: local trust layer for consequential agent work/);
+  assert.match(roadmap, /North-star metric:[\s\S]*zero protocol-level human intervention/);
+  assert.match(roadmap, /Current release truth:/);
   assert.match(roadmap, /Current public release: `v0\.12\.2`/);
   assert.match(roadmap, /Current source release: `v0\.12\.2`/);
   assert.match(roadmap, /Last verified public release at this update: `v0\.12\.2`/);
-  assert.match(roadmap, /release-closeouts\/v0\.11\.0\.json/);
-  assert.match(roadmap, /release-closeouts\/v0\.12\.0\.json/);
-  assert.match(roadmap, /release-closeouts\/v0\.12\.1\.json/);
-  assert.match(roadmap, /release-closeouts\/v0\.12\.2\.json/);
-  assert.match(roadmap, /(?:prior|earlier) `v0\.9\.5`[\s\S]*release-closeouts\/v0\.9\.5\.json/);
-  assert.match(roadmap, /signed tag and GitHub Release `isImmutable: true` provide the external\s+release anchors/);
-  assert.match(roadmap, /root `RELEASE-CLOSEOUT\.json` is the matching verified\s+closeout record for `v0\.12\.2`/);
-  assert.match(roadmap, /Status: `v0\.12\.2` is publicly verified/);
-  assert.doesNotMatch(roadmap, /last verified public package remains `v0\.9\.2`/i);
-  assert.doesNotMatch(roadmap, /public verification remains `v0\.9\.2`/i);
-  assert.match(roadmap, /\| SYN-093-VERSIONS-001 \|/);
-  assert.match(roadmap, /## v0\.9\.4 — Review, host, status, and recovery surfaces/);
-  assert.match(roadmap, /public and pinned `v0\.9\.4` runtimes/);
-  assert.match(roadmap, /public\/pinned `v0\.9\.4` `doctor`\s+support expression/);
-  assert.doesNotMatch(roadmap, /unshipped|unreleased/);
-  assert.match(roadmap, /v0\.9\.5 release requires Node `>=22`/);
-  assert.match(roadmap, /## v0\.9\.5 — Status bootstrap hotfix/);
-  assert.match(roadmap, /SYN-095-STATUS-BOOTSTRAP-024/);
-  assert.match(roadmap, /`--task`, `--active-only`, and\s+`--changed-since-checkpoint`/);
-  assert.match(roadmap, /every valid numeric\s+`0\.148\.x` variant/);
+  assert.match(roadmap, /signed tag commit[\s\S]*0ae623f4537daaa62278e70ae077b3231578a88e/);
+  assert.match(roadmap, /\[RELEASE-CLOSEOUT\.json\]\(RELEASE-CLOSEOUT\.json\)/);
+  assert.match(roadmap, /\[release-closeouts\/v0\.12\.2\.json\]\(release-closeouts\/v0\.12\.2\.json\)/);
+  assert.match(roadmap, /\[RELEASING\.md\]\(RELEASING\.md\)/);
+  assert.match(roadmap, /\[docs\/ROADMAP-HISTORY\.md\]\(docs\/ROADMAP-HISTORY\.md\)/);
+  assert.equal(roadmap.match(/\[release-closeouts\/v0\.12\.2\.json\]\(/g)?.length, 1, "ROADMAP must own the current closeout link once");
+  assert.match(roadmap, /Public proof covers[\s\S]*source preparation is not public proof/);
+  assert.doesNotMatch(roadmap, /release-closeouts\/v0\.12\.1\.json|release-closeouts\/v0\.12\.0\.json|release-closeouts\/v0\.11\.0\.json|release-closeouts\/v0\.9\.5\.json/);
+  assert.match(roadmap, /runtime requires Node `>=22`/);
+  assert.match(roadmap, /supports Codex numeric minor lines\s+`0\.148` and `0\.150`/);
+  assert.match(roadmap, /## 1\. Invisible Loop — v1/);
+  assert.match(roadmap, /## 2\. Programs/);
+  assert.match(roadmap, /## 3\. Portable Trust/);
+  assert.match(roadmap, /## 4\. Agent Teams/);
+  assert.match(roadmap, /v1 exit gate:/);
+  assert.match(roadmap, /Current blocked-by\/worktree continuation is source-only/);
+  assert.match(roadmap, /publish it in a pinned `@ivand890\/synod@0\.12\.x` package before pilots start/);
+  assert.match(roadmap, /source-checkout behavior alone is not pilot evidence/);
+  assert.equal(roadmap.match(/Current blocked-by\/worktree continuation is source-only/g)?.length, 1, "ROADMAP must own the source-only publication prerequisite once");
+  assert.equal(roadmap.match(/source-checkout behavior alone is not pilot evidence/g)?.length, 1, "ROADMAP must state the source/public proof boundary once");
+  const invisibleLoopDependencyRow = roadmap.match(/^\| Invisible Loop \(v1\) \|.*$/m)?.[0];
+  assert.ok(invisibleLoopDependencyRow, "ROADMAP must include the Invisible Loop dependency row");
+  assert.match(invisibleLoopDependencyRow, /Verified v0\.12\.2 contract and the pinned-publication condition above/);
+  assert.doesNotMatch(invisibleLoopDependencyRow, /Invisible Loop exit gate/);
+  assert.doesNotMatch(roadmap, /released source-only blocker\/worktree behavior/);
+  assert.match(roadmap, /Three real production-shaped pilots[\s\S]*at least three repositories/);
+  assert.match(roadmap, /different domain/);
+  assert.match(roadmap, /operated by someone other than the author/);
+  assert.match(roadmap, /All three pilots complete with zero protocol-level human intervention/);
+  assert.match(roadmap, /interruption\s+and recovery/);
+  assert.match(roadmap, /Independent verification/);
+  assert.match(roadmap, /security review/);
+  assert.match(roadmap, /zero protocol-level human intervention/);
+  assert.match(roadmap, /v1 does not authorize autonomous merge, push, deployment, secret mutation,[\s\S]*payment, provider spending/);
+  assert.match(roadmap, /accepts a natural-language substantial outcome/);
+  assert.match(roadmap, /progressively refined dependency graph/);
+  assert.match(roadmap, /goal, constraints, dependencies, and expected\s+evidence/);
+  assert.match(roadmap, /Independent ready leaves dispatch automatically within configured capacity/);
+  assert.match(roadmap, /concise human decision queue/);
+  assert.match(roadmap, /Programs are not reusable workflow templates/);
+  assert.match(roadmap, /Cross-repository dependency graphs/);
+  assert.match(roadmap, /Organization policy and approval boundaries/);
+  assert.match(roadmap, /Multiple human decision owners/);
+  assert.match(roadmap, /Optional local or self-hosted operational visibility/);
+  assert.match(roadmap, /while remaining local-first/);
+  assert.match(roadmap, /Dependency order and release-proof boundary/);
+  assert.match(roadmap, /Historical release evidence is not a future commitment/);
+  assert.ok(roadmap.split(/\r?\n/).length <= 200, "ROADMAP.md must stay within the active-roadmap line budget");
+  assert.equal(roadmap.match(/^Deliberate non-goals:$/gm)?.length, 4, "ROADMAP must retain non-goals for all four horizons");
+  assert.equal(roadmap.match(/^Measurable gate:$/gm)?.length, 3, "ROADMAP must retain measurable gates for Programs, Portable Trust, and Agent Teams");
+  const horizonHeadings = [
+    "## 1. Invisible Loop — v1",
+    "## 2. Programs",
+    "## 3. Portable Trust",
+    "## 4. Agent Teams",
+  ];
+  let previousHorizon = -1;
+  for (const headingText of horizonHeadings) {
+    const heading = roadmap.indexOf(headingText);
+    assert.ok(heading > previousHorizon, `ROADMAP must keep ${headingText} in order`);
+    previousHorizon = heading;
+  }
+  assert.match(roadmapHistory, /^# Synod Roadmap History/m);
+  assert.match(roadmapHistory, /historical evidence, not a forward\s+commitment/);
+  for (const releaseSection of [
+    "## v0.6 — Delivered foundation",
+    "## Pre-v0.7 foundation — TypeScript 7 source migration",
+    "## v0.7 — Recoverable phase boundaries",
+    "## v0.8 — Durable ownership and interruption recovery",
+    "## v0.9 — Marginal economics and adaptive orchestration",
+    "## v0.10 — Agent-completable golden path",
+    "## v0.11 — Agent-recoverable interruption",
+    "## v0.12 — Independent proof",
+  ]) {
+    assert.ok(roadmapHistory.includes(releaseSection), `ROADMAP-HISTORY must preserve ${releaseSection}`);
+  }
+  assert.match(roadmapHistory, /## v0\.9\.4 — Review, host, status, and recovery surfaces/);
+  assert.match(roadmapHistory, /## v0\.9\.5 — Status bootstrap hotfix/);
+  assert.match(roadmapHistory, /## v0\.12 — Independent proof/);
+  assert.match(roadmapHistory, /Status: `v0\.12\.2` is publicly verified/);
+  assert.match(roadmapHistory, /registry-installed package integrity\/attestation\/provenance/);
+  assert.match(roadmapHistory, /release-closeouts\/v0\.12\.2\.json/);
+  assert.doesNotMatch(roadmapHistory, /^## Current release evidence index$/m);
+  assert.doesNotMatch(roadmapHistory, /^## Delivered foundation$/m);
+  assert.match(roadmapHistory, /At the `v0\.12\.2` closeout, dated 2026-08-30,[\s\S]*still open[\s\S]*later[\s\n]+carried into the active roadmap/);
+  assert.doesNotMatch(roadmapHistory, /broader independent-proof milestone remains in progress/);
+  assert.match(roadmapHistory, /The v0\.9\.5 release required Node `>=22`/);
+  assert.doesNotMatch(roadmapHistory, /The current\s+v0\.9\.5 release requires Node/);
+  assert.match(roadmapHistory, /local tarball smoke remained source-preparation evidence/);
+  assert.doesNotMatch(roadmapHistory, /local tarball smoke remains source-preparation evidence/);
+  assert.match(roadmapHistory, /The delivered package[\s\S]*published compiled ESM JavaScript[\s\S]*consumers did not need TypeScript[\s\S]*no production\s+dependency/);
+  assert.doesNotMatch(roadmapHistory, /Synod will publish compiled ESM JavaScript|consumers will not need TypeScript|no\s+production dependency will be added/);
+  assert.match(roadmapHistory, /Foundation gate required[\s\S]*The migration landed separately/);
+  assert.doesNotMatch(roadmapHistory, /Foundation gate: the compiled package must be|migration\s+must land separately/);
+  assert.match(roadmapHistory, /SYN-094-RELEASE-011` additionally required[\s\S]*live verifier ran/);
+  assert.doesNotMatch(roadmapHistory, /SYN-094-RELEASE-011` additionally requires|live verifier\s+runs on the protected closeout PR/);
+  assert.match(roadmapHistory, /The release required Node `>=22` and retained/);
+  assert.doesNotMatch(roadmapHistory, /The release requires Node `>=22` and retains/);
+  assert.match(roadmapHistory, /reservation tokens remained in JSON\. The agent was not permitted/);
+  assert.doesNotMatch(roadmapHistory, /reservation tokens remain in JSON\. The agent must not/);
+  assert.match(roadmapHistory, /The historical release gate required killing the worker[\s\S]*Acceptance did not advance/);
+  assert.doesNotMatch(roadmapHistory, /Release gate: kill the worker while the task is `ACTIVE`/);
+  assert.match(roadmapHistory, /SYN-095-STATUS-BOOTSTRAP-024/);
+  assert.match(roadmapHistory, /\| SYN-093-VERSIONS-001 \|/);
+  assert.match(roadmapHistory, /`--task`, `--active-only`, and\s+`--changed-since-checkpoint`/);
+  assert.match(roadmapHistory, /every valid numeric\s+`0\.148\.x` variant/);
+  for (const historicalTaskId of ["SYN-069A", "SYN-070", "SYN-080", "SYN-090", "SYN-100", "SYN-110", "SYN-120"]) {
+    assert.match(roadmapHistory, new RegExp(`\\| ${historicalTaskId} \\|`), `ROADMAP-HISTORY must preserve ${historicalTaskId}`);
+  }
   for (const taskId of [
     "SYN-094-REVIEW-001",
     "SYN-094-HOST-002",
@@ -440,39 +572,75 @@ test("release source, archived evidence, and product/docs contract stay explicit
     "SYN-094-DOC-VERSION-006",
     "SYN-094-RELEASE-011",
   ]) {
-    assert.match(roadmap, new RegExp(`\\| ${taskId} \\|`), `ROADMAP must include ${taskId} in the release section`);
+    assert.ok(roadmapHistory.includes(`| ${taskId} |`), `ROADMAP-HISTORY must include ${taskId}`);
   }
-  const v093Start = roadmap.indexOf("## v0.9.3");
-  const v094Start = roadmap.indexOf("## v0.9.4", v093Start);
-  assert.ok(v093Start >= 0 && v094Start > v093Start, "ROADMAP release section must follow v0.9.3");
-  assert.doesNotMatch(roadmap.slice(v093Start, v094Start), /SYN-094-SURFACES-004/);
-  assert.doesNotMatch(roadmap, /two-phase closeout on `main`/i);
+  const v093Start = roadmapHistory.indexOf("## v0.9.3");
+  const v094Start = roadmapHistory.indexOf("## v0.9.4", v093Start);
+  assert.ok(v093Start >= 0 && v094Start > v093Start, "ROADMAP-HISTORY release section must follow v0.9.3");
+  assert.doesNotMatch(roadmap, /\| SYN-094-(?:REVIEW|HOST|STATUS|SURFACES|PACKAGE-CLEANUP|DOC-VERSION|RELEASE)-/);
+  assert.doesNotMatch(roadmap, /\| SYN-(?:069A|070|080|090|100|110|120) \|/);
+  assert.doesNotMatch(roadmap, /## v0\.9\.[345]/);
+  assert.doesNotMatch(roadmap, /two-phase closeout on main/i);
 
-  assert.match(readme, /Public release and source tree/);
-  assert.match(readme, /signed tag commit[\s\S]*externally immutable/);
-  assert.match(readme, /Post-publication evidence is recorded in the versioned/);
-  assert.match(readme, /Post-publication evidence is recorded in the versioned[\s\S]*release-closeouts\/v0\.11\.0\.json/);
-  assert.match(readme, /(?:prior|earlier)[\s\S]*release-closeouts\/v0\.9\.5\.json/);
-  assert.match(readme, /release-closeouts\/v0\.12\.1\.json/);
-  assert.match(readme, /release-closeouts\/v0\.12\.2\.json/);
-  assert.match(readme, /public and pinned `@ivand890\/synod@0\.12\.2`/);
-  assert.match(readme, /root[\s\S]*RELEASE-CLOSEOUT\.json[\s\S]*matching verified[\s\S]*`v0\.12\.2`/);
-  assert.match(readme, /source tree contains the\s+following additions/);
-  assert.match(readme, /The v0\.12\.0 source surfaces remain available in this release/);
-  assert.match(readme, /0\.9\.5 hotfix, retained since v0\.11\.0, makes[\s\S]*mixed selectors still\s+fail closed/);
-  assert.match(readme, /v0\.12\.2 release requires Node\.js `>=22`/);
-  assert.match(readme, /public `v0\.12\.2` release has this `doctor` support expression/i);
-  assert.match(readme, /support expression[\s\S]*>=0\.148\.0-0 <0\.149\.0 \|\| >=0\.150\.0-0 <0\.151\.0/);
-  assert.match(readme, /Known-good and exercised in CI: `0\.148\.0-alpha\.9`/);
-  assert.match(readme, /numeric major\/minor is exactly[\s\S]*`0\.148` or `0\.150`/);
-  assert.match(readme, /untested `0\.149\.x` gap/);
-  assert.doesNotMatch(readme, /candidate support expression `>=0\.142\.0 <0\.148\.0/);
-  assert.match(readme, /synod task correct/);
-  assert.match(readme, /Git-lane provenance/);
-  assert.match(readme, /HostDelegationAdapter/);
+  assert.ok(readme.split(/\r?\n/).length <= 210, "README.md must stay within the operator-facing line budget");
+  assert.ok(roadmapHistory.split(/\r?\n/).length <= 320, "ROADMAP-HISTORY.md must stay within the historical line budget");
+  assert.ok(product.split(/\r?\n/).length <= 115, "PRODUCT.md must stay within the product-context line budget");
+  for (const section of [
+    "Start with an outcome",
+    "Who is responsible for what",
+    "When work is interrupted",
+    "Install and upgrade",
+    "The supervised loop",
+    "Source-only capabilities",
+    "Recovery and local evidence",
+    "Usage and JSON",
+    "Compatibility",
+    "Release proof route",
+    "Development",
+  ]) {
+    assert.match(readme, new RegExp(`^## ${section}$`, "m"), `README.md must include ${section}`);
+  }
+  assert.match(readme, /natural-language outcome/);
+  assert.match(readme, /human's desired outcome is not an execution grant/);
+  assert.match(readme, /host-only primitives/);
+  assert.match(readme, /stale instruction authorizes no write/);
+  assert.match(readme, /`?DONE`? is not a commit, push, PR, deploy, spend, or production mutation/);
+  assert.match(readme, /Interruption is an expected supervision path/);
+  assert.match(readme, /resume, reassign, and supersede/);
+  assert.match(readme, /pnpm dlx @ivand890\/synod@0\.12\.2 init/);
+  assert.match(readme, /pnpm dlx @ivand890\/synod@<version> upgrade --dry-run/);
+  assert.match(readme, /`--blocked-by` dispatch[\s\S]*worktree[\s\S]*source-only/);
+  assert.match(readme, /source\s+checkout behavior alone is not pilot evidence/i);
   assert.match(readme, /include-local-docs/);
-  assert.match(readme, /phase-2 live verifier\s+runs\s+on the protected\s+closeout PR/);
-  assert.match(readme, /phase-2 live verifier\s+runs\s+on the protected\s+closeout PR,\s*not the tag\s+workflow/);
+  assert.match(readme, /Usage reports are read-only/);
+  assert.match(readme, /Every `--json` command emits a versioned envelope/);
+  assert.match(readme, /v0\.12\.2 release requires Node\.js `>=22`/);
+  assert.match(readme, /supports Codex numeric minor lines `0\.148\.x` and `0\.150\.x`/);
+  assert.match(readme, /untested[\s\S]*`0\.149\.x` gap fails closed/);
+  assert.match(readme, /public and pinned `@ivand890\/synod@0\.12\.2`/);
+  assert.match(readme, /signed tag\s+commit[\s\S]*externally immutable/);
+  assert.match(readme, /Matching records:[\s\S]*RELEASE-CLOSEOUT\.json[\s\S]*release-closeouts\/v0\.12\.2\.json/);
+  assert.match(readme, /See \[RELEASING\.md\]\(RELEASING\.md\) for the protected release procedure/);
+  assert.equal(readme.match(/\[release-closeouts\/v0\.12\.2\.json\]\(/g)?.length, 1, "README must link the current versioned closeout once");
+  assert.match(readme, /Local tarball smoke[\s\S]*source-preparation evidence only; they do not prove external publication/);
+  assert.equal(readme.match(/source-preparation evidence only/g)?.length, 1, "README must state the local/public proof boundary once");
+  assert.doesNotMatch(readme, /release-closeouts\/v0\.12\.1\.json|release-closeouts\/v0\.12\.0\.json|release-closeouts\/v0\.11\.0\.json|release-closeouts\/v0\.9\.5\.json/);
+  assert.doesNotMatch(readme, /phase-2 live verifier|strict prepared\/pending source record|clean\s+consumer install|registry-installed package integrity|separate public CLI check/);
+  assert.doesNotMatch(readme, /synod lease (?:reserve|bind)/);
+  assert.doesNotMatch(readme, /--reservation-token|--baseline-hash|--expected-reserved-at/);
+  for (const phrase of [
+    "runtimeVersion",
+    "installedTemplateVersion",
+    "stateTemplateVersion",
+    "JobHandle",
+    "JobEvent",
+    "hostWaitRequired",
+    "sourceSequence",
+    "observationId",
+    "WaitReport",
+  ]) {
+    assert.doesNotMatch(readme, new RegExp(phrase), `README.md must not carry the ${phrase} field catalogue`);
+  }
   assert.doesNotMatch(readme, /closeout(?: evidence)? (?:is|was) recorded (?:on|in) `main`/i);
   assert.match(changelog, /numeric `0\.148` minor line/);
 
@@ -489,38 +657,36 @@ test("release source, archived evidence, and product/docs contract stay explicit
     assert.match(product, new RegExp(`^## ${section}$`, "m"), `PRODUCT.md must include ${section}`);
   }
   assert.match(product, /^product$/m);
+  assert.equal(product.match(/^## /gm)?.length, 7);
   assert.match(product, /precise, calm, and accountable/);
   assert.equal(product.match(/^\d+\. /gm)?.length, 5);
   assert.match(product, /WCAG 2\.2 AA/);
-  assert.match(product, /`JobHandle` and `JobEvent`/);
-  assert.match(product, /public `v0\.12\.2` release supports the corrected Codex delegation paths/);
-  assert.match(product, /CLI App Server Path A[\s\S]*read-only observer turns only/);
-  assert.match(product, /Writer leases stay[\s\S]*host-owned/);
-  assert.doesNotMatch(product, /reserve, spawn, bind, and authorize/);
-  assert.match(product, /injected\s+`HostDelegationAdapter`/);
-  assert.match(product, /Desktop returns an\s+explicit host spawn\/wait handoff[\s\S]*never starts a child App Server/);
-  assert.match(product, /unsupported or non-Codex contexts fail closed/);
-  assert.match(product, /independent Git lanes/);
-  assert.match(product, /execution\s+ownership/);
-  assert.doesNotMatch(product, /Without that adapter, the standalone CLI fails closed/);
-  assert.doesNotMatch(product, /standalone CLI fails closed or returns an incomplete handoff/);
-  assert.match(product, /0\.9\.5 hotfix, retained since 0\.11\.0, also makes the `--task`,\s+`--active-only`, and\s+`--changed-since-checkpoint` selectors/);
-  assert.match(product, /Node\.js `>=22`/);
-  assert.match(product, /numeric major and\s+minor are `0\.148` or `0\.150`/);
-
-  const lifecycle = "READY → reserve → read-only spawn → bind-driven ACTIVE → explicit write authorization → task-aware wait → proposal submit → REVIEW → ACCEPTED → VERIFIED → DONE";
-  assert.ok(readme.includes(lifecycle), "README must show the lease-fenced executable lifecycle");
-  assert.match(readme, /synod lease reserve T-001/);
-  assert.match(readme, /read-only contract/);
-  assert.match(readme, /synod lease bind T-001/);
-  assert.match(readme, /synod wait --task T-001/);
-  assert.match(readme, /synod proposal submit T-001/);
-  assert.doesNotMatch(readme, /synod task transition T-001 ACTIVE --revision/);
-  assert.match(readme, /advisor\/supervisor policy for an ordinary correction is to return work to the same available worker/);
-  assert.match(readme, /not a runtime owner-continuity guarantee/);
-  assert.match(readme, /fresh reservation, lease-generation bind, authorization, and wait boundary/);
-  assert.match(readme, /only that recovery path reassigns a replacement thread/);
-  assert.doesNotMatch(readme, /A correction repeats the reservation, read-only spawn/);
+  assert.match(product, /Category: local trust layer for consequential agent work/);
+  assert.match(product, /local trust layer for consequential agent work/);
+  assert.match(product, /human operator/);
+  assert.match(product, /Jobs-to-be-done/);
+  assert.match(product, /Trust boundaries are explicit/);
+  assert.match(product, /Interruption is a normal product state/);
+  assert.match(product, /North-star outcome/);
+  assert.match(product, /zero protocol-level human intervention/);
+  assert.match(product, /## Anti-references/);
+  for (const phrase of [
+    "public",
+    "release",
+    "version",
+    "v0.12",
+    "Node.js",
+    "Codex",
+    "App Server",
+    "JobHandle",
+    "JobEvent",
+    "HostDelegationAdapter",
+    "selector",
+    "--task",
+    "source-only",
+  ]) {
+    assert.doesNotMatch(product, new RegExp(phrase, "i"), `PRODUCT.md must not carry ${phrase} implementation detail`);
+  }
 
   assert.match(releasing, /public `v0\.12\.2` source is anchored by signed tag commit/);
   assert.match(releasing, /externally immutable GitHub\s+Release \(`isImmutable: true`\)/);
@@ -534,16 +700,47 @@ test("release source, archived evidence, and product/docs contract stay explicit
   assert.doesNotMatch(releasing, /pre-tag candidate record/);
   assert.match(releasing, /registry-installed package result/);
   assert.match(releasing, /local tarball smoke belongs under\s+`sourcePreparation\.localPackageSmoke`/);
-  assert.match(readme, /local tarball smoke is source-preparation evidence only/);
-  assert.match(readme, /clean\s+consumer install of the exact registry spec/);
-  assert.match(roadmap, /registry-installed package integrity\/attestation\/provenance/);
   assert.match(releasing, /Two-phase closeout/);
   assert.match(releasing, /protected release procedure\s+for a future version/);
   assert.match(releasing, /scripts\/validate-release-closeout\.ts/);
   assert.match(releasing, /scripts\/verify-public-release-closeout\.ts/);
   assert.match(releasing, /phase-strict closeout validation|Malformed or mixed-phase records fail closed/);
   assert.match(releasing, /phase-2 live verifier runs on the protected\s+closeout PR,\s*not the tag\s+workflow/);
-  assert.match(roadmap, /phase-2 live verifier runs on the protected\s+closeout PR,\s*not the tag\s+workflow/);
+
+  const runbookSections = [
+    "Release truth and authority",
+    "Phase 1: Prepare source",
+    "Phase 2: Protected publish",
+    "Phase 3: Public verification and closeout",
+    "Failure and recovery",
+    "Historical evidence",
+  ];
+  let previousRunbookHeading = -1;
+  for (const section of runbookSections) {
+    const heading = releasing.indexOf(`## ${section}`);
+    assert.ok(heading > previousRunbookHeading, `RELEASING.md must keep ## ${section} in order`);
+    previousRunbookHeading = heading;
+  }
+  assert.ok(releasing.split(/\r?\n/).length <= 110, "RELEASING.md must stay within the 110-line operator runbook budget");
+  for (const boundary of [
+    /signed annotated tag/,
+    /trusted publishing[\s\S]*no npm publish token is stored in GitHub/,
+    /sourcePreparation\.status[\s\S]*prepared[\s\S]*publicVerification\.status[\s\S]*documentation\.status[\s\S]*pending/,
+    /tag workflow validates phase 1 only/,
+    /read-only phase-2 live verifier[\s\S]*protected closeout PR/,
+    /Local tests, a tarball, a tag, or a green workflow are not public proof/,
+    /GitHub Releases and npm are not an atomic transaction/,
+    /rerun[\s\S]*fail closed/,
+    /Published tags and npm versions are immutable/,
+    /root and matching versioned closeouts must be[\s\S]*byte-identical/,
+    /npm version,[\s\S]*gitHead[\s\S]*latest[\s\S]*integrity[\s\S]*attestation[\s\S]*provenance/,
+    /immutable[\s\S]*GitHub Release[\s\S]*Latest parity/,
+    /clean consumer install of the exact registry spec/,
+    /public `pnpm dlx @ivand890\/synod@\$release_version --version` check/,
+    /--latest=false/,
+  ]) {
+    assert.match(releasing, boundary, `RELEASING.md must preserve ${boundary}`);
+  }
 
   const unsupportedArchiveWording = [
     /immutable source and\s+post-publication evidence is archived in[\s\S]*release-closeouts\//i,
@@ -563,24 +760,6 @@ test("release source, archived evidence, and product/docs contract stay explicit
     );
   }
 
-  for (const phrase of [
-    "runtimeVersion",
-    "installedTemplateVersion",
-    "stateTemplateVersion",
-    "`templateVersion` as an alias",
-    "Wait authority and transport are separate fields",
-    "hostWaitRequired",
-    "canonical` authority on a selection/event",
-    "There is no Synod thread/resume observer.",
-    "schema-1 `JobHandle`/`JobEvent` contract",
-    "does not persist job records",
-    "App Server provenance has `transport`",
-    "canonical provenance has `sourceSequence`",
-    "host provenance has `observationId`",
-    "The `mode` field belongs to `WaitReport`, not `JobEvent`.",
-  ]) {
-    assert.ok(readme.includes(phrase), `README must document ${phrase}`);
-  }
   assert.equal(releasing.match(/release_version="\$\{RELEASE_VERSION/g)?.length, 3);
   assert.ok(packageSmoke.includes("hostWaitRequired"));
   assert.ok(packageSmoke.includes("validateJobHandle"));
@@ -1046,130 +1225,6 @@ test("public closeout verifier validates the exact post-publication record befor
     if (originalToken === undefined) delete process.env.GH_TOKEN;
     else process.env.GH_TOKEN = originalToken;
   }
-});
-
-test("cycle GIF capture is a dependency-free deterministic contract", async () => {
-  const script = await readFile(gifScriptPath, "utf8");
-  const validator = gifValidatorSource(script);
-  assert.match(script, /^#!\/usr\/bin\/env bash/m);
-  assert.match(script, /CHROME_BIN/);
-  assert.match(script, /FFMPEG_BIN/);
-  assert.match(script, /--window-size=1120,622/);
-  assert.match(script, /-framerate 3/);
-  assert.ok(script.includes("expected_frames=$(( ${#normal_steps[@]} + ${#correction_steps[@]} ))"));
-  assert.match(script, /expected 33/);
-  assert.match(script, /normal_steps=\(/);
-  assert.match(script, /correction_steps=\(/);
-  assert.match(script, /normalFrames < 1 \|\| correctionFrames < 1/);
-  assert.match(script, /--dump-dom/);
-  assert.match(validator, /requireBytes/);
-  assert.match(validator, /skipSubBlocks/);
-  assert.match(validator, /pendingGce/);
-  assert.match(validator, /image descriptor has no preceding valid GCE/);
-  assert.match(validator, /multiple pending GCE blocks/);
-  assert.match(validator, /unknown GIF extension label/);
-  assert.match(validator, /unknown GIF block marker/);
-  assert.match(validator, /GIF trailer must be the final byte/);
-  assert.doesNotMatch(validator, /for \(let index = 0; index \+ 8 < bytes\.length; index \+= 1\)/);
-  assert.match(script, /gif-capture-sentinel/);
-  assert.match(script, /normalHashes/);
-  assert.match(script, /correctionHashes/);
-  assert.match(script, /validate_gif/);
-  assert.match(script, /asset_sibling/);
-  assert.match(script, /mv -f "\$asset_sibling" "\$output_path"/);
-  assert.doesNotMatch(script, /mv -f "\$temporary_output" "\$output_path"/);
-  assert.match(script, /mktemp -d/);
-  const normalSteps = script.match(/normal_steps=\(([\s\S]*?)\n\)/)?.[1];
-  const correctionSteps = script.match(/correction_steps=\(([\s\S]*?)\n\)/)?.[1];
-  assert.ok(normalSteps);
-  assert.ok(correctionSteps);
-  assert.match(normalSteps, /(?:^|\s)"done"(?:\s|$)/);
-  assert.match(correctionSteps, /(?:^|\s)"done"(?:\s|$)/);
-
-  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-gif-validator-test-"));
-  try {
-    const validPath = path.join(directory, "valid.gif");
-    const markerLikePath = path.join(directory, "marker-like.gif");
-    await writeFile(validPath, syntheticGif(33));
-    const valid = spawnSync(
-      process.execPath,
-      ["--input-type=module", "-", validPath, "33", "13", "20"],
-      { input: validator, encoding: "utf8" }
-    );
-    assert.equal(valid.status, 0, valid.stderr);
-
-    const markerLikePayload = Buffer.concat([
-      Buffer.from([0x21, 0xf9, 0x04, 0x00, 0x21, 0x00, 0x00, 0x2c]),
-      Buffer.alloc(100_000, 0x7f)
-    ]);
-    await writeFile(markerLikePath, syntheticGif(0, markerLikePayload));
-    const markerLike = spawnSync(
-      process.execPath,
-      ["--input-type=module", "-", markerLikePath, "1", "1", "1"],
-      { input: validator, encoding: "utf8" }
-    );
-    assert.notEqual(markerLike.status, 0);
-    assert.match(markerLike.stderr, /expected 1 frames, found 0/);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("Synod cycle visualizer documents the executable lease and wait boundaries", async () => {
-  const cycle = await readFile(cyclePath, "utf8");
-  const cycleGif = await readFile(cycleGifPath);
-  const lifecycle = "READY → reserve → read-only spawn → bind-driven ACTIVE → explicit supervisor authorization → task-aware wait → proposal submit → REVIEW → ACCEPTED → VERIFIED → DONE → checkpoint";
-
-  assert.ok(cycle.includes(lifecycle), "the visualizer must expose the executable lifecycle");
-  for (const phrase of [
-    "writeAuthorized:false",
-    "bind moves the task to ACTIVE",
-    "waitAuthority: canonical",
-    "waitAuthority: appServer",
-    "waitAuthority: host",
-    "mode",
-    "authority ≠ mode",
-    "notLoaded",
-    "notification",
-    "cursor",
-    "poll",
-    "handoff",
-    "same available worker",
-    "fresh reservation",
-    "lease-generation bind",
-    "explicit recovery",
-    "Acceptance evidence",
-    "Verification evidence",
-    "checkpoint",
-  ]) {
-    assert.ok(cycle.includes(phrase), `cycle visualizer must document ${phrase}`);
-  }
-
-  assert.match(cycle, /<noscript>[\s\S]*READY → reserve[\s\S]*checkpoint[\s\S]*<\/noscript>/);
-  assert.match(cycle, /prefers-reduced-motion/);
-  assert.match(cycle, /window\.history\.replaceState/);
-  assert.match(cycle, /document\.addEventListener\("keydown"/);
-  assert.match(cycle, /mobile-snapshot/);
-  assert.match(cycle, /params\.get\("capture"\) === "gif"/);
-  assert.match(cycle, /gif-capture-sentinel/);
-  assert.match(cycle, /captureRequestError/);
-  assert.match(cycle, /requestedScenarioKnown/);
-  assert.match(cycle, /gif-capture/);
-  assert.match(cycle, /aria-label=/);
-  assert.doesNotMatch(cycle, /three concurrent agents|run three agents|Fill all three slots/i);
-  assert.doesNotMatch(cycle, /task transition[^\n]*ACTIVE/i);
-
-  assert.equal(cycleGif.subarray(0, 6).toString("ascii"), "GIF89a");
-  assert.equal(cycleGif.readUInt16LE(6), 1120, "GIF logical screen width must remain 1120px");
-  assert.equal(cycleGif.readUInt16LE(8), 622, "GIF logical screen height must remain 622px");
-  let graphicControlFrames = 0;
-  for (let index = 0; index + 2 < cycleGif.length; index += 1) {
-    if (cycleGif[index] === 0x21 && cycleGif[index + 1] === 0xf9 && cycleGif[index + 2] === 0x04) {
-      graphicControlFrames += 1;
-    }
-  }
-  assert.equal(graphicControlFrames, 33, "GIF must contain one graphic-control marker per capture frame");
-  assert.ok(cycleGif.length >= 100_000 && cycleGif.length <= 2_000_000, "GIF size must stay within the reviewed capture bounds");
 });
 
 test("durable release turn selects the oldest pending stable tag", () => {

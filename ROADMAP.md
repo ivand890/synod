@@ -1,504 +1,141 @@
 # Synod Roadmap
 
-Last updated: 2026-08-28
-Current public release: `v0.12.2`
-Current source release: `v0.12.2`
-Last verified public release at this update: `v0.12.2`
+Last updated: 2026-08-30
 
-This roadmap converts the advisor loop's remaining operational risks into
-versioned, testable increments. Entries at or below the last verified public
-release are delivered. Later increments remain unavailable to a public/pinned
-runtime until their release is published and the project is explicitly
-upgraded. Exact CLI spelling remains provisional until an increment is
-implemented and released. Source preparation and post-publication npm, GitHub, registry-installed
-package, and public CLI evidence for `v0.12.2` are captured in the versioned
-`release-closeouts/v0.12.2.json`; the prior `v0.12.1` evidence remains recorded
-in `release-closeouts/v0.12.1.json`, the `v0.12.0` evidence remains recorded
-in `release-closeouts/v0.12.0.json`, the `v0.11.0` evidence remains recorded
-in `release-closeouts/v0.11.0.json`, and the earlier `v0.9.5` evidence remains
-recorded in `release-closeouts/v0.9.5.json`.
-The signed tag and GitHub Release `isImmutable: true` provide the external
-release anchors. The root `RELEASE-CLOSEOUT.json` is the matching verified
-closeout record for `v0.12.2`.
-The phase-2 live verifier runs on the protected closeout PR, not the tag
-workflow; the tag workflow validates only the strict prepared/pending source
-record before publication.
+Operator promise: a human states the outcome once. Synod gives the harness a bounded, recoverable path from request to independently verified local delivery; the agent carries protocol mechanics while humans retain product decisions and all external authority.
 
-The `v0.9.1` release delivered pre-spawn lease reservations and corrected
-task-session, thread-count, coordination-outcome, and exact-boundary usage
-semantics. The `v0.9.1` release is publicly delivered. The `v0.9.2` release
-includes the supervisor-efficiency P1—task-aware waiting, adaptive rotation
-preflight, and typed task/proposal commands—plus bounded summary output,
-activation-handoff, and nested-help hardening. Its reviewed merge, signed tag,
-npm/GitHub publication, installed-package proof, and CLI proof are verified.
+Category: local trust layer for consequential agent work, with an operator-first interface.
 
-## Evidence behind this revision
+North-star metric: the share of substantial outcomes completed and independently verified without protocol-level human intervention; the target is zero protocol-level human intervention per production-shaped task. Report the intervention count and evidence reference; token totals and external actions are separate measures.
 
-A production-scale, multi-phase pilot validated Synod's review model while also
-exposing the next constraints:
+Current release truth:
 
-- Independent review and exact-revision verification caught real isolation,
-  privacy, atomicity, concurrency, and browser-integration defects before tasks
-  reached `DONE`.
-- Canonical checkpoints preserved the accepted content identity across a long
-  dirty worktree, but the accepted work remained on an unchanged Git `HEAD`.
-  A fingerprint proves what was reviewed; it does not by itself provide a
-  portable recovery artifact.
-- A 23-thread snapshot reported 329.8 million cumulative tokens, of which 97.6%
-  of input was cached. The tree also accumulated 329 supervisor wait calls and
-  14 context compactions. These are observability signals, not billing
-  estimates, and show that marginal task usage and coordination overhead matter
-  more than another aggregate total.
-- User-owned state notes lagged the canonical task state after a phase change.
-  Generated handoff context must come from `.synod/state.json` and the event
-  log, rather than depending on manually synchronized prose.
-- The single-writer convention prevented overlapping mutations, but ownership,
-  interruption recovery, and correction-round limits were still enforced by
-  agent instructions rather than durable leases.
+- Current public release: `v0.12.2`.
+- Current source release: `v0.12.2`.
+- Last verified public release at this update: `v0.12.2`.
+- The signed tag commit is `0ae623f4537daaa62278e70ae077b3231578a88e`; the matching GitHub Release is externally immutable (`isImmutable: true`).
+- Matching records are [RELEASE-CLOSEOUT.json](RELEASE-CLOSEOUT.json) and [release-closeouts/v0.12.2.json](release-closeouts/v0.12.2.json).
+- Public proof covers npm/GitHub/registry-installed package parity, attestation/provenance, clean consumer install, and a separate public CLI check; source preparation is not public proof.
+- The runtime requires Node `>=22` and supports Codex numeric minor lines `0.148` and `0.150`; the untested `0.149.x` gap fails closed, and `0.148.0-alpha.9` is known-good.
+- See [RELEASING.md](RELEASING.md) for release procedure and [docs/ROADMAP-HISTORY.md](docs/ROADMAP-HISTORY.md) for dated release archaeology.
 
-The resulting order was: a behavior-preserving TypeScript 7 foundation,
-recoverability, concurrency control, and then economics/adaptive orchestration.
+This is the forward roadmap. It does not turn source preparation into a published runtime or treat a historical task ID as a new commitment. Delivered v0.6 through v0.12 chronology, release-specific task tables, compatibility notes, closeout facts, and provenance are preserved in [docs/ROADMAP-HISTORY.md](docs/ROADMAP-HISTORY.md).
 
-## Product principles
+## Direction
 
-1. Prefer observable and recoverable contracts over adding agent roles.
-2. Keep Git and observed runtime behavior as technical truth.
-3. Never interpret `DONE` as committed, pushed, deployed, or operationally
-   approved unless separate evidence proves those states.
-4. Keep orchestration local-first. No checkpoint, lease, or usage command may
-   stage, commit, push, deploy, or transmit telemetry implicitly.
-5. Fail closed on corrupted state, unsafe paths, ambiguous ownership, stale
-   revisions, and incomplete recovery material.
-6. Treat usage as measured token activity. Monetary estimates remain optional,
-   dated, and explicitly configured.
-7. The operator of Synod is the supervising agent. A human asks a harness to
-   complete work; the agent runs the loop. The human must not need to learn
-   leases, fences, or wait authority.
+Synod is a local trust layer for agents that do consequential work. The sequence below moves from an invisible, reliable operator loop to accepted programs, portable proof, and bounded teams. Each horizon has an outcome gate; a later horizon cannot claim an earlier gate by implication.
 
-## Pre-v0.7 foundation — TypeScript 7 source migration
+## 1. Invisible Loop — v1
 
-Goal: migrate Synod's JavaScript implementation to strict TypeScript 7 without
-changing its CLI, runtime, package, security, or orchestration behavior. The
-migration is a prerequisite for new roadmap features, not a feature delivery of
-its own.
+Outcome: the operator asks for an outcome, and a supported harness completes the local protocol without making the operator learn leases, fences, or wait authority.
 
-Status: delivered in `v0.6.3`.
+Capabilities:
 
-The v0.6.3 migration historically supported Node 20/22/24. The current
-v0.9.5 release requires Node `>=22` and removes Node 20
-support. Synod will publish compiled ESM JavaScript and keep a minimal
-JavaScript `bin/synod.js` shim; consumers will not need TypeScript and no
-production dependency will be added. Source imports keep their explicit `.js`
-specifiers under `module: NodeNext`.
+- A fresh supervisor follows the executable path from task creation through host-owned delegation, task-aware wait, proposal submission, acceptance, independent verification, and `DONE` using canonical next actions.
+- Blocked-by dependencies, path-scoped ownership, exact worktree fences, and reviewed return to the requested worktree are fail-closed surfaces.
+- Worker interruption, empty delivery, stale ownership, and a new root session produce typed recovery choices without advancing acceptance or discarding a sealed proposal.
+- The harness records enough per-task evidence to report the north-star metric without reconstructing protocol state from chat.
 
-The migration acceptance rows below retain their historical Node 20/22/24
-runtime gates; they describe the delivered v0.6.x foundation, not the current
-release runtime requirement.
+v1 exit gate:
 
-| ID | Outcome | Depends on | Acceptance gate |
-|---|---|---|---|
-| SYN-069A | Establish the TS 7 checking baseline | `v0.6.2` | Pin TypeScript 7 and Node 20 types as development dependencies; add an ES2022/NodeNext config with `strict`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`, `erasableSyntaxOnly`, and explicit `types: ["node"]`; run `allowJs` + `checkJs` + `noEmit` over the existing JavaScript before renaming files; current tests, JSON envelopes, exit codes, and package smoke remain unchanged. |
-| SYN-069B | Migrate contracts and leaf modules | SYN-069A | Convert package metadata helpers, errors, envelopes, compatibility, profiles, command options, filesystem, manifest, templates, and migrations first; public data structures use explicit types or discriminated unions; no unchecked cast substitutes for runtime validation. |
-| SYN-069C | Migrate integration and lifecycle modules | SYN-069B | Convert App Server, usage, doctor, Codex runtime, local runtime, and lifecycle modules; external process output and parsed JSON enter as `unknown` and pass existing or stronger validators; timeout, cleanup, rollback, symlink, and cross-platform behavior remains equivalent. |
-| SYN-069D | Migrate orchestration, CLI, tests, and scripts | SYN-069C | Convert canonical state/events, recovery transactions, CLI routing, tests, and release scripts; state transitions and events are exhaustively typed; enable `exactOptionalPropertyTypes` only after the initial strict migration is green and resolve every intentional absent-versus-`undefined` distinction explicitly. |
-| SYN-069E | Switch the installed package to compiled output | SYN-069D | Compile TypeScript sources into a clean `dist` tree, retain only a stable JavaScript executable shim, and build before packing; audit the current deep-import/package surface before changing paths; an installed tarball passes every CLI contract on Node 20/22/24 and package smoke on Ubuntu, macOS, and Windows without shipping or loading TypeScript at runtime. |
+- Three real production-shaped pilots run on released, pinned package artifacts across at least three repositories: this repository, a different domain, and at least one repository operated by someone other than the author.
+- Current blocked-by/worktree continuation is source-only: publish it in a pinned `@ivand890/synod@0.12.x` package before pilots start; source-checkout behavior alone is not pilot evidence. Pilots exercise that artifact, including a forced interruption and recovery in a new root session.
+- Independent verification reproduces the reviewed result and exact relevant worktree identity for every pilot; adversarial ownership and recovery cases fail closed.
+- A security review covers leases, recovery bundles, write scopes, uninstall-preservation boundaries, and the no-telemetry default.
+- All three pilots complete with zero protocol-level human intervention: no manual fence copying, lease repair, owner substitution, or undocumented supervisor implementation. Product decisions, review decisions, and external approvals remain human-controlled and are not protocol interventions.
 
-Foundation gate: the compiled package must be behaviorally indistinguishable
-from the `v0.6.2` baseline for supported commands, text/JSON output, exit status,
-filesystem mutations, recovery, and installed runtime delegation. The migration
-must land separately from `v0.7` product behavior, and each slice must keep the
-full regression suite and `git diff --check` green.
+Dependencies: the verified `v0.12.2` contract, the publication condition in the v1 exit gate, a harness adapter that owns spawn and wait identity, and the existing canonical state, lease, recovery, and review surfaces.
 
-## v0.7 — Recoverable phase boundaries
+Deliberate non-goals:
 
-Goal: make every accepted phase portable and independently verifiable without
-requiring the original chat transcript or mutable working directory.
+- v1 does not authorize autonomous merge, push, deployment, secret mutation, payment, provider spending, or any other external action.
+- v1 does not add a second harness, a background execution plane, or a mutating MCP server.
+- v1 does not call a green local test, `DONE`, or a token reduction a substitute for independent evidence.
 
-| ID | Outcome | Depends on | Acceptance gate |
-|---|---|---|---|
-| SYN-070 | Explain checkpoint delta | SYN-069E | Text and JSON distinguish staged, unstaged, untracked, deleted, renamed, and binary paths since the acknowledged checkpoint without changing Git or Synod state. |
-| SYN-071 | Export a local recovery bundle | SYN-070 | An explicit export captures the base branch/HEAD, state/event identity, tracked patch material, and opt-in untracked files; ignored files and unsafe path traversal fail closed; Git index, commits, refs, and remotes remain untouched. |
-| SYN-072 | Verify and restore a bundle | SYN-071 | A fresh checkout can verify hashes and reconstruct the exported relevant-worktree fingerprint. Missing, extra, corrupted, conflicting, or wrong-base material is rejected before mutation, and a failed restore rolls back. |
-| SYN-073 | Generate a canonical handoff | SYN-070 | A generated text/JSON handoff reports the latest checkpoint, live drift, active task, last accepted revision/evidence, unresolved approval gates, legal next transitions, and recovery-bundle reference using canonical state rather than user-owned notes. |
-| SYN-074 | Cross-platform recovery contract | SYN-071, SYN-072, SYN-073 | Fixtures cover mixed staged/unstaged/untracked changes, renames, deletions, binary files, unsafe symlinks, interruption, and corruption on Node 20/22/24 plus installed-package smoke on Ubuntu, macOS, and Windows. |
+## 2. Programs
 
-Release gate: a deliberately dirty fixture can be exported, removed, restored
-in a fresh checkout, and matched to the exact recorded fingerprint without an
-implicit Git or network mutation.
+Outcome: an operator submits a natural-language substantial outcome and receives a progressively refined dependency graph whose goals and constraints are accepted by humans before execution.
 
-## v0.8 — Durable ownership and interruption recovery
+Capabilities:
 
-Goal: enforce the one-writer rule and make delegated execution recoverable
-across worker failure, supervisor interruption, and optional isolated
-worktrees.
+- Synod accepts a natural-language substantial outcome, identifies assumptions and constraints, and proposes a progressively refined dependency graph of outcome-level work rather than asking the operator to author a workflow.
+- Each refinement presents the goal, constraints, dependencies, and expected evidence for explicit human acceptance before the graph can advance.
+- Independent ready leaves dispatch automatically within configured capacity, path scopes, and lease fences; blocked or over-capacity leaves remain queued and cannot be guessed into execution.
+- A concise human decision queue shows only unresolved goal, constraint, approval, or recovery decisions; protocol mechanics stay out of that queue.
+- Program runs retain checkpoints, provenance, budgets, and decision history so a rerun resumes from the last verified boundary without replaying completed work.
 
-| ID | Outcome | Depends on | Acceptance gate |
-|---|---|---|---|
-| SYN-080 | Durable writer leases | v0.7 | A task lease records task revision, owner thread, allowed paths, acquisition time, heartbeat/expiry policy, and release/revocation events. A second writer is rejected deterministically. |
-| SYN-081 | Path ownership enforcement | SYN-080 | Overlapping write scopes are detected before delegation; read-only scopes may coexist; writes outside the lease are reported as drift and cannot be accepted silently. |
-| SYN-082 | Abandoned-worker recovery | SYN-080, SYN-073 | A resumed supervisor can inspect an expired owner's exact delta, choose resume/reassign/supersede, and preserve the proposal without accepting or discarding it implicitly. Clock skew and stale-owner races are tested. |
-| SYN-083 | Enforced correction policy | SYN-080 | Configurable correction limits live in canonical task state. Exhaustion requires an explicit split, supersede, or approved override event instead of another silent round. |
-| SYN-084 | Change-driven waiting | SYN-080 | Where Codex exposes status cursors, coordination waits for a child-state change instead of busy polling; bounded fallback remains available and wait count/duration are observable. No process handle survives cleanup. |
-| SYN-085 | Optional isolated worktrees | SYN-081, SYN-082 | Explicit task worktrees preserve branch/base identity, refuse ambiguous dirty-base integration, and return reviewed changes through a verifiable integration step. Creation and cleanup are recoverable and never delete user work. |
-| SYN-086 | State and event migration | SYN-080–SYN-085 | Existing schema-1 projects migrate explicitly; downgrade is rejected; lock, lease, recovery, and worktree events remain hash-chain validated and uninstall-preserved. |
+Measurable gate:
 
-Release gate: two attempted writers cannot mutate the same scope, and a killed
-worker can be recovered or reassigned without losing its proposal or advancing
-task acceptance.
+- Three natural-language substantial outcomes across at least two repositories produce progressively accepted graphs with explicit goals, constraints, dependencies, evidence, and stop conditions.
+- Each run automatically dispatches every independent ready leaf only within configured capacity, while blocked, conflicting, or over-capacity leaves remain visibly queued and fail closed.
+- The decision queue contains every unresolved human decision and no routine lease, wait, or fence operation; no run emits an unexplained protocol-level intervention.
 
-## v0.9 — Marginal economics and adaptive orchestration
+Dependencies: the Invisible Loop exit gate, canonical task/recovery evidence, capacity and path-ownership enforcement, and a stable local graph format.
 
-Goal: show where a task spends context and coordination, then use that evidence
-to recommend smaller phases without conflating token counts with money.
+Deliberate non-goals:
 
-| ID | Outcome | Depends on | Acceptance gate |
-|---|---|---|---|
-| SYN-090 | Usage since event/checkpoint/task | v0.8 | Usage reports marginal input, cached input, output, reasoning, and totals by thread/model/role for an exact canonical interval; counter resets and model reroutes cannot double count. |
-| SYN-091 | Coordination overhead report | SYN-090 | Reports spawn, follow-up, wait, tool-call, retry, and compaction counts/durations separately from implementation activity. Active-session snapshots are labelled incomplete. |
-| SYN-092 | Local task budgets | SYN-090 | Optional soft limits warn and hard limits require an explicit supervisor decision. Limits never forge `BLOCKED`, acceptance, verification, or completion state. |
-| SYN-093 | Phase-rotation recommendation | SYN-073, SYN-091 | Configurable thresholds for supervisor context, compactions, waits, and completed tasks produce a canonical handoff recommendation; rotation is explicit and the new session verifies state before continuing. |
-| SYN-094 | Optional cost estimates | SYN-090 | Estimates are disabled by default, require dated user-supplied prices, preserve raw token evidence, and clearly separate cached/input/output assumptions. |
+- Programs are not reusable workflow templates or a static macro library; the graph must be proposed from the operator's stated outcome and constraints.
+- No program may accept its own goal or constraints, hide a human decision, or dispatch outside an explicit capacity and ownership boundary.
+- No unattended background job runner, unbounded self-modification, or automatic phase rotation.
+- No program may silently merge, publish, deploy, spend, or contact an external provider.
 
-Release gate: a multi-task fixture can attribute marginal usage and coordination
-overhead without double counting, then produce a reproducible phase-handoff
-recommendation while leaving orchestration state unchanged.
+## 3. Portable Trust
 
-## v0.9.2 — Supervisor-efficiency P1 and bounded hardening
+Outcome: a result can leave its originating chat and worktree with enough portable evidence for another verifier to reproduce what was reviewed and what was delivered.
 
-Goal: reduce routine supervisor coordination while preserving exact canonical
-state, independent review, and strict lease fencing.
+Capabilities:
 
-Status: delivered; reviewed merge, signed tag, npm/GitHub publication,
-installed-package proof, and CLI proof are verified.
+- Recovery and evidence bundles bind source identity, relevant worktree content, canonical task/event identity, policy decisions, and verifier results.
+- Independent tools can verify signatures or hashes, detect tampering, distinguish source preparation from public publication, and reject unsafe or incomplete material before restore.
+- Trust reports make local delivery, Git integration, external approval, deployment, and operational verification separate facts.
 
-| ID | Outcome | Acceptance gate |
+Measurable gate:
+
+- Two independent verifiers reconstruct the same reviewed fingerprint from a clean checkout; tampered, incomplete, wrong-base, unsafe-path, and stale material fail closed before mutation.
+- Every v1 pilot and every program run has a portable evidence reference that an independent verifier can consume without the original transcript.
+
+Dependencies: the Invisible Loop and Programs gates, canonical hash-chained events, exact worktree identity, and an explicit verification tool.
+
+Deliberate non-goals:
+
+- No default upload of project state or telemetry to a Synod service and no hosted trust claim that replaces Git, CI, code review, or protected release evidence.
+- No trust score based on raw token totals or an assumption that provenance implies permission to act.
+
+## 4. Agent Teams
+
+Outcome: accepted Programs coordinate bounded agents across repositories and organization boundaries while remaining local-first and preserving human authority.
+
+Capabilities:
+
+- Cross-repository dependency graphs connect outcomes, repositories, owners, release boundaries, and evidence without collapsing them into one worktree.
+- Organization policy and approval boundaries are evaluated before dispatch; policy owners can require different evidence or decisions for different repositories and environments.
+- Multiple human decision owners can accept goals, constraints, policy exceptions, and external approvals through the concise decision queue; no single operator identity is silently substituted.
+- Independent agents work in non-overlapping lanes, exchange portable evidence, and hand off at verified boundaries; conflicts and stale owners fail closed.
+- Optional local or self-hosted operational visibility shows team health, capacity, decisions, and evidence without requiring a hosted control plane.
+
+Measurable gate:
+
+- A production-shaped cross-repository program with at least three bounded roles completes across three repositories and two human decision owners with zero overlapping writes, zero unreviewed cross-lane integration, and a successful interruption/reassignment drill.
+- Organization policy and approval boundaries are exercised for every repository, and every delivered outcome has independent verification and a portable evidence reference.
+- The same run completes with local-only operation and with optional self-hosted operational visibility enabled; neither mode requires a hosted service or protocol-level human intervention.
+
+Dependencies: Portable Trust, Programs with cross-repository dependency and decision semantics, the Invisible Loop harness boundary, and explicit organization policy contracts.
+
+Deliberate non-goals:
+
+- Optional local/self-hosted visibility is not a hosted control plane or a reason to upload project state by default.
+- Teams do not gain autonomous merge, push, deployment, secret mutation, payment, provider spending, or other external authority.
+- No larger team count, extra model profile, decorative dashboard, or new lifecycle vocabulary is a roadmap outcome by itself.
+
+## Dependency order and release-proof boundary
+
+The order is strict: Invisible Loop → Programs → Portable Trust → Agent Teams. A horizon may ship incrementally, but its gate is not satisfied by source preparation, a local green test run, or a historical closeout.
+
+| Horizon | Exit evidence | Depends on |
 |---|---|---|
-| SYN-P1-WAIT-001 | Task-aware repeatable waiting resolves canonical bound owners, preserves exact lease identity, and reports honest host fallback. | Mixed task/thread waits remain bounded, read-only, and compatible with explicit thread selectors. |
-| SYN-P1-ROTATE-002 | Read-only adaptive rotation preflight returns deterministic thresholds and typed actions without configuring or preparing rotation. | Configured and unconfigured projects return the legal next action without changing canonical state. |
-| SYN-P1-TYPED-003 | `task next --json` and `proposal submit` expose canonical legal actions and reuse the existing ACTIVE-to-REVIEW proposal transition. | Guidance never advertises stale or invalid lease/reservation transitions and proposal submission derives the current fence. |
-| SYN-092-OUTPUT-001 | Opt-in summary JSON materially reduces routine output while full JSON remains the default and exact fences are retained. | Status, mutation, wait, handoff, and usage views remain schema-compatible and read-only. |
-| SYN-092-ACTIVATE-002 | Bind returns an activation handoff tied to the existing `lease.bound` event without claiming supervisor notification. | The receipt exposes a typed task-aware wait follow-up and no reservation token. |
-| SYN-092-HELP-003 | Recognized nested command help succeeds before positional validation. | Unknown actions and options continue to fail deterministically. |
-| SYN-092-WAITVIEW-005 | Summary wait output preserves task selector identity and exact lease fields. | Every resolved task retains task ID, state, revision, lease ID, generation, and owner thread. |
+| Invisible Loop (v1) | 3 real production-shaped pilots across 3 repositories, interruption recovery, independent verification, security review, and 0 protocol-level interventions | Verified v0.12.2 contract and the pinned-publication condition above |
+| Programs | 3 natural-language substantial outcomes across 2 repositories with accepted graphs and explicit stop conditions | Invisible Loop |
+| Portable Trust | 2 independent verifiers reproduce fingerprints and reject tampered material | Invisible Loop, Programs |
+| Agent Teams | 3 bounded roles across 3 repositories, 2 human decision owners, 0 overlapping writes, and portable evidence | Portable Trust |
 
-Release gate: focused and full deterministic tests, installed-package smoke, and
-Codex compatibility checks pass on the exact release checkout; documentation
-and generated advisor guidance match the shipped CLI behavior.
-
-## v0.9.3 — Version truth, host wait handoff, and dormant job contracts
-
-Goal: make runtime/version identity and wait ownership explicit while shipping a
-strict, validation-only durable job contract with no execution plane.
-
-Status: delivered and publicly verified. The exact tag SHA and post-publication
-npm/GitHub, registry-installed package, and public CLI facts are verified in the
-versioned v0.9.3 closeout archive. The local tarball smoke remains
-source-preparation evidence only.
-
-| ID | Outcome | Acceptance gate |
-|---|---|---|
-| SYN-093-VERSIONS-001 | Lifecycle output distinguishes `runtimeVersion`, `installedTemplateVersion`, and `stateTemplateVersion` while preserving the legacy `templateVersion` alias. | Installed-package smoke and release assertions preserve all three truths and alias behavior without lockfile or dependency drift. |
-| SYN-093-WAIT-002 | Wait authority is explicit (`host`, `appServer`, or `canonical`) and remains separate from transport/mode; Desktop handoff uses positive host fields and legacy aliases. | Host-owned waits never construct a child App Server; canonical task selection remains read-only identity resolution rather than observation. |
-| SYN-093-JOBS-003 | Schema-1 `JobHandle`/`JobEvent` contracts validate strict durable observations without persistence, commands, runners, or a thread/resume observer. | Source and installed-package checks validate the dormant public contract and reject unknown fields. |
-| SYN-093-RELEASE-004 | Package metadata, changelog, documentation, release instructions, and smoke fixtures describe the public `v0.9.3` contract. | Deterministic release/doc assertions, installed-package smoke, and the full required test commands pass on the verified release checkout. |
-
-Release gate: source preparation is satisfied by the protected workflow and
-exact signed release tag, including the local tarball smoke; public
-verification is satisfied only by the exact npm `gitHead`, GitHub Release
-state, registry-installed package integrity/attestation/provenance and clean
-consumer check, and public CLI parity recorded in versioned
-`release-closeouts/v0.9.3.json`.
-
-## v0.9.4 — Review, host, status, and recovery surfaces
-
-Goal: make the next review, host, status, recovery, and release surfaces
-explicit while preserving the public release's fail-closed boundaries.
-
-Status: delivered and publicly verified. These surfaces are available to
-public and pinned `v0.9.4` runtimes. The public/pinned `v0.9.4` `doctor`
-support expression is
-`>=0.148.0-0 <0.149.0 (all 0.148.x variants)`. Every valid semantic version
-whose numeric major/minor is exactly `0.148` is accepted, including any patch,
-prerelease, stable, and build metadata; `0.148.0-alpha.9` is known-good.
-Valid versions below `0.148`, valid versions at or above `0.149`, and invalid
-semantic versions remain unsupported.
-The package engine and doctor range are Node `>=22`; Node 20 is unsupported.
-CI retains Ubuntu Node 22/24 tests and package smoke,
-plus Node 24 smoke on macOS and Windows.
-
-| ID | Outcome | Acceptance boundary |
-|---|---|---|
-| SYN-094-REVIEW-001 | Record pre-proposal corrections and expose exact per-path Git-lane provenance for sealed proposals. | Correction budget is consumed while `ACTIVE`; `proposalAdded`, `gitTracked`, `staged`, and `committed` remain independent facts and drift fails closed. |
-| SYN-094-HOST-002 | Add an injected host delegation adapter for spawn identity, bind authorization, wait observation, and lease liveness. | The host owns execution; an unadapted CLI/Desktop path remains an explicit incomplete handoff and never claims execution ownership. |
-| SYN-094-STATUS-003 | Add bounded task, active-only, and changed-since-checkpoint status selectors without changing default status compatibility. | Text/JSON selectors are mutually exclusive, bounded, read-only, and fail closed for unknown tasks or incompatible options. |
-| SYN-094-SURFACES-004 | Make release closeout, dependency-free GIF generation, and local-versus-portable documentation policy reproducible. | Closeout evidence, 1120×622 GIF validation, and opt-in hash-verified local docs are reproducible public release surfaces. |
-| SYN-094-PACKAGE-CLEANUP-005 | Remove supervisor-generated npm-init metadata without changing the package contract. | `package.json` is byte-identical to the released contract and no unrelated path changes. |
-| SYN-094-DOC-VERSION-006 | Separate the public `0.9.4` runtime truth from source-only future changes across product documentation. | README, PRODUCT, and ROADMAP describe the released commands; standalone host delegation fails closed. |
-| SYN-094-RELEASE-011 | Prepare the accepted increment as a realizable fail-closed `v0.9.4` source release. | The protected workflow authenticates tag/package/main identity, runs tests and package smoke before strict closeout validation, and records exact post-publication evidence. |
-
-Release gate: all seven SYN-094 tasks were reviewed and verified on the exact
-source revision, then published and consumed through the exact public v0.9.4
-package. `SYN-094-RELEASE-011` additionally requires an
-authenticated tag/package/main ancestry check, test and package-smoke run, and
-phase-strict closeout validation before publication. Its phase-2 live verifier
-runs on the protected closeout PR, not the tag workflow, and performs the
-read-only registry/GitHub and public-consumer checks there.
-
-## v0.9.5 — Status bootstrap hotfix
-
-Goal: keep the verified v0.9.4 runtime surfaces intact while making bounded
-status selectors work through the initialized project-local bootstrap.
-
-Status: delivered and publicly verified. The public and pinned `v0.9.5`
-runtime accepts `--task`, `--active-only`, and
-`--changed-since-checkpoint` as mutually exclusive selectors, including when
-the bootstrap delegates to an initialized local runtime; incompatible
-combinations still fail closed. The release requires Node `>=22` and retains
-the support expression `>=0.148.0-0 <0.149.0` for every valid numeric
-`0.148.x` variant, with `0.148.0-alpha.9` known-good.
-
-| ID | Outcome | Acceptance boundary |
-|---|---|---|
-| SYN-095-STATUS-BOOTSTRAP-024 | Make the official project-local bootstrap accept the public status selectors without weakening selector validation. | Initialized-runtime regressions cover all three selectors and fail-closed incompatible combinations; the exact public package and CLI evidence are recorded in `release-closeouts/v0.9.5.json`. |
-
-Release gate: the exact signed tag and immutable latest GitHub Release, npm
-`gitHead`/`latest` parity, registry integrity/attestation/provenance, clean
-consumer install, and public CLI parity are recorded in the root closeout and
-the byte-identical versioned archive.
-
-## Path to v1.0
-
-`v0.9.5` is the public ledger and fail-closed protocol. `v1.0` is not another
-protocol increment. It is the moment a human can ask Codex to complete work
-with Synod, the supervising agent can run the loop without reconstructing
-fences from chat, and a second independent project can do the same on a
-published package.
-
-The operator is the agent. The human opens a harness and requests work. The
-agent owns `task add`, host-owned `delegate start`, `wait --task`,
-`proposal submit`, acceptance, verification, and `DONE`. A human who has to
-learn what a bind is means the increment failed.
-
-Exact CLI spelling below remains provisional until each increment is
-implemented and published. Later increments remain unavailable to a
-public/pinned runtime until their release is published and the project is
-explicitly upgraded.
-
-### Freeze before any post-0.9.5 increment
-
-- Do not add dormant contracts. Schema-1 `JobHandle`/`JobEvent` stay
-  validation-only.
-- Do not add an execution plane, a mutating MCP server, or persisted jobs.
-- Do not add another version-truth, closeout, or compatibility hotfix series
-  unless a live Codex line change forces a fail-closed doctor gate.
-- Do not add a second harness. Codex is the first adapter.
-- Do not split `src/orchestration.ts` unless it blocks the SYN-100 handshake.
-- Decision D-006 remains in force until a live host adapter owns both spawn
-  identity and the bind fence. Until then, standalone `delegate start` stays
-  fail-closed or returns an incomplete host handoff.
-
-If Codex cannot inject an adapter that owns spawn and wait, do not label
-`v1.0`. Publish the reachable increment as a ledger plus honest incomplete
-handoff and wait for the harness. A `v1.0` where the supervisor still copies
-thread IDs by hand is `v0.9.5` with a different number.
-
-### Sequence
-
-```text
-v0.10  agent-completable golden path     only product increment
-v0.11  agent-recoverable interruption    the agent continues without a human
-v0.12  independent proof                 evidence and shipped surfaces
-v1.0   product closeout                  docs, security, Codex window
-```
-
-Each of `v0.10`, `v0.11`, and `v0.12` is published and used as the
-version-pinned control plane before the next increment starts. `v1.0` is
-tagged only after `v0.12` passes. Protocol defects found after `v0.12`
-return to a `v0.12.x` patch; they do not open a feature series.
-
-If time is short, implement in this order: SYN-100, SYN-101, SYN-102,
-SYN-110, SYN-111, SYN-121. The rest is hygiene.
-
-## v0.10 — Agent-completable golden path
-
-Goal: stop using the supervisor as a bus between Synod and Codex. One
-delegation verb, a blindly executable next action, and an in-context contract
-that fits in the advisor skill.
-
-Status: delivered in public `v0.11.0` (PR #38). Not a separate `0.10.0`
-package. SYN-100–103 remain open in the project ledger.
-
-The executable golden path is:
-
-```text
-task add → delegate start → wait --task → proposal submit
-        → ACCEPTED → VERIFIED → DONE
-```
-
-Lease generation, heartbeat timestamps, baseline hashes, and reservation
-tokens remain in JSON. The agent must not type or reconstruct them.
-
-| ID | Outcome | Depends on | Acceptance gate |
-|---|---|---|---|
-| SYN-100 | Live Codex `HostDelegationAdapter` so host-owned `delegate start` can reserve, spawn, bind, and authorize | `v0.9.5` | On Codex CLI and Desktop, `delegate start <task>` performs reserve → host spawn → bind → write authorization. The owner identity is opaque and host-returned. Synod does not create the Codex process. Without an adapter, the standalone CLI still fails closed or returns an incomplete host handoff. |
-| SYN-101 | Blind next-action contract | SYN-100 | `task next --json --view summary`, plus `delegate`, `wait`, and recover receipts, return the next complete command: argv and exact fence. The agent does not rebuild token, generation, `reserved-at`, or baseline hash from chat. Stale fences fail closed. Typed actions cover accept, verify, recover, cancel, and expire. |
-| SYN-102 | One-page agent contract | SYN-101 | The advisor skill and the managed `AGENTS.md` block are the only in-context policy. README, PRODUCT, STATE notes, this roadmap, and closeout archives are not loaded by default. The skill names the golden path and points at `task next`. A fresh supervisor session completes a task without citing `STATE.md`. Target: policy under about 2,000 tokens. |
-| SYN-103 | Host-complete wait when an adapter is present | SYN-100 | With an adapter, `wait --task` or `delegate start --wait` observes the owner thread. `hostWaitRequired` appears only when the host did not inject wait. The agent calls the platform wait primitive only for the exact IDs Synod returns. |
-
-Release gate: a fresh supervisor with no parent history completes one atomic
-task in this repository using only the skill and `task next`. Zero fences are
-typed from chat. The supervisor does not implement unless the existing
-minimal-integration exception applies and is recorded.
-
-## v0.11 — Agent-recoverable interruption
-
-Goal: worker death, empty delivery, and a new root session are typed agent
-paths, not supervisor judgment.
-
-Status: delivered and publicly verified in `v0.11.0` (PR #39).
-
-| ID | Outcome | Depends on | Acceptance gate |
-|---|---|---|---|
-| SYN-110 | Recovery as a fenced next action | `v0.10` | Worker stop, lease expiry, or in-scope no-delta yields a typed `resume`, `reassign`, or `supersede` action with the ended generation's exact fence. The agent applies it. Recovery does not accept, verify, or discard the sealed proposal. |
-| SYN-111 | Fresh-session handoff without prose memory | SYN-110 | A different root session runs `handoff` and `task next` and continues. Rotation prepare/verify stays opt-in. `STATE.md` is not an input. A recovery bundle remains optional, not required on the happy path. |
-| SYN-112 | In-scope no-delta is evidence | SYN-110 | If the worker produces no in-scope delta, `proposal submit` fails closed or `task next` returns recover/correct. Empty delivery cannot be resolved by an undocumented supervisor implementation. |
-
-Release gate: kill the worker while the task is `ACTIVE`, start a new root
-session, recover, and finish. The sealed proposal remains intact. Acceptance
-does not advance across the crash.
-
-## v0.12 — Independent proof
-
-Goal: satisfy the existing `v1.0` readiness criteria with published artifacts.
-The release also ships bounded delegation and independent approval surfaces;
-future protocol holes return to `v0.12.x` patches rather than opening a new
-feature series.
-
-Status: `v0.12.2` is publicly verified. The patch adds structured host/App
-Server identities,
-execution-boundary budget refresh, capability-driven profile selection, Codex
-0.150 compatibility, and a packaged price example to the validated
-concurrency policy and CLI App Server runner, zero-write observer
-leases, typed reviewer/verifier approval lanes, and bounded parallel delegation.
-The broader independent-proof milestone remains in progress, pending the
-SYN-120–SYN-123 pilots, recovery drill, usage evidence, adversarial checks, and
-release gate below.
-
-| ID | Outcome | Depends on | Acceptance gate |
-|---|---|---|---|
-| SYN-120 | Pilot A: this repository on the published `v0.12.x` package | `v0.12` | A real Synod feature that is not closeout or version-truth documentation is delivered with `@ivand890/synod@0.12.x` pinned. The drill includes interruption plus restore of a reviewed dirty checkpoint. The reconstructed fingerprint matches exactly. |
-| SYN-121 | Pilot B: an independent repository | SYN-120 | A different repository and domain, preferably a different person. The human only requests the work and does not explain leases. The agent reaches `DONE`. If the human had to know what a bind is, the pilot fails. |
-| SYN-122 | Loop-cost evidence | SYN-120 | Canonical `usage` and coordination reports cover the pilot interval. Compare them to the historical 0.9.x dogfood snapshot (329 supervisor waits, hundreds of millions of tokens). Do not promise savings. If coordination cost does not drop clearly, do not tag `v1.0`; return to a `v0.12.x` patch or defer the release gate. |
-| SYN-123 | Adversarial gap-fill | `v0.12` | Audit the existing suite and add only missing fail-closed cases: concurrent writers, stale leases, corrupted bundles, hash-chain breaks, unsafe paths, and partial transactions. Do not add a new test framework. |
-
-Release gate: both pilots run on published packages, the recovery drill is
-green, adversarial cases fail closed, and usage reports stay stable on the
-supported Codex line.
-
-## v1.0 — Product closeout
-
-Goal: label the proven loop, not add protocol. Documentation, security review,
-and the Codex compatibility window. A protocol defect found here is a
-`v0.12.x` patch.
-
-Status: planned. Tag `v1.0.0` only after `v0.12` is green.
-
-| ID | Outcome | Depends on | Acceptance gate |
-|---|---|---|---|
-| SYN-130 | Rewrite PRODUCT and README for the agent operator | `v0.12` | Docs state that the human opens a harness and asks for work, the agent runs Synod, and the CLI is not a human operator tool. `DONE` remains local delivery, acceptance, and verification only; it is not commit, push, deploy, or external approval. |
-| SYN-131 | Security review | `v0.12` | Review leases, recovery bundles including optional local docs, write scopes, uninstall preservation, and the no-telemetry default. |
-| SYN-132 | Codex window policy | `v0.12` | Document how a later Codex minor line (`0.149` or equivalent) is adopted: doctor fails closed, then an explicit runtime upgrade. Do not treat "every `0.148.x` variant" as a permanent product promise. |
-| SYN-133 | Tag `v1.0.0` | SYN-120–SYN-132 | The readiness criteria below are all demonstrated on the exact tag commit, including cross-platform CI, migrations, uninstall preservation, and installed-package smoke. |
-
-## v1.0 readiness criteria
-
-Synod reaches a 1.0 candidate only after all of the following are demonstrated:
-
-- SYN-100 through SYN-103 are published and a fresh supervisor can complete
-  the golden path from the skill and `task next` without typing a fence.
-- SYN-110 through SYN-112 are published and a killed worker can be recovered
-  from a new root session without advancing acceptance.
-- Two independent, production-shaped pilots (SYN-120, SYN-121) complete
-  interruption and recovery drills using released package artifacts.
-- A reviewed dirty checkpoint is recoverable in a clean checkout and its
-  reconstructed fingerprint matches exactly.
-- Concurrent-writer, stale-lease, corrupted-bundle, hash-chain, unsafe-path,
-  and partial-transaction adversarial tests fail closed.
-- Usage and coordination reports remain stable across supported Codex versions,
-  model reroutes, archived descendants, and counter resets, and SYN-122 shows
-  a clear drop in coordination cost versus the 0.9.x dogfood snapshot.
-- Lifecycle migrations, uninstall preservation, installed-package behavior,
-  security review, and cross-platform CI are green on the exact release commit.
-- Public documentation distinguishes local completion, Git integration,
-  external approval, deployment, and operational verification, and describes
-  the human-asks-agent operator model.
-
-## Explicit non-goals
-
-- Autonomous merge, push, deployment, secret mutation, or provider spending.
-- Replacing Git hosting, CI, code review, or protected release workflows.
-- Uploading project state or telemetry to a Synod service by default.
-- Treating raw token totals as invoices or promising savings without a measured
-  baseline.
-- Accepting user-owned Markdown as canonical orchestration state.
-- A second harness adapter (Claude, Cursor, or others). That is a post-1.0
-  adapter over the same ledger.
-- Persisting `JobEvent` records, activating a job runner, or adding an
-  execution plane.
-- Automatic phase rotation.
-- A mutating MCP server.
-- Human-facing CLI sugar, additional model profiles, or further closeout
-  ceremony as a path to `v1.0`.
-
-## Delivered foundation
-
-- `v0.3.2`: correctness, stable JSON envelopes, archived-session discovery,
-  App Server lifecycle, and cross-platform package smoke.
-- `v0.4`: ownership manifests, transactional lifecycle, migrations,
-  `check`/`doctor`, safe upgrade/uninstall, profiles, and compatibility gates.
-- `v0.5`: canonical task state, validated transitions, revision-linked evidence,
-  hash-chained events, checkpoint drift, and generated status.
-- `v0.6.0`–`v0.6.2`: project-local pinned runtime, protected release parity,
-  Desktop-aware diagnostics, and corrected GPT-5.6 custom-agent routing.
-- `v0.6.3`: behavior-preserving strict TypeScript 7 migration, compiled ESM
-  package output, stable JavaScript executable shim, and preserved deep-import
-  compatibility.
-- `v0.7.0`: hash-bound checkpoint snapshots and path deltas, deterministic
-  local recovery bundles, transactional fresh-checkout restore, and canonical
-  text/JSON handoff context with installed cross-platform recovery smoke.
-- `v0.8.0`: exact-fenced writer leases and ownership scopes, abandoned-worker
-  proposal recovery, enforced correction policy, change-driven waiting,
-  verifiable detached task worktrees, and explicit schema migration with
-  installed concurrency, interruption, upgrade, and cleanup drills.
-- `v0.9.0`: exact marginal usage and coordination attribution, opt-in task
-  budgets, deterministic phase-rotation handoffs, and optional dated local
-  cost estimates, with installed production-shaped reset, reroute, archived
-  thread, incomplete-session, and schema-migration drills.
-- `v0.9.1`: schema-4 pre-spawn lease reservations, exact bind/cancel/expiry
-  fencing, and corrected task-session, thread-count, coordination-outcome, and
-  exact-boundary usage semantics.
-- `v0.9.2`: task-aware waiting, read-only adaptive rotation suggestions, typed
-  task/proposal commands, summary JSON output, truthful bind activation
-  handoffs, nested-help routing, and the corresponding canonical-fence and
-  package compatibility hardening. The reviewed merge, signed tag, npm/GitHub
-  publication, installed-package proof, and CLI proof are verified.
-- `v0.9.3`: explicit runtime/template/state version truths, host/app-server/
-  canonical wait authority, dormant strict `JobHandle`/`JobEvent` contracts,
-  and reproducible release-surface closeout and recovery documentation. The
-  exact tag and post-publication package, release, registry-installed package,
-  and CLI evidence are verified in the two-phase closeout; the local tarball
-  smoke remains source-preparation evidence.
-- `v0.9.4`: pre-proposal correction accounting, independent proposal Git-lane
-  provenance, injected `HostDelegationAdapter`, bounded status selectors,
-  opt-in local-docs recovery, Node `>=22`, and numeric Codex `0.148.x`
-  support. The exact tag, npm/GitHub publication, and public consumer
-  evidence are verified in the versioned closeout archive.
-- `v0.9.5`: project-local bootstrap hotfix so `--task`, `--active-only`, and
-  `--changed-since-checkpoint` work through the initialized runtime. The
-  exact tag, npm/GitHub publication, and public consumer evidence are
-  verified in the versioned closeout archive.
-
-The worktrees/leases and economics originally associated with `v0.6` were not
-discarded. They are deliberately sequenced after recoverable phase boundaries
-because the pilot showed that exact local identity must become portable before
-Synod safely adds more concurrency or autonomous adaptation.
+Historical release evidence is not a future commitment; current release proof is summarized above and detailed in the linked closeout and history records.
