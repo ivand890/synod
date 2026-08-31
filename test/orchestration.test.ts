@@ -1308,6 +1308,148 @@ test("dependencies gate READY transitions", async () => {
   );
 });
 
+test("blocked-by references normalize, gate dispatch, and release at VERIFIED", async () => {
+  const directory = await temporaryProject();
+  await initializeGitHead(directory);
+  await addDefaultTask(directory, { id: "T-BLOCKER", objective: "Release the dependent leaf" });
+  await addDefaultTask(directory, {
+    id: "T-DEPENDENT",
+    objective: "Dispatch only after the blocker is verified",
+    blockedBy: [" t-blocker ", "T-BLOCKER"].slice(0, 1),
+    plannedWrite: ["src/dependent.ts"]
+  });
+  const before = await readOrchestration(directory);
+  assert.deepEqual(before.state.tasks["T-DEPENDENT"]?.blockedBy, ["T-BLOCKER"]);
+  await assert.rejects(
+    transitionTask({ directory, id: "T-DEPENDENT", to: "READY", revision: 0 }),
+    error => error instanceof SynodError
+      && error.code === ERROR_CODES.TRANSITION_INVALID
+      && isRecord(error.details)
+      && Array.isArray(error.details.incompleteBlockedBy)
+      && error.details.incompleteBlockedBy[0] === "T-BLOCKER"
+  );
+  const blockedGuidance = await nextTaskGuidance({ directory });
+  const blockedTask = blockedGuidance.tasks.find(task => task.id === "T-DEPENDENT")!;
+  assert.deepEqual(blockedTask.blockedBy, ["T-BLOCKER"]);
+  assert.deepEqual(blockedTask.incompleteBlockedBy, ["T-BLOCKER"]);
+  assert.equal(blockedTask.constraints.blockedBySatisfied, false);
+  assert.equal(blockedTask.actions.some(action => action.operation === "delegate.start"), false);
+  assert.deepEqual(blockedGuidance.parallelBatches, []);
+
+  await transitionTask({ directory, id: "T-BLOCKER", to: "READY", revision: 0 });
+  await acquireTaskLease({ directory, id: "T-BLOCKER", ownerThread: "thread:blocker", write: ["src/blocker.ts"] });
+  await transitionTask({ directory, id: "T-BLOCKER", to: "ACTIVE", revision: 0 });
+  await mkdir(path.join(directory, "src"), { recursive: true });
+  await writeFile(path.join(directory, "src/blocker.ts"), "verified blocker\n");
+  await transitionTask({ directory, id: "T-BLOCKER", to: "REVIEW", revision: 1, evidence: ["delivery:blocker"] });
+  await transitionTask({ directory, id: "T-BLOCKER", to: "ACCEPTED", revision: 1, evidence: ["acceptance:blocker"] });
+  await transitionTask({ directory, id: "T-BLOCKER", to: "VERIFIED", revision: 1, evidence: ["verification:blocker"] });
+
+  await transitionTask({ directory, id: "T-DEPENDENT", to: "READY", revision: 0 });
+  const releasedGuidance = await nextTaskGuidance({ directory });
+  const releasedTask = releasedGuidance.tasks.find(task => task.id === "T-DEPENDENT")!;
+  assert.deepEqual(releasedTask.incompleteBlockedBy, []);
+  assert.equal(releasedTask.constraints.blockedBySatisfied, true);
+  assert.equal(releasedGuidance.parallelBatches?.[0]?.taskIds.includes("T-DEPENDENT"), true);
+  const parallelAction = releasedTask.actions.find(action => action.operation === "delegate.start")!;
+  assert.equal(parallelAction.worktree?.operation, "worktree.create");
+  assert.deepEqual(parallelAction.worktree?.arguments, {
+    taskId: "T-DEPENDENT",
+    destination: "../.synod-worktrees/T-DEPENDENT",
+    revision: 0
+  });
+  assert.deepEqual(parallelAction.worktree?.requirements, ["active-writer-lease"]);
+  assert.equal(Object.hasOwn(parallelAction.worktree || {}, "argv"), false);
+  assert.equal(Object.hasOwn(parallelAction.worktree || {}, "fence"), false);
+
+  const reserved = await reserveTaskLease({
+    directory,
+    id: "T-DEPENDENT",
+    write: ["src/dependent.ts"]
+  });
+  const bound = await bindTaskLease({
+    directory,
+    id: "T-DEPENDENT",
+    ...reservationFence(reserved.reservation),
+    ownerThread: "thread:dependent"
+  });
+  assert.deepEqual(bound.worktree?.arguments, {
+    taskId: "T-DEPENDENT",
+    destination: "../.synod-worktrees/T-DEPENDENT",
+    leaseId: bound.lease.id,
+    generation: bound.lease.generation,
+    revision: bound.lease.taskRevision,
+    expectedHeartbeatAt: bound.lease.heartbeatAt,
+    ownerThread: bound.lease.ownerThread
+  });
+  assert.deepEqual(bound.worktree?.argv, [
+    "worktree", "create", "T-DEPENDENT",
+    "--destination", "../.synod-worktrees/T-DEPENDENT",
+    "--lease-id", bound.lease.id,
+    "--generation", String(bound.lease.generation),
+    "--revision", String(bound.lease.taskRevision),
+    "--expected-heartbeat-at", bound.lease.heartbeatAt,
+    "--owner-thread", bound.lease.ownerThread
+  ]);
+  const boundGuidance = await nextTaskGuidance({ directory });
+  const boundTask = boundGuidance.tasks.find(task => task.id === "T-DEPENDENT")!;
+  const exactWorktree = boundTask.actions.find(action => action.operation === "worktree.create");
+  assert.deepEqual(exactWorktree, bound.worktree);
+});
+
+test("blocked-by graphs reject unknown, self, duplicate-normalized, and cyclic edges", async () => {
+  const directory = await temporaryProject();
+  await addDefaultTask(directory);
+  for (const [id, blockedBy] of [
+    ["T-UNKNOWN", ["T-MISSING"]],
+    ["T-SELF", ["T-SELF"]],
+    ["T-DUPLICATE", ["T-001", " t-001 "]]
+  ] as Array<[string, string[]]>) {
+    await assert.rejects(
+      addDefaultTask(directory, { id, blockedBy }),
+      error => error instanceof SynodError && error.code === ERROR_CODES.TASK_INVALID
+    );
+  }
+  const base = (await readOrchestration(directory)).state;
+  const task = base.tasks["T-001"]!;
+  const invalidCases = [
+    {
+      name: "unknown",
+      mutate(state: typeof base) { state.tasks["T-001"]!.blockedBy = ["T-MISSING"]; }
+    },
+    {
+      name: "self",
+      mutate(state: typeof base) { state.tasks["T-001"]!.blockedBy = ["T-001"]; }
+    },
+    {
+      name: "duplicate-normalized",
+      mutate(state: typeof base) { state.tasks["T-001"]!.blockedBy = ["T-001", " t-001 "]; }
+    },
+    {
+      name: "cycle",
+      mutate(state: typeof base) {
+        state.tasks["T-001"]!.blockedBy = ["T-002"];
+        state.taskOrder.push("T-002");
+        state.tasks["T-002"] = {
+          ...structuredClone(task),
+          id: "T-002",
+          blockedBy: ["T-001"]
+        };
+      }
+    }
+  ];
+  for (const invalidCase of invalidCases) {
+    const candidate = structuredClone(base);
+    invalidCase.mutate(candidate);
+    assert.throws(
+      () => validateOrchestrationState(candidate),
+      error => error instanceof SynodError
+        && error.code === ERROR_CODES.ORCHESTRATION_STATE_INVALID,
+      invalidCase.name
+    );
+  }
+});
+
 test("blocked tasks can resume only their recorded prior state", async () => {
   const directory = await temporaryProject();
   await initializeGitHead(directory);

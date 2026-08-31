@@ -884,6 +884,34 @@ test("task add parses explicit planned file and tree lanes", () => {
   });
 });
 
+test("task add parses repeatable blocked-by references", () => {
+  assert.deepEqual(parseTaskArgs([
+    "add", "T-DEPENDENT",
+    "--objective", "Wait for two blockers",
+    "--executor", "synod_implementer",
+    "--acceptance", "The blockers are honored",
+    "--verification", "pnpm test",
+    "--blocked-by", "T-FIRST",
+    "--blocked-by", "T-SECOND"
+  ]), {
+    action: "add",
+    id: "T-DEPENDENT",
+    objective: "Wait for two blockers",
+    executor: "synod_implementer",
+    acceptance: ["The blockers are honored"],
+    verification: ["pnpm test"],
+    dependsOn: [],
+    blockedBy: ["T-FIRST", "T-SECOND"],
+    plannedRead: [],
+    plannedWrite: [],
+    plannedReadTree: [],
+    plannedWriteTree: [],
+    directory: ".",
+    json: false,
+    actor: "supervisor"
+  });
+});
+
 test("recognized nested help wins before positional validation and mutation", async () => {
   const parserCases = [
     { parser: parseLeaseArgs, actions: ["reserve", "bind", "cancel", "acquire", "heartbeat", "release", "expire", "revoke", "recover"] },

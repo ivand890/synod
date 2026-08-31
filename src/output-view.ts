@@ -213,6 +213,7 @@ function compactTask(value: unknown): unknown {
     "id",
     "objective",
     "dependsOn",
+    "blockedBy",
     "state",
     "revision",
     "executor",
@@ -277,8 +278,10 @@ function compactGuidanceTask(value: unknown): unknown {
     "state",
     "revision",
     "dependsOn",
+    "blockedBy",
     "plannedScopes",
     "incompleteDependencies",
+    "incompleteBlockedBy",
     "constraints",
     "legalTransitions",
     "actions"
@@ -298,7 +301,9 @@ function compactGuidanceTask(value: unknown): unknown {
   result.reservation = isRecord(value.reservation) ? compactReservation(value.reservation) : null;
   result.proposal = isRecord(value.proposal) ? compactProposal(value.proposal) : null;
   if (Array.isArray(value.dependsOn)) result.dependsOn = [...value.dependsOn];
+  if (Array.isArray(value.blockedBy)) result.blockedBy = [...value.blockedBy];
   if (Array.isArray(value.incompleteDependencies)) result.incompleteDependencies = [...value.incompleteDependencies];
+  if (Array.isArray(value.incompleteBlockedBy)) result.incompleteBlockedBy = [...value.incompleteBlockedBy];
   if (isRecord(value.constraints)) result.constraints = structuredClone(value.constraints);
   if (Array.isArray(value.legalTransitions)) result.legalTransitions = [...value.legalTransitions];
   if (Array.isArray(value.actions)) result.actions = value.actions.map(item => redactGuidanceAction(item));
