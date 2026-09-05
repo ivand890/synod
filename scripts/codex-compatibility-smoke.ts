@@ -82,5 +82,7 @@ try {
   await client.close();
   if (previousHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousHome;
-  await rm(scratch, { recursive: true, force: true });
+  // Codex plugin checkout writes can briefly outlive App Server shutdown.
+  // Retry transient directory races, but still fail if cleanup cannot finish.
+  await rm(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
