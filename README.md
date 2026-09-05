@@ -61,7 +61,7 @@ not a command reconstructed from chat.
 For a reproducible project, use the pinned bootstrap from the project root:
 
 ```bash
-pnpm dlx @ivand890/synod@0.12.2 init
+pnpm dlx @ivand890/synod@0.13.0 init
 ```
 
 The project-local runtime is pinned independently of the checkout's disposable
@@ -108,16 +108,13 @@ verification. Read-only analysis may precede write authorization, but no stale
 message, copied value, or chat label can authorize a write. Local completion
 never implies a commit, push, PR, deployment, spending, or production result.
 
-## Source-only capabilities
+## Released capabilities
 
-Unreleased: `synod-astra` adds an Astra advisor with GPT-5.6 workers. See the [migration, advisor policy, and instruction/hook audit](docs/ASTRA-MIGRATION.md) for activation and compatibility limits.
-
-The current repeatable `--blocked-by` dispatch and post-bind worktree
-continuation are source-only behavior. They are not present in the pinned
-public `@ivand890/synod@0.12.2`; they must be published in a pinned
-`@ivand890/synod@0.13.0` package before a pilot can rely on them. Source
-checkout behavior alone is not pilot evidence. Until a release contains these
-capabilities, follow only actions emitted by the installed runtime.
+Synod 0.13.0 includes the `synod-astra` advisor, repeatable `--blocked-by`
+dispatch, and post-bind worktree continuation. Use the released, pinned artifact
+for pilots; source checkout behavior alone is not pilot evidence. Follow only
+actions emitted by the installed runtime. See the [Astra migration and skills/hooks
+audit](docs/ASTRA-MIGRATION.md) for role routing and activation.
 
 ## Recovery and local evidence
 
@@ -176,18 +173,19 @@ synod check --json
 synod profiles --json
 ```
 
-The pinned v0.12.2 release requires Node.js `>=22` (Node 20 is unsupported) and supports Codex numeric minor lines `0.148.x` and `0.150.x`. The untested `0.149.x` gap fails closed; `0.148.0-alpha.9` is known-good and exercised in CI. The harness and model probes determine profile compatibility at runtime.
-
-Unreleased source supports validated patches on the current and previous Codex minor lines: CLI `0.153.4` / `0.152.1`, Desktop `0.153.4`. See [compatibility policy and validation](docs/CODEX-COMPATIBILITY.md); other patches fail closed for Synod-owned execution.
+The pinned v0.13.0 release requires Node.js `>=22`. It admits exact validated
+Codex patches: CLI `0.153.4` and `0.152.1`, Desktop `0.153.4`. Other patches fail
+closed for Synod-owned execution. Model/effort probes still determine profile
+availability. See [compatibility policy and validation](docs/CODEX-COMPATIBILITY.md).
 
 ## Release proof route
 
-The public and pinned `@ivand890/synod@0.12.2` is verified at signed tag commit
-`0ae623f4537daaa62278e70ae077b3231578a88e`; its matching GitHub Release is
+The public and pinned `@ivand890/synod@0.13.0` is verified at signed tag commit
+`e0696cdd2387395c73a5b8497cc085c041737c2d`; its matching GitHub Release is
 externally immutable (`isImmutable: true`).
 
-Prepared source: [RELEASE-CLOSEOUT.json](RELEASE-CLOSEOUT.json); verified public record:
-[release-closeouts/v0.12.2.json](release-closeouts/v0.12.2.json).
+Matching records: [RELEASE-CLOSEOUT.json](RELEASE-CLOSEOUT.json) and
+[release-closeouts/v0.13.0.json](release-closeouts/v0.13.0.json).
 
 Local tarball smoke (`pnpm test:package`), a local build, green tests, or `DONE`
 are source-preparation evidence only; they do not prove external publication.

@@ -10,13 +10,13 @@ North-star metric: the share of substantial outcomes completed and independently
 
 Current release truth:
 
-- Current public release: `v0.12.2`.
-- Current source release: `v0.13.0` (publication pending).
-- Last verified public release at this update: `v0.12.2`.
-- The signed tag commit is `0ae623f4537daaa62278e70ae077b3231578a88e`; the matching GitHub Release is externally immutable (`isImmutable: true`).
-- Source preparation is [RELEASE-CLOSEOUT.json](RELEASE-CLOSEOUT.json); verified public evidence remains [release-closeouts/v0.12.2.json](release-closeouts/v0.12.2.json).
+- Current public release: `v0.13.0`.
+- Current source release: `v0.13.0`.
+- Last verified public release at this update: `v0.13.0`.
+- The signed tag commit is `e0696cdd2387395c73a5b8497cc085c041737c2d`; the matching GitHub Release is externally immutable (`isImmutable: true`).
+- Matching records are [RELEASE-CLOSEOUT.json](RELEASE-CLOSEOUT.json) and [release-closeouts/v0.13.0.json](release-closeouts/v0.13.0.json).
 - Public proof covers npm/GitHub/registry-installed package parity, attestation/provenance, clean consumer install, and a separate public CLI check; source preparation is not public proof.
-- The public v0.12.2 runtime requires Node `>=22` and supports Codex numeric minor lines `0.148` and `0.150`; the untested `0.149.x` gap fails closed, and `0.148.0-alpha.9` is known-good.
+- The runtime requires Node `>=22` and supports exact Codex CLI `0.153.4` / `0.152.1` and Desktop `0.153.4`; other patches fail closed for Synod-owned execution.
 - See [RELEASING.md](RELEASING.md) for release procedure and [docs/ROADMAP-HISTORY.md](docs/ROADMAP-HISTORY.md) for dated release archaeology.
 
 This is the forward roadmap. It does not turn source preparation into a published runtime or treat a historical task ID as a new commitment. Delivered v0.6 through v0.12 chronology, release-specific task tables, compatibility notes, closeout facts, and provenance are preserved in [docs/ROADMAP-HISTORY.md](docs/ROADMAP-HISTORY.md).
@@ -39,12 +39,12 @@ Capabilities:
 v1 exit gate:
 
 - Three real production-shaped pilots run on released, pinned package artifacts across at least three repositories: this repository, a different domain, and at least one repository operated by someone other than the author.
-- Current blocked-by/worktree continuation is source-only: publish it in a pinned `@ivand890/synod@0.13.0` package before pilots start; source-checkout behavior alone is not pilot evidence. Pilots exercise that artifact, including a forced interruption and recovery in a new root session.
+- Blocked-by/worktree continuation is available in the pinned `@ivand890/synod@0.13.0` package; pilots must use that released artifact; source-checkout behavior alone is not pilot evidence. Pilots exercise that artifact, including a forced interruption and recovery in a new root session.
 - Independent verification reproduces the reviewed result and exact relevant worktree identity for every pilot; adversarial ownership and recovery cases fail closed.
 - A security review covers leases, recovery bundles, write scopes, uninstall-preservation boundaries, and the no-telemetry default.
 - All three pilots complete with zero protocol-level human intervention: no manual fence copying, lease repair, owner substitution, or undocumented supervisor implementation. Product decisions, review decisions, and external approvals remain human-controlled and are not protocol interventions.
 
-Dependencies: the verified `v0.12.2` contract, the publication condition in the v1 exit gate, a harness adapter that owns spawn and wait identity, and the existing canonical state, lease, recovery, and review surfaces.
+Dependencies: the verified `v0.13.0` contract, the pinned artifact in the v1 exit gate, a harness adapter that owns spawn and wait identity, and the existing canonical state, lease, recovery, and review surfaces.
 
 Deliberate non-goals:
 
@@ -133,7 +133,7 @@ The order is strict: Invisible Loop → Programs → Portable Trust → Agent Te
 
 | Horizon | Exit evidence | Depends on |
 |---|---|---|
-| Invisible Loop (v1) | 3 real production-shaped pilots across 3 repositories, interruption recovery, independent verification, security review, and 0 protocol-level interventions | Verified v0.12.2 contract and the pinned-publication condition above |
+| Invisible Loop (v1) | 3 real production-shaped pilots across 3 repositories, interruption recovery, independent verification, security review, and 0 protocol-level interventions | Verified v0.13.0 contract and the pinned artifact above |
 | Programs | 3 natural-language substantial outcomes across 2 repositories with accepted graphs and explicit stop conditions | Invisible Loop |
 | Portable Trust | 2 independent verifiers reproduce fingerprints and reject tampered material | Invisible Loop, Programs |
 | Agent Teams | 3 bounded roles across 3 repositories, 2 human decision owners, 0 overlapping writes, and portable evidence | Portable Trust |
