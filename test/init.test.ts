@@ -215,7 +215,8 @@ test("keeps the primary agent supervisory and delegates routine implementation",
   const agents = await readFile(path.join(directory, "AGENTS.md"), "utf8");
   const decisions = await readFile(path.join(directory, "docs/synod/DECISIONS.md"), "utf8");
 
-  assert.match(skill, /Do not use the supervising model as the routine implementation worker/);
+  assert.match(skill, /Delegate routine implementation to `synod_implementer`/);
+  assert.match(skill, /Never take over a live worker's scope/);
   assert.match(skill, /synod_implementer.*selected profile/);
   assert.match(skill, /task add → delegate start → wait --task → proposal submit/);
   assert.match(skill, /task next --json --view summary/);
@@ -262,6 +263,29 @@ test("renders the GPT-5.6 profile with a spawn-safe default and Luna custom-agen
   assert.match(skill, /full-history fork inherits the parent agent type/);
   assert.ok(skill.includes(`pnpm dlx @ivand890/synod@${packageVersion} doctor`));
   assert.ok(skill.includes("pnpm dlx @ivand890/synod@<target-version> upgrade [directory]"));
+});
+
+test("renders the Astra advisor consistently across config, skill, metadata, and instructions", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory, profile: "synod-astra" });
+  const config = await readFile(path.join(directory, ".codex/config.toml"), "utf8");
+  assert.match(config, /^model = "gpt-6-astra"$/m);
+  assert.match(config, /^model_reasoning_effort = "high"$/m);
+  assert.match(config, /^plan_mode_reasoning_effort = "xhigh"$/m);
+  assert.match(config, /^default_subagent_model = "gpt-5\.6-terra"$/m);
+  for (const file of ["AGENTS.md", ".agents/skills/synod-advisor/SKILL.md", ".agents/skills/synod-advisor/agents/openai.yaml"]) {
+    const content = await readFile(path.join(directory, file), "utf8");
+    assert.ok(content.includes("gpt-6-astra"), file);
+    assert.doesNotMatch(content, /__SYNOD_/);
+  }
+  for (const [role, model] of [
+    ["implementer", "gpt-5.6-luna"], ["mechanical", "gpt-5.6-luna"],
+    ["explorer", "gpt-5.6-terra"], ["reviewer", "gpt-5.6-terra"], ["verifier", "gpt-5.6-terra"]
+  ]) {
+    const content = await readFile(path.join(directory, `.codex/agents/synod-${role}.toml`), "utf8");
+    assert.ok(content.includes(`model = "${model}"`));
+    assert.doesNotMatch(content, /__SYNOD_|gpt-6-astra/);
+  }
 });
 
 test("rejects duplicate complete AGENTS.md blocks unless force repairs them", async () => {

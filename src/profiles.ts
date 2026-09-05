@@ -60,15 +60,29 @@ export interface ProfileSelection {
   warning?: Warning;
 }
 
-export const PREFERRED_PROFILE = "synod-5.6";
+export const PREFERRED_PROFILE = "synod-astra";
 export const PORTABLE_PROFILE = "portable";
 export const FALLBACK_PROFILE = PORTABLE_PROFILE;
 
 const profiles: Record<string, ModelProfile> = {
   [PREFERRED_PROFILE]: {
     id: PREFERRED_PROFILE,
+    description: "GPT-6 Astra advisor with cost-efficient GPT-5.6 implementation and evidence roles.",
+    minimumCodexVersion: "0.152.1",
+    defaultSubagent: { model: "gpt-5.6-terra", effort: "max" },
+    roles: {
+      supervisor: { model: "gpt-6-astra", effort: "high", planEffort: "xhigh" },
+      implementer: { model: "gpt-5.6-luna", effort: "max" },
+      explorer: { model: "gpt-5.6-terra", effort: "medium" },
+      reviewer: { model: "gpt-5.6-terra", effort: "high" },
+      verifier: { model: "gpt-5.6-terra", effort: "high" },
+      mechanical: { model: "gpt-5.6-luna", effort: "medium" }
+    }
+  },
+  "synod-5.6": {
+    id: "synod-5.6",
     description: "Role-specialized GPT-5.6 profile for current Codex releases.",
-    minimumCodexVersion: "0.148.0",
+    minimumCodexVersion: "0.152.1",
     defaultSubagent: { model: "gpt-5.6-terra", effort: "max" },
     roles: {
       supervisor: { model: "gpt-5.6-sol", effort: "high", planEffort: "xhigh" },
@@ -82,7 +96,7 @@ const profiles: Record<string, ModelProfile> = {
   [PORTABLE_PROFILE]: {
     id: PORTABLE_PROFILE,
     description: "Portable profile for the current supported Codex range.",
-    minimumCodexVersion: "0.148.0",
+    minimumCodexVersion: "0.152.1",
     defaultSubagent: { model: "gpt-5.5", effort: "high" },
     roles: {
       supervisor: { model: "gpt-5.5", effort: "xhigh", planEffort: "xhigh" },

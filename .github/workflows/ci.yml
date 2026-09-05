@@ -73,20 +73,19 @@ jobs:
         run: pnpm test:package
 
   codex_compatibility:
-    name: Codex ${{ matrix.codex-version }} compatibility
-    runs-on: ubuntu-latest
+    name: Codex ${{ matrix.codex-version }} compatibility (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
+        codex-version: ["0.152.1", "0.153.4"]
         include:
-          - codex-version: "0.148.0-alpha.1"
-            expected-status: supported
-            expected-healthy: "true"
-          - codex-version: "0.148.0-alpha.9"
+          - codex-version: "0.152.1"
             expected-status: known-good
             expected-healthy: "true"
-          - codex-version: "0.150.0"
-            expected-status: supported
+          - codex-version: "0.153.4"
+            expected-status: known-good
             expected-healthy: "true"
     steps:
       - name: Check out repository
@@ -111,7 +110,8 @@ jobs:
           SYNOD_EXPECTED_CODEX_VERSION: ${{ matrix.codex-version }}
           SYNOD_EXPECTED_CODEX_STATUS: ${{ matrix.expected-status }}
           SYNOD_EXPECTED_DOCTOR_HEALTHY: ${{ matrix.expected-healthy }}
-        run: pnpm test:codex-compatibility
+          SYNOD_EXPECTED_CODEX_SURFACE: cli
+        run: SYNOD_CODEX_BIN="$(command -v codex)" pnpm test:codex-compatibility
 
   release-closeout:
     name: Release closeout

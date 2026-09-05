@@ -8,15 +8,23 @@ export interface SemanticVersion {
 }
 
 export type CompatibilityStatus = "unsupported" | "supported" | "known-good";
+export type CompatibilitySurface = "cli" | "desktop" | "unknown";
 
 export const CODEX_COMPATIBILITY = Object.freeze({
-  supported: ">=0.148.0-0 <0.149.0 || >=0.150.0-0 <0.151.0 (all 0.148.x and 0.150.x variants)",
-  knownGood: Object.freeze(["0.148.0-alpha.9"]),
-  minimum: "0.148.0",
-  maximumExclusive: "0.151.0"
+  policy: "current-and-previous-validated" as const,
+  currentLine: "0.153",
+  previousLine: "0.152",
+  supported: "0.153.4 || 0.152.1 (validated patches only; surface-specific)",
+  knownGood: Object.freeze(["0.153.4", "0.152.1"]),
+  validatedVersions: Object.freeze({
+    cli: Object.freeze(["0.153.4", "0.152.1"]),
+    desktop: Object.freeze(["0.153.4"])
+  }),
+  minimum: "0.152.1",
+  maximumExclusive: "0.154.0"
 } as const);
 
-const SUPPORTED_CODEX_MINORS = new Set([148, 150]);
+export const CODEX_PROTOCOL_LABEL = "validated Codex 0.152/0.153";
 
 export function parseVersion(value: unknown): SemanticVersion | undefined {
   if (typeof value !== "string") return undefined;
@@ -71,22 +79,23 @@ export function compareVersions(left: string | SemanticVersion, right: string | 
   return 0;
 }
 
-export function classifyCodexVersion(version: unknown): { status: CompatibilityStatus; reason: string } {
+export function classifyCodexVersion(version: unknown, surface: CompatibilitySurface = "cli"): { status: CompatibilityStatus; reason: string } {
   const parsed = parseVersion(version);
   if (!parsed) return { status: "unsupported", reason: "invalid_version" };
 
-  if (parsed.major === 0 && parsed.minor < 148) {
+  if (parsed.major === 0 && parsed.minor < 152) {
     return { status: "unsupported", reason: "below_supported_range" };
   }
-  if (parsed.major !== 0 || !SUPPORTED_CODEX_MINORS.has(parsed.minor)) {
+  if (parsed.major !== 0 || parsed.minor > 153) {
     return { status: "unsupported", reason: "above_tested_range" };
   }
 
-  if (CODEX_COMPATIBILITY.knownGood.some(versionValue => compareVersions(parsed, versionValue) === 0)) {
-    return { status: "known-good", reason: "tested_in_ci" };
+  if (surface === "unknown") return { status: "unsupported", reason: "surface_unavailable" };
+  if (CODEX_COMPATIBILITY.validatedVersions[surface].some(value => value === parsed.raw)) {
+    return { status: "known-good", reason: "validated_patch" };
   }
-  return {
-    status: "supported",
-    reason: parsed.prerelease === undefined ? "inside_supported_range" : "preview_inside_supported_range"
-  };
+  if (CODEX_COMPATIBILITY.knownGood.some(value => value === parsed.raw)) {
+    return { status: "unsupported", reason: "surface_version_unvalidated" };
+  }
+  return { status: "unsupported", reason: "unvalidated_patch" };
 }

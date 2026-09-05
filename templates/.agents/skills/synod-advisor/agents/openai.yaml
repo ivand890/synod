@@ -1,4 +1,4 @@
 interface:
   display_name: "Synod Advisor"
   short_description: "Supervise cost-efficient atomic implementation"
-  default_prompt: "Use $synod-advisor so the configured supervisor reviews atomic implementation delegated to the selected worker profile."
+  default_prompt: "Use $synod-advisor with the installed __SYNOD_PROFILE__ profile: __SYNOD_SUPERVISOR_MODEL__ advises on bounded implementation, reviews concise evidence, and advances on meaningful state changes."

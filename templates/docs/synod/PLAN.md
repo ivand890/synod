@@ -15,7 +15,7 @@ Only the primary advisor changes acceptance states. An implementation agent may 
 
 ## Candidate tasks
 
-Record proposed decomposition here, then create each approved task in canonical state with its executor, acceptance criteria, verification commands, and dependencies.
+Record proposed decomposition here, then create each approved task in canonical state with its executor, acceptance criteria, verification commands, and dependencies. Use repeatable `--depends-on` for prerequisites that must be `DONE`; use repeatable `--blocked-by` for blockers released at `VERIFIED` or `DONE`. `task next` dispatches only leaves whose blockers are satisfied, whose planned writer paths are independent, and whose writer slots are available. Selected parallel writer leaves include isolated-worktree continuation guidance; bind/task-next returns the exact executable fence after lease binding.
 
 ## Delegation contract
 

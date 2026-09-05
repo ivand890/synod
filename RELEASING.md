@@ -1,92 +1,30 @@
 # Releasing Synod
 
-Synod publishes `@ivand890/synod` and its matching GitHub Release from GitHub Actions. npm uses trusted publishing; no npm publish token is stored in GitHub.
+Synod publishes `@ivand890/synod` and its matching GitHub Release from GitHub Actions. npm uses trusted publishing through the protected `npm` environment; no npm publish token is stored in GitHub.
 
-The public `v0.12.2` source is anchored by signed tag commit
-`0ae623f4537daaa62278e70ae077b3231578a88e` and its externally immutable GitHub
-Release (`isImmutable: true`). Post-publication evidence is recorded in the
-versioned `release-closeouts/v0.12.2.json`. The prior `v0.12.1` evidence is
-recorded in versioned `release-closeouts/v0.12.1.json`, the `v0.12.0` evidence is
-recorded in versioned `release-closeouts/v0.12.0.json`, the `v0.11.0` evidence
-is recorded in versioned `release-closeouts/v0.11.0.json`, and the earlier
-`v0.9.5` evidence is recorded in versioned `release-closeouts/v0.9.5.json`,
-bound to signed tag commit `494f1ebd85b1c51dde522e7a7ec6e334dadc4e30`. The
-root `RELEASE-CLOSEOUT.json` is the matching verified closeout record for
-`v0.12.2`. Do not rerun historical tag or publication commands.
-The phase-2 live verifier runs on the protected closeout PR, not the tag
-workflow; the tag workflow validates only the strict prepared/pending source
-record for the next release before publication.
-The commands below remain the protected release procedure for a future version.
+## Release truth and authority
 
-## Two-phase closeout
+Release authority is exact Git state, the phase-appropriate closeout record, and the protected workflow or closeout pull request that verifies it. Local tests, a tarball, a tag, or a green workflow are not public proof. Published tags and npm versions are immutable; corrections require a new patch version.
 
-Release documentation advances in two explicit phases:
+The public `v0.12.2` source is anchored by signed tag commit `0ae623f4537daaa62278e70ae077b3231578a88e` and its externally immutable GitHub Release (`isImmutable: true`). Two-phase closeout has three checkpoints: prepare source, let the protected tag workflow publish it, then independently verify public evidence. The tag workflow validates phase 1 only; phase-2 live verifier runs on the protected closeout PR, not the tag workflow. The commands below are the protected release procedure for a future version.
 
-1. **Source preparation:** `package.json`, changelog, workflow, tests, and the
-   release documents are reviewed on `main`; the root closeout for the next
-   release is `prepared`/`pending` with no self-referential tag SHA. The
-   protected workflow authenticates the exact tag, package version, and `main`
-   ancestry, runs tests and package smoke, then validates that realizable
-   pre-tag record.
-2. **Public verification:** after the protected workflow publishes, record the
-   exact npm `gitHead`, GitHub Release state, registry-installed package result
-   (exact registry spec, `dist` integrity/attestation/provenance, and a clean
-   consumer command), and public CLI result in `publicVerification`. Change the
-   closeout status and the matching claims in `README.md`, `ROADMAP.md`, and
-   `RELEASING.md` in the same post-publication commit. The phase-2 live verifier
-   runs as a read-only gate on that protected closeout PR; it is not a tag
-   workflow step and never publishes or edits external state.
+## Phase 1: Prepare source
 
-An exact tag, a green workflow, or a local package build (`pnpm test:package`)
-does not fill the second phase. The local tarball smoke belongs under
-`sourcePreparation.localPackageSmoke`; it cannot satisfy `publicVerification`.
-The closeout advances only after the external evidence is recorded in a
-post-publication commit on `main`.
-
-The shared strict validator accepts only these complete shapes:
+1. Branch from the latest `main`; update `package.json`, `CHANGELOG.md`, workflow/tests, and release documents. Merge the reviewed pull request into `main` after required CI is green.
+2. Set the root closeout to `prepared`/`pending`: `sourcePreparation.status` is `prepared`, `publicVerification.status` and `documentation.status` are `pending`, `sourcePreparation.tagSha` is absent, and local tarball smoke is pending. The local tarball smoke belongs under `sourcePreparation.localPackageSmoke`; it cannot satisfy public verification.
+3. Run phase-strict closeout validation before and at the tag boundary; malformed or mixed-phase records fail closed.
 
 ```bash
 release_version="${RELEASE_VERSION:?Set RELEASE_VERSION to the release version}"
 release_tag="v$release_version"
 release_tag_sha="${RELEASE_TAG_SHA:?Set RELEASE_TAG_SHA to the exact tag commit}"
-pnpm exec tsx scripts/validate-release-closeout.ts --phase tag \
-  --tag "$release_tag" --tag-sha "$release_tag_sha" --json
-pnpm exec tsx scripts/validate-release-closeout.ts --phase post-publication \
-  --tag "$release_tag" --tag-sha "$release_tag_sha" --json
+pnpm exec tsx scripts/validate-release-closeout.ts --phase pre-tag --tag "$release_tag" --json
+pnpm exec tsx scripts/validate-release-closeout.ts --phase tag --tag "$release_tag" --tag-sha "$release_tag_sha" --json
 ```
 
-The tag phase requires `prepared`/`pending`, an absent tag SHA, and pending
-local smoke. The post-publication phase requires exact `closed`/`verified`
-statuses, the same tag SHA in source/npm/public evidence, immutable GitHub
-release facts, npm provenance, a clean registry consumer check, and public CLI
-parity. Malformed or mixed-phase records fail closed.
+## Phase 2: Protected publish
 
-On the protected closeout PR, the verified branch invokes the read-only live
-verifier after resolving the exact tag commit:
-
-```bash
-pnpm exec tsx scripts/verify-public-release-closeout.ts \
-  --file RELEASE-CLOSEOUT.json --tag "$release_tag" \
-  --tag-sha "$release_tag_sha" --repository ivand890/synod --json
-```
-
-It compares the recorded npm version, `gitHead`, `latest`, `dist` integrity,
-attestation, and provenance with the live registry, compares the GitHub release
-and latest-release facts through read-only `GH_TOKEN` API calls, then runs the
-exact registry consumer install and public `pnpm dlx` CLI check. Any mismatch
-fails closed; the tag workflow does not run this phase.
-
-## Prepare a release
-
-1. Create a branch from the latest `main`.
-2. Update `package.json` to the intended semantic version.
-3. Move the relevant entries from `Unreleased` into a dated section in `CHANGELOG.md` and update its comparison links.
-4. Open a pull request and wait for the required CI check.
-5. Merge the pull request into `main`.
-
-## Publish
-
-Update local `main`, then create a signed annotated tag for the exact release commit:
+From reviewed `main`, create a signed annotated tag for the exact release commit and push only that tag:
 
 ```bash
 release_version="${RELEASE_VERSION:?Set RELEASE_VERSION to the next version}"
@@ -96,27 +34,37 @@ git tag -s "v$release_version" -m "v$release_version"
 git push origin "v$release_version"
 ```
 
-The tag must match the version in `package.json`. The protected `Publish` workflow verifies that the tagged commit belongs to `main`, runs the full test suite and package smoke test, prepares a draft GitHub Release, and publishes through the protected `npm` environment.
+The tag must equal the manifest version and be an ancestor of `origin/main`. The protected `Publish` workflow installs the pinned toolchain, runs `pnpm test` and `pnpm test:package`, validates the prepared/pending source closeout, creates or reuses a draft GitHub Release, and publishes to npm with trusted GitHub Actions credentials—not a stored npm token.
 
-Every unpublished tag waits for a durable release turn derived from the complete remote tag set plus public npm/GitHub `latest` parity. The oldest pending stable tag is the only version allowed to publish. Per-tag concurrency deduplicates the same release, but the workflow does not treat GitHub Actions concurrency as a cross-version queue because pending runs can be cancelled and ordering is not guaranteed. A later tag cannot advance until the prior tag is both npm `latest` and the published GitHub `Latest` release.
+Only the oldest pending stable tag may publish after the remote tag set and npm/GitHub `latest` agree; per-tag concurrency deduplicates a rerun but is not a cross-version queue. GitHub Releases and npm are not an atomic transaction: npm may accept a package while a draft remains pending, but the workflow never succeeds with mismatched public state. Later tags remain gated until the prior tag is npm `latest` and the GitHub `Latest` release.
 
-After npm exposes the exact version and tagged `gitHead`, the workflow publishes the draft and verifies all of these invariants before it can succeed:
+## Phase 3: Public verification and closeout
 
-- the tagged npm version belongs to the exact Git commit;
-- the matching GitHub Release exists and is neither a draft nor a prerelease;
-- npm's `latest` dist-tag and GitHub's `Latest` release identify the same version;
-- the npm `gitHead` for that latest version resolves to its Git tag.
-
-GitHub Releases and npm do not share an atomic transaction. A failure after npm accepts a package can therefore leave a draft temporarily pending, but never a successful workflow with mismatched public state. Later releases remain gated. Re-running the same tag verifies the immutable npm `gitHead`, reuses the draft, and completes the release safely. Recovering an older already-published npm version explicitly uses `--latest=false` so it cannot displace the current GitHub Latest release.
-
-Approve the `npm` environment deployment in GitHub, then verify the release:
+After publication, update the closeout only from a protected closeout PR. The read-only phase-2 live verifier runs on the protected closeout PR, compares recorded and live facts, and performs the clean registry consumer install and public CLI check:
 
 ```bash
-release_version="${RELEASE_VERSION:?Set RELEASE_VERSION to the next version}"
-npm view @ivand890/synod version dist-tags --json
-gh release view "v$release_version" --json tagName,isDraft,isPrerelease,url
-gh release list --limit 1
-pnpm dlx "@ivand890/synod@$release_version" --version
+release_version="${RELEASE_VERSION:?Set RELEASE_VERSION to the published version}"
+release_tag="v$release_version"
+release_tag_sha="${RELEASE_TAG_SHA:?Set RELEASE_TAG_SHA to the exact tag commit}"
+pnpm exec tsx scripts/verify-public-release-closeout.ts --file RELEASE-CLOSEOUT.json --tag "$release_tag" --tag-sha "$release_tag_sha" --repository ivand890/synod --json
 ```
 
-Published versions and release tags are immutable. Fixes require a new patch version.
+Public evidence must bind the exact tag SHA to:
+
+- npm version, `gitHead`, `latest`, `dist` integrity, attestation URL, and SLSA provenance;
+- an immutable, published, non-prerelease GitHub Release with exact tag and SHA, plus npm/GitHub Latest parity;
+- the registry-installed package result: a clean consumer install of the exact registry spec followed by `pnpm exec synod --version`; and
+- a separate public `pnpm dlx @ivand890/synod@$release_version --version` check.
+
+Only then may `sourcePreparation` be `closed`, `publicVerification` be `verified`, and matching `README.md`, `ROADMAP.md`, and `RELEASING.md` claims advance together. The root `RELEASE-CLOSEOUT.json` prepares `v0.13.0`; public proof remains at `v0.12.2` until verification succeeds. After closeout, the root and matching versioned closeouts must be byte-identical.
+
+## Failure and recovery
+
+- Any mismatch, unavailable external state, or malformed/mixed-phase closeout fails closed; never mark a release verified from local evidence.
+- Re-running the same tag may verify an existing npm version only when its `gitHead` is the exact tagged commit and may reuse the draft. Never republish, retarget, or overwrite a tag or version; any rerun that cannot prove exact public state must fail closed.
+- If npm accepted a package before GitHub completed, keep the closeout pending and rerun the same protected workflow after public state is readable; npm and GitHub remain non-atomic.
+- Recovery of an older published version explicitly uses `--latest=false` so it cannot displace the current GitHub Latest release; later releases remain gated by durable ordering and public parity.
+
+## Historical evidence
+
+Current public `v0.12.2` evidence is in `release-closeouts/v0.12.2.json`; `RELEASE-CLOSEOUT.json` is pending source preparation for `v0.13.0`. The prior `v0.9.5` evidence is in `release-closeouts/v0.9.5.json`, bound to signed tag commit `494f1ebd85b1c51dde522e7a7ec6e334dadc4e30`; other historical pointers are `release-closeouts/v0.12.1.json`, `release-closeouts/v0.12.0.json`, and `release-closeouts/v0.11.0.json`. These pointers are historical evidence, not instructions to rerun old tag or publication commands.

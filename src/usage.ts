@@ -322,6 +322,38 @@ export interface RolloutTokenObservation {
   epoch: number;
   reset: boolean;
   usage: TokenUsage;
+  source?: "legacy" | "durable";
+  responseId?: string;
+  turnId?: string;
+  rootTurnId?: string;
+  threadId?: string;
+}
+
+interface TokenCandidate {
+  model: string;
+  observedAt?: string;
+  observedAtMs?: number;
+  bytes: number;
+  cumulative: TokenUsage;
+  responseUsage?: TokenUsage;
+  legacyLastUsage?: TokenUsage;
+  responseId?: string;
+  threadId?: string;
+  turnId?: string;
+  rootTurnId?: string;
+}
+
+function tokenCountersKey(usage: TokenUsage): string {
+  return Object.values(TOKEN_FIELDS).map(field => usage[field]).join(":");
+}
+
+function validDurableCounters(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value) || !validUsageCounters(value)) return false;
+  const usage = normalizeUsage(value);
+  return Object.values(usage).every(Number.isSafeInteger)
+    && usage.cachedInputTokens <= usage.inputTokens
+    && usage.reasoningOutputTokens <= usage.outputTokens
+    && usage.totalTokens === usage.inputTokens + usage.outputTokens;
 }
 
 export type RolloutActivityKind = "turn-started" | "turn-completed" | "turn-aborted" | "compaction";
@@ -436,12 +468,16 @@ function incrementActivity(activity: UsageThreadRow["activity"], kind: RolloutAc
 
 export async function readRolloutTimeline(
   rolloutPath: string,
-  { openStream = createReadStream, identityEndMs }: {
+  { openStream = createReadStream, identityEndMs, threadId }: {
     openStream?: (path: string) => NodeJS.ReadableStream;
     identityEndMs?: number;
+    threadId?: string;
   } = {}
 ): Promise<RolloutTimeline> {
   const tokens: RolloutTokenObservation[] = [];
+  const tokenCandidates: TokenCandidate[] = [];
+  let ownerThreadId = threadId;
+  let activeTurnId: string | undefined;
   const activity = { turnsStarted: 0, turnsCompleted: 0, turnsAborted: 0, compactions: 0 };
   const activities: RolloutActivityObservation[] = [];
   const toolCalls: NormalizedToolCall[] = [];
@@ -541,6 +577,7 @@ export async function readRolloutTimeline(
 
     const payload = isRecord(event.payload) ? event.payload : undefined;
     if (event.type === "session_meta" && payload && !metadata) {
+      if (!ownerThreadId && typeof payload.id === "string") ownerThreadId = payload.id;
       const parsedMetadata = sessionSourceAndRole(payload);
       if (parsedMetadata.source) source = parsedMetadata.source;
       if (parsedMetadata.role) role = parsedMetadata.role;
@@ -551,6 +588,7 @@ export async function readRolloutTimeline(
       };
     }
     if (event.type === "turn_context" && typeof payload?.model === "string") activeModel = payload.model;
+    if (event.type === "turn_context" && typeof payload?.turn_id === "string") activeTurnId = payload.turn_id;
     const reroute = reroutedModel(payload);
     if (reroute) activeModel = reroute;
 
@@ -624,6 +662,23 @@ export async function readRolloutTimeline(
       compactionPending = !explicit;
     } else if (event.type !== "turn_context") compactionPending = false;
 
+    if (event.type === "token_usage_record") {
+      const identifiers = [payload?.thread_id, payload?.turn_id, payload?.response_id];
+      if (!payload || !identifiers.every(value => typeof value === "string" && value.trim().length > 0)
+        || !validDurableCounters(payload.usage) || !validDurableCounters(payload.thread_token_usage)) {
+        invalidTokenRecords += 1;
+        issues.push({ kind: "invalid-token-record", bytes, ...(observed ? { observedAtMs: observed.milliseconds } : {}) });
+        return;
+      }
+      tokenCandidates.push({
+        model: activeModel, bytes,
+        ...(observed ? { observedAt: observed.iso, observedAtMs: observed.milliseconds } : {}),
+        cumulative: normalizeUsage(payload.thread_token_usage), responseUsage: normalizeUsage(payload.usage),
+        threadId: payload.thread_id as string, turnId: payload.turn_id as string, responseId: payload.response_id as string,
+        ...(typeof payload.root_turn_id === "string" ? { rootTurnId: payload.root_turn_id } : {})
+      });
+      return;
+    }
     if (event.type !== "event_msg" || payload?.type !== "token_count") return;
     const info = isRecord(payload.info) ? payload.info : undefined;
     const raw = isRecord(info?.total_token_usage) ? info.total_token_usage : undefined;
@@ -645,19 +700,14 @@ export async function readRolloutTimeline(
       });
       return;
     }
-    const current = normalizeUsage(raw);
-    const delta = usageDelta(current, previous);
-    previous = current;
-    if (delta.reset) epoch += 1;
-    tokens.push({
+    const last = isRecord(info?.last_token_usage) ? info.last_token_usage : undefined;
+    tokenCandidates.push({
       ...(observed ? { observedAt: observed.iso, observedAtMs: observed.milliseconds } : {}),
-      model: activeModel,
-      epoch,
-      reset: delta.reset,
-      usage: delta.usage
+      model: activeModel, bytes, cumulative: normalizeUsage(raw),
+      ...(last && validUsageCounters(last) ? { legacyLastUsage: normalizeUsage(last) } : {}),
+      ...(activeTurnId ? { turnId: activeTurnId } : {})
     });
 
-    const last = isRecord(info?.last_token_usage) ? info.last_token_usage : undefined;
     const modelContextWindow = Number(info?.model_context_window);
     if (observed && last && typeof last.input_tokens === "number"
       && Number.isFinite(last.input_tokens) && last.input_tokens >= 0
@@ -683,6 +733,64 @@ export async function readRolloutTimeline(
     }
   }
   if (buffer.byteLength > 0) processRecord(buffer, buffer);
+
+  // Prefer durable response observations to their cumulative legacy mirrors in
+  // either order. Never deduplicate by timestamp or by token count alone across
+  // different turns. Keep unmirrored legacy history for previous-line resumes.
+  const durableSnapshots = new Set<string>();
+  for (const candidate of tokenCandidates) {
+    if (!candidate.responseId || (identityEndMs !== undefined && (candidate.observedAtMs ?? Infinity) > identityEndMs)) continue;
+    durableSnapshots.add(`${candidate.turnId}:${tokenCountersKey(candidate.cumulative)}`);
+  }
+  const responses = new Map<string, string>();
+  const durableTurnsSeen = new Set<string | undefined>();
+  for (const [index, candidate] of tokenCandidates.entries()) {
+    if (!candidate.responseId) {
+      const key = tokenCountersKey(candidate.cumulative);
+      if (candidate.turnId !== undefined && durableSnapshots.has(`${candidate.turnId}:${key}`)) continue;
+      // Legacy cumulative totals can diverge after compaction. An adjacent
+      // per-response mirror is still the same usage, even with a different total.
+      if ([tokenCandidates[index - 1], tokenCandidates[index + 1]].some(record =>
+        record?.responseId && (candidate.turnId === undefined || candidate.turnId === record.turnId)
+        && (tokenCountersKey(record.cumulative) === key || (durableTurnsSeen.has(candidate.turnId)
+          && candidate.legacyLastUsage && record.responseUsage
+          && tokenCountersKey(candidate.legacyLastUsage) === tokenCountersKey(record.responseUsage)))
+        && (identityEndMs === undefined || (record.observedAtMs ?? Infinity) <= identityEndMs))) continue;
+    } else {
+      durableTurnsSeen.add(candidate.turnId);
+      const responseKey = `${candidate.threadId}:${candidate.responseId}`;
+      const fingerprint = `${candidate.turnId}:${candidate.rootTurnId}:${tokenCountersKey(candidate.responseUsage!)}:${tokenCountersKey(candidate.cumulative)}`;
+      const seen = responses.get(responseKey);
+      if (seen !== undefined) {
+        if (seen !== fingerprint) {
+          invalidTokenRecords += 1;
+          issues.push({ kind: "invalid-token-record", bytes: candidate.bytes, ...(candidate.observedAtMs === undefined ? {} : { observedAtMs: candidate.observedAtMs }) });
+        }
+        continue;
+      }
+      responses.set(responseKey, fingerprint);
+      if (ownerThreadId && candidate.threadId !== ownerThreadId) continue;
+    }
+    const delta = usageDelta(candidate.cumulative, previous);
+    previous = candidate.cumulative;
+    if (delta.reset) epoch += 1;
+    // Response usage is authoritative. A gap in cumulative coverage is reported
+    // as incomplete, rather than inventing usage for missing response records.
+    if (candidate.responseUsage && tokenCountersKey(delta.usage) !== tokenCountersKey(candidate.responseUsage)) {
+      invalidTokenRecords += 1;
+      issues.push({ kind: "invalid-token-record", bytes: candidate.bytes, ...(candidate.observedAtMs === undefined ? {} : { observedAtMs: candidate.observedAtMs }) });
+    }
+    tokens.push({
+      model: candidate.model, epoch, reset: delta.reset, usage: candidate.responseUsage || delta.usage,
+      source: candidate.responseId ? "durable" : "legacy",
+      ...(candidate.observedAt === undefined ? {} : { observedAt: candidate.observedAt }),
+      ...(candidate.observedAtMs === undefined ? {} : { observedAtMs: candidate.observedAtMs }),
+      ...(candidate.responseId ? {
+        responseId: candidate.responseId, threadId: candidate.threadId!, turnId: candidate.turnId!,
+        ...(candidate.rootTurnId === undefined ? {} : { rootTurnId: candidate.rootTurnId })
+      } : {})
+    });
+  }
   for (const output of toolOutputs) {
     if (toolCallIndexes.has(output.callId)) continue;
     issues.push({
@@ -1256,6 +1364,7 @@ export async function collectUsage({
 
       const intervalEndMs = interval ? Date.parse(interval.end.timestamp) : undefined;
       const timeline = await readRolloutTimeline(thread.path, {
+        threadId: thread.id,
         ...(intervalEndMs !== undefined ? { identityEndMs: intervalEndMs } : {})
       });
       const coordinationSelection = selectedCoordination(timeline, interval);

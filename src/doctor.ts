@@ -6,7 +6,7 @@ import { classifyCodexVersion, CODEX_COMPATIBILITY, compareVersions, parseVersio
 import { WARNING_CODES, warning } from "./contracts.js";
 import { ERROR_CODES, asSynodError } from "./errors.js";
 import { checkProject } from "./lifecycle.js";
-import { listProfiles, evaluateProfile } from "./profiles.js";
+import { listProfiles, evaluateProfile, PREFERRED_PROFILE } from "./profiles.js";
 import type { ModelCapability } from "./profiles.js";
 import type { Warning } from "./contracts.js";
 import { isRecord } from "./validation.js";
@@ -101,7 +101,7 @@ export async function doctorProject(
     home: typeof diagnosticValue.codexHome === "string" ? diagnosticValue.codexHome : null
   };
   const compatibility = codexVersion
-    ? { ...codexRuntime, version: codexVersion, ...classifyCodexVersion(codexVersion), range: CODEX_COMPATIBILITY.supported, knownGood: [...CODEX_COMPATIBILITY.knownGood] }
+    ? { ...codexRuntime, version: codexVersion, ...classifyCodexVersion(codexVersion, codexSurface === "cli" || codexSurface === "desktop" ? codexSurface : "unknown"), range: CODEX_COMPATIBILITY.supported, knownGood: [...CODEX_COMPATIBILITY.knownGood] }
     : { ...codexRuntime, version: null, status: "unsupported", reason: "version_unavailable", range: CODEX_COMPATIBILITY.supported, knownGood: [...CODEX_COMPATIBILITY.knownGood] };
   if (compatibility.status === "unsupported") {
     warnings.push(warning(
@@ -133,7 +133,7 @@ export async function doctorProject(
       versionEligible
     };
   });
-  const recommendedProfile = profileChecks.find(item => item.id === "synod-5.6" && item.compatible)?.id
+  const recommendedProfile = profileChecks.find(item => item.id === PREFERRED_PROFILE && item.compatible)?.id
     || profileChecks.find(item => item.compatible)?.id
     || null;
 
@@ -169,7 +169,14 @@ export async function doctorProject(
   return {
     healthy,
     node: { version: nodeVersion, supported: nodeSupported, range: NODE_SUPPORT_RANGE },
-    codex: compatibility,
+    codex: {
+      ...compatibility,
+      policy: CODEX_COMPATIBILITY.policy,
+      currentLine: CODEX_COMPATIBILITY.currentLine,
+      previousLine: CODEX_COMPATIBILITY.previousLine,
+      validatedVersions: codexSurface === "cli" || codexSurface === "desktop"
+        ? [...CODEX_COMPATIBILITY.validatedVersions[codexSurface]] : []
+    },
     capabilities: {
       appServer: isRecord(diagnosticValue.appServer) && isRecord(diagnosticValue.appServer.capabilities)
         ? diagnosticValue.appServer.capabilities

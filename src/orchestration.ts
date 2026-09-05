@@ -242,6 +242,12 @@ export interface OrchestrationTask {
   id: string;
   objective: string;
   dependsOn: string[];
+  /**
+   * Optional additive dependency edges for the leaf scheduler. Unlike
+   * `dependsOn`, a blocker is satisfied once it reaches VERIFIED or DONE.
+   * Legacy tasks omit this field and retain their depends-on semantics.
+   */
+  blockedBy?: string[];
   state: TaskState;
   revision: number;
   executor: string;
@@ -636,8 +642,13 @@ export function legalTaskTransitions(
   if (task.state === "BLOCKED") {
     allowed = allowed.filter(target => target === "SUPERSEDED" || target === task.blockedFrom);
   }
-  if (task.dependsOn.some(dependency => tasks[dependency]?.state !== "DONE")) {
-    allowed = allowed.filter(target => target !== "READY");
+  const incompleteDependencies = task.dependsOn.filter(dependency => tasks[dependency]?.state !== "DONE");
+  const incompleteBlockedBy = (task.blockedBy || []).filter(dependency =>
+    !["DONE", "VERIFIED"].includes(tasks[dependency]?.state || "")
+  );
+  if (incompleteDependencies.length > 0) allowed = allowed.filter(target => target !== "READY");
+  if (incompleteBlockedBy.length > 0) {
+    allowed = allowed.filter(target => target !== "READY" && target !== "ACTIVE");
   }
   if (task.correctionPolicy.used >= task.correctionPolicy.limit
     && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state)) {
@@ -650,6 +661,56 @@ export function legalTaskTransitions(
     }
   }
   return allowed;
+}
+
+function incompleteTaskDependencies(
+  task: Pick<OrchestrationTask, "dependsOn">,
+  tasks: Readonly<Record<string, OrchestrationTask>>
+): string[] {
+  return task.dependsOn.filter(dependency => tasks[dependency]?.state !== "DONE");
+}
+
+function incompleteTaskBlockedBy(
+  task: Pick<OrchestrationTask, "blockedBy">,
+  tasks: Readonly<Record<string, OrchestrationTask>>
+): string[] {
+  return (task.blockedBy || []).filter(dependency =>
+    !["DONE", "VERIFIED"].includes(tasks[dependency]?.state || "")
+  );
+}
+
+function assertTaskExecutionDependencies(
+  task: Pick<OrchestrationTask, "id" | "dependsOn" | "blockedBy">,
+  tasks: Readonly<Record<string, OrchestrationTask>>,
+  action: string,
+  { includeDependsOn = true }: { includeDependsOn?: boolean } = {}
+): void {
+  const incomplete = includeDependsOn ? incompleteTaskDependencies(task, tasks) : [];
+  const incompleteBlockedBy = incompleteTaskBlockedBy(task, tasks);
+  if (incomplete.length === 0 && incompleteBlockedBy.length === 0) return;
+  const hasDependencies = incomplete.length > 0;
+  const hasBlockedBy = incompleteBlockedBy.length > 0;
+  const message = hasDependencies && hasBlockedBy
+    ? `Task ${task.id} has incomplete dependencies or blockers.`
+    : hasBlockedBy
+      ? `Task ${task.id} has incomplete blockers.`
+      : `Task ${task.id} has incomplete dependencies.`;
+  throw new SynodError(ERROR_CODES.TRANSITION_INVALID, `${message} Cannot ${action}.`, {
+    details: { taskId: task.id, incomplete, incompleteBlockedBy }
+  });
+}
+
+function taskExecutionDependenciesSatisfied(
+  task: Pick<OrchestrationTask, "dependsOn" | "blockedBy">,
+  tasks: Readonly<Record<string, OrchestrationTask>>,
+  { includeDependsOn = true }: { includeDependsOn?: boolean } = {}
+): boolean {
+  return (includeDependsOn ? incompleteTaskDependencies(task, tasks).length === 0 : true)
+    && incompleteTaskBlockedBy(task, tasks).length === 0;
+}
+
+function shouldRequireDependsOnForActivation(task: Pick<OrchestrationTask, "state" | "blockedFrom">): boolean {
+  return task.state === "READY" || (task.state === "BLOCKED" && task.blockedFrom === "READY");
 }
 
 function requiredFlag(flag: string, value: unknown): string[] {
@@ -676,6 +737,17 @@ function guidanceArgv(operation: string, taskId: string, args: Record<string, un
       ...lane("writeTree", "--write-tree"),
       ...lane("read", "--read"),
       ...lane("readTree", "--read-tree")
+    ];
+  }
+  if (operation === "worktree.create") {
+    return [
+      "worktree", "create", taskId,
+      "--destination", String(args.destination ?? ""),
+      ...requiredFlag("--lease-id", args.leaseId),
+      ...requiredFlag("--generation", args.generation === null ? undefined : String(args.generation ?? "")),
+      "--revision", String(args.revision ?? ""),
+      ...requiredFlag("--expected-heartbeat-at", args.expectedHeartbeatAt),
+      ...requiredFlag("--owner-thread", args.ownerThread)
     ];
   }
   if (operation === "delegate.complete") {
@@ -759,6 +831,19 @@ export interface TaskGuidanceAction {
   requirements: string[];
   argv: string[];
   fence?: Record<string, unknown>;
+  /**
+   * Parallel writer leaves must execute outside the control checkout. This
+   * nested continuation is emitted on the selected delegate-start action
+   * because its lease fence is only known after the host binds the worker.
+   */
+  worktree?: {
+    operation: "worktree.create";
+    arguments: Record<string, unknown>;
+    requirements: string[];
+    /** Present only after an active writer lease supplies every fence value. */
+    argv?: string[];
+    fence?: Record<string, unknown>;
+  };
 }
 
 function guidanceAction(
@@ -774,6 +859,43 @@ function guidanceAction(
     argv: guidanceArgv(operation, String(args.taskId ?? ""), args),
     ...(fence ? { fence } : {})
   };
+}
+
+function isolatedWorktreeGuidance(task: OrchestrationTask): NonNullable<TaskGuidanceAction["worktree"]> {
+  return {
+    operation: "worktree.create",
+    arguments: {
+      taskId: task.id,
+      destination: `../.synod-worktrees/${task.id}`,
+      revision: task.revision
+    },
+    requirements: ["active-writer-lease"]
+  };
+}
+
+function exactWorktreeGuidance(
+  task: OrchestrationTask,
+  lease: TaskLease
+): TaskGuidanceAction {
+  const fence = {
+    leaseId: lease.id,
+    generation: lease.generation,
+    revision: lease.taskRevision,
+    expectedHeartbeatAt: lease.heartbeatAt,
+    ownerThread: lease.ownerThread
+  };
+  return guidanceAction("worktree.create", {
+    taskId: task.id,
+    destination: `../.synod-worktrees/${task.id}`,
+    ...fence
+  }, [], fence);
+}
+
+function withIsolatedWorktreeGuidance(
+  action: TaskGuidanceAction,
+  task: OrchestrationTask
+): TaskGuidanceAction {
+  return { ...action, worktree: isolatedWorktreeGuidance(task) };
 }
 
 function recoverGuidanceActions(task: OrchestrationTask) {
@@ -846,7 +968,7 @@ async function parallelReadyBatches(
       && task.lease === undefined
       && task.leaseReservation === undefined
       && task.recovery?.status !== "PENDING"
-      && task.dependsOn.every(dependency => state.tasks[dependency]?.state === "DONE")
+      && taskExecutionDependenciesSatisfied(task, state.tasks)
       && guidance.actions.some(action => action.operation === "delegate.start")
       && plannedWriterScopes(task).length > 0);
   // guidanceTasks already follows the canonical taskOrder. Preserve that
@@ -869,7 +991,10 @@ async function parallelReadyBatches(
     if (selected.some(item => plannedScopesConflict(scopes, plannedWriterScopes(item.task)))) continue;
     const action = candidate.guidance.actions.find(item => item.operation === "delegate.start");
     if (!action) continue;
-    selected.push({ task: candidate.task, action });
+    const isolatedAction = withIsolatedWorktreeGuidance(action, candidate.task);
+    const actionIndex = candidate.guidance.actions.indexOf(action);
+    if (actionIndex >= 0) candidate.guidance.actions[actionIndex] = isolatedAction;
+    selected.push({ task: candidate.task, action: isolatedAction });
   }
   return selected.length === 0
     ? []
@@ -889,15 +1014,22 @@ export async function nextTaskGuidance(
     .map(task => {
       const nominalTransitions = legalTaskTransitions(task, canonical.state.tasks);
       const correctionReady = ["REVIEW", "ACCEPTED", "VERIFIED"].includes(task.state);
-      const leaseActivationReady = !task.lease
-        && (task.state === "READY" || correctionReady);
       const expiredReservation = task.leaseReservation?.status === "RESERVED"
         && Date.parse(task.leaseReservation.expiresAt) <= clock();
       const expiredLease = task.lease?.status === "ACTIVE" && Date.parse(task.lease.expiresAt) <= clock();
+      const activationDependenciesSatisfied = taskExecutionDependenciesSatisfied(task, canonical.state.tasks, {
+        includeDependsOn: shouldRequireDependsOnForActivation(task)
+      });
+      const leaseActivationReady = !task.lease
+        && (task.state === "READY" || correctionReady)
+        && activationDependenciesSatisfied;
       const legalTransitions = task.leaseReservation || expiredLease
         ? []
-        : nominalTransitions.filter(to => !(task.state === "ACTIVE" && to === "REVIEW" && !task.lease));
-      const incompleteDependencies = task.dependsOn.filter(taskId => canonical.state.tasks[taskId]?.state !== "DONE");
+        : nominalTransitions
+          .filter(to => !(task.state === "ACTIVE" && to === "REVIEW" && !task.lease))
+          .filter(to => !["READY", "ACTIVE"].includes(to) || activationDependenciesSatisfied);
+      const incompleteDependencies = incompleteTaskDependencies(task, canonical.state.tasks);
+      const incompleteBlockedBy = incompleteTaskBlockedBy(task, canonical.state.tasks);
       const noInScopeDelta = (() => {
         if (task.state !== "ACTIVE" || !task.lease || expiredLease || !canonical.snapshot) return false;
         try {
@@ -1023,11 +1155,19 @@ export async function nextTaskGuidance(
             expectedHeartbeatAt: task.lease.heartbeatAt
           })
         : undefined;
+      const worktreeAction = task.state === "ACTIVE"
+        && task.lease
+        && !task.lease.observer
+        && !expiredLease
+        && task.lease.scopes.some(scope => scope.access === "write")
+        ? exactWorktreeGuidance(task, task.lease)
+        : undefined;
       const actions = [
         ...(waitAction ? [waitAction] : []),
         ...(correctionAction ? [correctionAction] : []),
         ...(emptyDeliveryRevoke ? [emptyDeliveryRevoke] : []),
-        ...baseActions
+        ...baseActions,
+        ...(worktreeAction ? [worktreeAction] : [])
       ];
       const proposalPathStates = task.proposal?.pathStates;
       return {
@@ -1035,8 +1175,10 @@ export async function nextTaskGuidance(
         state: task.state,
         revision: task.revision,
         dependsOn: [...task.dependsOn],
+        ...(task.blockedBy === undefined ? {} : { blockedBy: [...task.blockedBy] }),
         ...(task.plannedScopes === undefined ? {} : { plannedScopes: structuredClone(task.plannedScopes) }),
         incompleteDependencies,
+        ...(task.blockedBy === undefined ? {} : { incompleteBlockedBy }),
         correction: structuredClone(task.correctionPolicy),
         budget: task.budget ? {
           policyRevision: task.budget.policy.revision,
@@ -1086,7 +1228,8 @@ export async function nextTaskGuidance(
           leaseExpired: Boolean(expiredLease),
           recoveryDecisionRequired: task.recovery?.status === "PENDING",
           budgetDecisionRequired: task.budget?.thresholdStatus === "decision-required",
-          correctionExhausted: task.correctionPolicy.used >= task.correctionPolicy.limit
+          correctionExhausted: task.correctionPolicy.used >= task.correctionPolicy.limit,
+          ...(task.blockedBy === undefined ? {} : { blockedBySatisfied: incompleteBlockedBy.length === 0 })
         },
         legalTransitions,
         actions
@@ -1736,6 +1879,7 @@ export function renderStatusMarkdown(
         "",
         `- Executor: ${markdownCell(task.executor)}`,
         `- Depends on: ${task.dependsOn.length > 0 ? task.dependsOn.map(markdownCell).join(", ") : "—"}`,
+        ...(task.blockedBy === undefined ? [] : [`- Blocked by: ${task.blockedBy.length > 0 ? task.blockedBy.map(markdownCell).join(", ") : "—"}`]),
         `- Revision: ${task.revision}`,
         `- Correction round: ${task.correctionRound}`,
         `- Correction policy: ${task.correctionPolicy.used}/${task.correctionPolicy.limit} used; ${task.correctionPolicy.overrides.length} override(s)`,
@@ -1994,6 +2138,98 @@ function invalidState(message: string, details?: unknown): never {
   throw new SynodError(ERROR_CODES.ORCHESTRATION_STATE_INVALID, message, { details });
 }
 
+interface TaskDependencyGraphIssue {
+  kind: "unknown" | "self" | "duplicate" | "cycle" | "empty";
+  message: string;
+  details: Record<string, unknown>;
+}
+
+function taskDependencyGraphIssue(
+  tasks: Readonly<Record<string, OrchestrationTask>>
+): TaskDependencyGraphIssue | undefined {
+  const adjacency = new Map<string, string[]>();
+  for (const [taskId, task] of Object.entries(tasks)) {
+    const seen = new Map<string, string>();
+    const references = [
+      ...task.dependsOn.map(reference => ({ kind: "dependsOn", reference })),
+      ...(task.blockedBy || []).map(reference => ({ kind: "blockedBy", reference }))
+    ];
+    const edges: string[] = [];
+    for (const { kind, reference } of references) {
+      const raw = String(reference);
+      const normalized = raw.trim().toUpperCase();
+      if (!normalized) {
+        return {
+          kind: "empty",
+          message: `Task ${taskId} has an empty ${kind} reference.`,
+          details: { taskId, kind, reference: raw }
+        };
+      }
+      const prior = seen.get(normalized);
+      if (prior !== undefined) {
+        return {
+          kind: "duplicate",
+          message: `Task ${taskId} has a duplicate-normalized dependency reference: ${normalized}.`,
+          details: { taskId, dependency: normalized, firstKind: prior, duplicateKind: kind }
+        };
+      }
+      seen.set(normalized, kind);
+      if (normalized === taskId) {
+        return {
+          kind: "self",
+          message: `Task ${taskId} cannot depend on itself: ${raw}.`,
+          details: { taskId, dependency: raw, kind }
+        };
+      }
+      if (raw !== normalized || !Object.hasOwn(tasks, raw)) {
+        return {
+          kind: "unknown",
+          message: `Task ${taskId} has an unknown dependency: ${raw}.`,
+          details: { taskId, dependency: raw, normalizedDependency: normalized, kind }
+        };
+      }
+      edges.push(raw);
+    }
+    adjacency.set(taskId, edges);
+  }
+
+  const visiting = new Map<string, number>();
+  const visited = new Set<string>();
+  const pathStack: string[] = [];
+  const visit = (taskId: string): TaskDependencyGraphIssue | undefined => {
+    const priorIndex = visiting.get(taskId);
+    if (priorIndex !== undefined) {
+      const cycle = [...pathStack.slice(priorIndex), taskId];
+      return {
+        kind: "cycle",
+        message: `Task dependency graph contains a cycle: ${cycle.join(" -> ")}.`,
+        details: { cycle }
+      };
+    }
+    if (visited.has(taskId)) return undefined;
+    visiting.set(taskId, pathStack.length);
+    pathStack.push(taskId);
+    for (const dependency of adjacency.get(taskId) || []) {
+      const issue = visit(dependency);
+      if (issue) return issue;
+    }
+    pathStack.pop();
+    visiting.delete(taskId);
+    visited.add(taskId);
+    return undefined;
+  };
+  for (const taskId of Object.keys(tasks)) {
+    const issue = visit(taskId);
+    if (issue) return issue;
+  }
+  return undefined;
+}
+
+function assertTaskDependencyGraphForMutation(tasks: Readonly<Record<string, OrchestrationTask>>): void {
+  const issue = taskDependencyGraphIssue(tasks);
+  if (issue) throw new SynodError(ERROR_CODES.TASK_INVALID, issue.message, { details: issue.details });
+}
+
 function isTaskState(value: unknown): value is TaskState {
   return typeof value === "string" && TASK_STATES.some(state => state === value);
 }
@@ -2212,6 +2448,7 @@ function isOrchestrationTask(value: unknown): value is OrchestrationTask {
     && typeof value.objective === "string"
     && value.objective.length > 0
     && isStringArray(value.dependsOn)
+    && (value.blockedBy === undefined || isStringArray(value.blockedBy))
     && isTaskState(value.state)
     && isNonNegativeInteger(value.revision)
     && typeof value.executor === "string"
@@ -2534,6 +2771,8 @@ export function validateOrchestrationState(
   if (new Set(state.taskOrder).size !== state.taskOrder.length || Object.keys(state.tasks).length !== state.taskOrder.length) {
     invalidState("Task order and task map do not describe the same unique tasks.");
   }
+  const dependencyIssue = taskDependencyGraphIssue(state.tasks);
+  if (dependencyIssue) invalidState(dependencyIssue.message, dependencyIssue.details);
   const allEvidenceIds = new Set<string>();
   let maximumEvidenceCounter = 0;
   for (const id of state.taskOrder) {
@@ -3988,6 +4227,28 @@ function normalizedList(values: unknown[] | undefined, label: string): string[] 
   return result;
 }
 
+function normalizedTaskReferences(values: unknown[] | undefined, label: "depends-on" | "blocked-by"): string[] {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values || []) {
+    const raw = String(value).trim();
+    if (!raw) {
+      throw new SynodError(ERROR_CODES.TASK_INVALID, `A task cannot contain an empty ${label} reference.`, {
+        details: { field: label }
+      });
+    }
+    const normalized = raw.toUpperCase();
+    if (seen.has(normalized)) {
+      throw new SynodError(ERROR_CODES.TASK_INVALID, `A task cannot repeat a duplicate-normalized ${label} reference: ${normalized}.`, {
+        details: { field: label, dependency: normalized }
+      });
+    }
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
 export interface AddTaskOptions {
   directory?: string;
   id?: string;
@@ -3996,6 +4257,7 @@ export interface AddTaskOptions {
   acceptance?: unknown[];
   verification?: unknown[];
   dependsOn?: unknown[];
+  blockedBy?: unknown[];
   /** Canonical planned scopes, useful to API callers that already have lanes. */
   plannedScopes?: unknown[];
   plannedRead?: unknown[];
@@ -4014,6 +4276,7 @@ export async function addTask({
   acceptance = [],
   verification = [],
   dependsOn = [],
+  blockedBy = [],
   plannedScopes,
   plannedRead = [],
   plannedWrite = [],
@@ -4033,7 +4296,14 @@ export async function addTask({
   }
   const criteria = normalizedList(acceptance, "acceptance criterion");
   const commands = normalizedList(verification, "verification command");
-  const dependenciesList = [...new Set(dependsOn.map(value => String(value).trim().toUpperCase()).filter(Boolean))];
+  const dependenciesList = normalizedTaskReferences(dependsOn, "depends-on");
+  const blockedByList = normalizedTaskReferences(blockedBy, "blocked-by");
+  const duplicateDependency = dependenciesList.find(dependency => blockedByList.includes(dependency));
+  if (duplicateDependency) {
+    throw new SynodError(ERROR_CODES.TASK_INVALID, `A task cannot declare the same dependency as both depends-on and blocked-by: ${duplicateDependency}.`, {
+      details: { dependency: duplicateDependency }
+    });
+  }
   const laneValues = [...plannedRead, ...plannedWrite, ...plannedReadTree, ...plannedWriteTree];
   if (plannedScopes !== undefined && laneValues.length > 0) {
     throw new SynodError(ERROR_CODES.TASK_INVALID, "Task planned scopes must use either canonical scopes or explicit lane options, not both.");
@@ -4052,18 +4322,12 @@ export async function addTask({
 
   return commitMutation(targetDirectory, "task.created", { actor, taskId }, async (state, context) => {
     if (state.tasks[taskId]) throw new SynodError(ERROR_CODES.TASK_EXISTS, `Task ${taskId} already exists.`, { details: { taskId } });
-    for (const dependency of dependenciesList) {
-      if (!state.tasks[dependency] || dependency === taskId) {
-        throw new SynodError(ERROR_CODES.TASK_INVALID, `Task ${taskId} has an unknown or self dependency: ${dependency}`, {
-          details: { taskId, dependency }
-        });
-      }
-    }
     if (normalizedPlannedScopes) await validateLeaseScopeFilesystemPaths(targetDirectory, normalizedPlannedScopes);
     const task: OrchestrationTask = {
       id: taskId,
       objective: taskObjective,
       dependsOn: dependenciesList,
+      ...(blockedByList.length > 0 ? { blockedBy: blockedByList } : {}),
       state: "PLANNED",
       revision: 0,
       executor: taskExecutor,
@@ -4077,6 +4341,7 @@ export async function addTask({
       createdAt: context.timestamp,
       updatedAt: context.timestamp
     };
+    assertTaskDependencyGraphForMutation({ ...state.tasks, [taskId]: task });
     state.tasks[taskId] = task;
     state.taskOrder.push(taskId);
     return {
@@ -4975,19 +5240,35 @@ export async function splitTask({
       }
     }
     const inheritedDependencies = task.dependsOn.filter(dependency => !replacementIds.includes(dependency));
+    const inheritedBlockedBy = (task.blockedBy || []).filter(blocker => !replacementIds.includes(blocker));
     const replacementDependencies = new Map<string, string[]>(replacementIds.map(replacementId => [
       replacementId,
       [...new Set([...state.tasks[replacementId]!.dependsOn, ...inheritedDependencies])]
     ]));
-    const dependentIds = state.taskOrder.filter(id => id !== taskId && state.tasks[id]?.dependsOn.includes(taskId));
+    const replacementBlockedBy = new Map<string, string[]>(replacementIds.map(replacementId => [
+      replacementId,
+      [...new Set([...(state.tasks[replacementId]!.blockedBy || []), ...inheritedBlockedBy])]
+    ]));
+    const dependentIds = state.taskOrder.filter(id => id !== taskId && (
+      state.tasks[id]?.dependsOn.includes(taskId)
+      || (state.tasks[id]?.blockedBy || []).includes(taskId)
+    ));
     const rewrittenDependencies = new Map<string, string[]>(dependentIds.map(dependentId => {
       const dependencies = (replacementDependencies.get(dependentId) || state.tasks[dependentId]!.dependsOn)
         .flatMap(dependency => dependency === taskId ? replacementIds : [dependency]);
       return [dependentId, [...new Set(dependencies)]];
     }));
+    const rewrittenBlockedBy = new Map<string, string[]>(dependentIds.map(dependentId => {
+      const blockers = (replacementBlockedBy.get(dependentId) || state.tasks[dependentId]!.blockedBy || [])
+        .flatMap(blocker => blocker === taskId ? replacementIds : [blocker]);
+      return [dependentId, [...new Set(blockers)]];
+    }));
     const dependencyMap = new Map(state.taskOrder.map(id => [
       id,
-      rewrittenDependencies.get(id) || replacementDependencies.get(id) || state.tasks[id]!.dependsOn
+      [
+        ...(rewrittenDependencies.get(id) || replacementDependencies.get(id) || state.tasks[id]!.dependsOn),
+        ...(rewrittenBlockedBy.get(id) || replacementBlockedBy.get(id) || state.tasks[id]!.blockedBy || [])
+      ]
     ]));
     const visiting = new Set<string>();
     const visited = new Set<string>();
@@ -5015,6 +5296,9 @@ export async function splitTask({
     for (const replacementId of replacementIds) {
       const replacement = state.tasks[replacementId]!;
       replacement.dependsOn = rewrittenDependencies.get(replacementId) || replacementDependencies.get(replacementId)!;
+      const blockedBy = rewrittenBlockedBy.get(replacementId) || replacementBlockedBy.get(replacementId)!;
+      if (blockedBy.length > 0) replacement.blockedBy = blockedBy;
+      else delete replacement.blockedBy;
       replacement.splitFrom = taskId;
       if (task.budget) replacement.budget = structuredClone(task.budget);
       replacement.updatedAt = context.timestamp;
@@ -5022,6 +5306,9 @@ export async function splitTask({
     for (const [dependentId, dependencies] of rewrittenDependencies) {
       const dependent = state.tasks[dependentId]!;
       dependent.dependsOn = dependencies;
+      const blockedBy = rewrittenBlockedBy.get(dependentId) || dependent.blockedBy || [];
+      if (blockedBy.length > 0) dependent.blockedBy = blockedBy;
+      else delete dependent.blockedBy;
       dependent.updatedAt = context.timestamp;
     }
     return {
@@ -5033,9 +5320,14 @@ export async function splitTask({
           replacements: replacementIds,
           replacementDependencies: replacementIds.map(replacementId => ({
             id: replacementId,
-            dependsOn: state.tasks[replacementId]!.dependsOn
+            dependsOn: state.tasks[replacementId]!.dependsOn,
+            ...(state.tasks[replacementId]!.blockedBy === undefined ? {} : { blockedBy: state.tasks[replacementId]!.blockedBy })
           })),
-          dependents: dependentIds.map(dependentId => ({ id: dependentId, dependsOn: state.tasks[dependentId]!.dependsOn })),
+          dependents: dependentIds.map(dependentId => ({
+            id: dependentId,
+            dependsOn: state.tasks[dependentId]!.dependsOn,
+            ...(state.tasks[dependentId]!.blockedBy === undefined ? {} : { blockedBy: state.tasks[dependentId]!.blockedBy })
+          })),
           reason: explanation,
           evidence: evidenceReferences
         }
@@ -5935,6 +6227,9 @@ export async function reserveTaskLease({
     if (!task) throw new SynodError(ERROR_CODES.TASK_NOT_FOUND, `Task ${taskId} does not exist.`, { details: { taskId } });
     assertBudgetAllowsExecution(task, observerRequested ? "observer lease reservation" : "writer lease reservation");
     assertReservationEligible(task, role);
+    assertTaskExecutionDependencies(task, state.tasks, "reserve a writer lease", {
+      includeDependsOn: shouldRequireDependsOnForActivation(task)
+    });
     if (approvalRole) assertApprovalScopes(task, approvalRole, scopes);
     if (task.lease || task.leaseReservation) {
       throw new SynodError(ERROR_CODES.LEASE_CONFLICT, `Task ${taskId} already has writer authority reserved.`, {
@@ -6203,6 +6498,9 @@ export async function bindTaskLease({
       ...(threadId === undefined ? {} : { threadId })
     }, reservation.waitAuthority);
     assertReservationEligible(task, reservation.role);
+    assertTaskExecutionDependencies(task, state.tasks, "bind a writer lease", {
+      includeDependsOn: shouldRequireDependsOnForActivation(task)
+    });
     const approvalRole = reservation.role === "reviewer" || reservation.role === "verifier" ? reservation.role : undefined;
     if (approvalRole && reservation.observer !== true) {
       throw new SynodError(ERROR_CODES.DELEGATION_INVALID, `${approvalRole} reservations must be observer-only.`, {
@@ -6224,14 +6522,6 @@ export async function bindTaskLease({
       });
     }
     assertReservationBaselineUnchanged(task, reservation, baseline.snapshot, context.snapshot);
-    if (task.state === "READY") {
-      const incomplete = task.dependsOn.filter(dependency => state.tasks[dependency]?.state !== "DONE");
-      if (incomplete.length > 0) {
-        throw new SynodError(ERROR_CODES.TRANSITION_INVALID, `Task ${taskId} has incomplete dependencies.`, {
-          details: { taskId, incomplete }
-        });
-      }
-    }
     const fromState = task.state;
     const observerLease = reservation.observer === true;
     const references = !observerLease && ["REVIEW", "ACCEPTED", "VERIFIED"].includes(fromState)
@@ -6276,6 +6566,9 @@ export async function bindTaskLease({
       delete task.blockedFrom;
     }
     task.updatedAt = context.timestamp;
+    const worktree = !observerLease && lease.scopes.some(scope => scope.access === "write")
+      ? exactWorktreeGuidance(task, lease)
+      : undefined;
     return {
       metadata: {
         fromState,
@@ -6296,7 +6589,13 @@ export async function bindTaskLease({
           ...(reservation.role === undefined ? {} : { role: reservation.role })
         }
       },
-      result: { task, lease, writeAuthorized: !observerLease as false | true, evidence: createdEvidence }
+      result: {
+        task,
+        lease,
+        writeAuthorized: !observerLease as false | true,
+        evidence: createdEvidence,
+        ...(worktree ? { worktree } : {})
+      }
     };
   }, dependencies);
 }
@@ -6447,6 +6746,9 @@ export async function acquireTaskLease({
         details: { taskId, state: task.state }
       });
     }
+    assertTaskExecutionDependencies(task, state.tasks, "acquire a writer lease", {
+      includeDependsOn: shouldRequireDependsOnForActivation(task)
+    });
     if (task.recovery?.status === "PENDING") {
       throw new SynodError(ERROR_CODES.LEASE_INVALID, `Task ${taskId} requires an explicit abandoned-owner recovery decision.`, {
         details: { taskId, leaseId: task.recovery.endedLease.id, generation: task.recovery.endedLease.generation }
@@ -7274,12 +7576,12 @@ export async function transitionTask({
       });
     }
     if (targetState === "READY") {
-      const incomplete = task.dependsOn.filter(dependency => state.tasks[dependency]?.state !== "DONE");
-      if (incomplete.length > 0) {
-        throw new SynodError(ERROR_CODES.TRANSITION_INVALID, `Task ${taskId} has incomplete dependencies.`, {
-          details: { taskId, incomplete }
-        });
-      }
+      assertTaskExecutionDependencies(task, state.tasks, "transition to READY");
+    }
+    if (targetState === "ACTIVE") {
+      assertTaskExecutionDependencies(task, state.tasks, "transition to ACTIVE", {
+        includeDependsOn: shouldRequireDependsOnForActivation(task)
+      });
     }
     if (targetState === "ACTIVE" && !task.lease) {
       throw new SynodError(ERROR_CODES.LEASE_REQUIRED, `Task ${taskId} requires an active writer lease before execution.`, {

@@ -79,6 +79,130 @@ test.afterEach(async () => {
   }
 });
 
+// Sanitized 0.153 durable-record shape. Cached input and reasoning output are
+// subsets of input/output, not additional billable tokens.
+function counters(input: number, output: number) {
+  return { input_tokens: input, cached_input_tokens: Math.floor(input / 5), cache_write_input_tokens: 0,
+    output_tokens: output, reasoning_output_tokens: Math.floor(output / 2), total_tokens: input + output };
+}
+
+function durable(response: string, usage: ReturnType<typeof counters>, total = usage, thread = "root", turn = "turn-1") {
+  return event("token_usage_record", { thread_id: thread, turn_id: turn, session_id: "session-1",
+    root_turn_id: "root-turn", response_id: response, usage, turn_token_usage: total, thread_token_usage: total });
+}
+
+function legacy(total: ReturnType<typeof counters>, last = total) {
+  return event("event_msg", { type: "token_count", info: { total_token_usage: total, last_token_usage: last } });
+}
+
+test("compaction-shifted legacy totals still deduplicate the durable response in either order", async () => {
+  for (const reverse of [false, true]) {
+    const pair = [durable("response-2", counters(50, 10), counters(150, 30)), legacy(counters(100, 20), counters(50, 10))];
+    const file = await rollout(await temporaryDirectory(), "shifted-mirrors", [
+      event("turn_context", { model: "gpt-6-astra", turn_id: "turn-1" }),
+      durable("response-1", counters(100, 20)), legacy(counters(100, 20)), event("compacted", {}),
+      ...(reverse ? pair.reverse() : pair)
+    ]);
+    const timeline = await readRolloutTimeline(file);
+    assert.equal(timeline.invalidTokenRecords, 0);
+    assert.deepEqual(timeline.tokens.map(row => row.usage.totalTokens), [120, 60]);
+  }
+});
+
+test("an equal-sized old response before the first durable record remains historical usage", async () => {
+  const file = await rollout(await temporaryDirectory(), "legacy-prefix", [
+    event("turn_context", { model: "gpt-6-astra", turn_id: "turn-1" }),
+    legacy(counters(100, 20)), durable("first-durable", counters(100, 20), counters(200, 40)),
+    legacy(counters(200, 40), counters(100, 20))
+  ]);
+  const timeline = await readRolloutTimeline(file);
+  assert.equal(timeline.invalidTokenRecords, 0);
+  assert.deepEqual(timeline.tokens.map(row => row.usage.totalTokens), [120, 120]);
+});
+
+test("durable usage and legacy mirrors count once in either order, retaining old history and model changes", async () => {
+  for (const reverse of [false, true]) {
+    const directory = await temporaryDirectory();
+    const mirror = [durable("response-1", counters(50, 10), counters(150, 30)), legacy(counters(150, 30))];
+    const file = await rollout(directory, "durable-mixed", [
+      event("session_meta", { id: "root" }),
+      event("turn_context", { model: "gpt-5.6-sol", turn_id: "old-turn" }), legacy(counters(100, 20)),
+      event("turn_context", { model: "gpt-6-astra", turn_id: "turn-1" }),
+      ...(reverse ? mirror.reverse() : mirror),
+      durable("response-2", counters(50, 10), counters(200, 40)), legacy(counters(200, 40)),
+      durable("response-2", counters(50, 10), counters(200, 40))
+    ]);
+    const timeline = await readRolloutTimeline(file);
+    assert.equal(timeline.invalidTokenRecords, 0);
+    assert.deepEqual(timeline.tokens.map(row => [row.model, row.usage.totalTokens]), [
+      ["gpt-5.6-sol", 120], ["gpt-6-astra", 60], ["gpt-6-astra", 60]
+    ]);
+    assert.equal(timeline.tokens[1]?.rootTurnId, "root-turn");
+    assert.equal(timeline.tokens[1]?.responseId, "response-1");
+  }
+});
+
+test("durable response identities preserve equal counts across turns and counter resets", async () => {
+  const file = await rollout(await temporaryDirectory(), "durable-reset", [
+    event("turn_context", { model: "gpt-6-astra", turn_id: "turn-1" }),
+    durable("response-1", counters(100, 20)), legacy(counters(100, 20)),
+    event("turn_context", { model: "gpt-6-astra", turn_id: "turn-2" }),
+    durable("response-2", counters(100, 20), counters(200, 40), "root", "turn-2"), legacy(counters(200, 40)),
+    event("turn_context", { model: "gpt-5.6-luna", turn_id: "turn-3" }),
+    durable("response-3", counters(50, 10), counters(50, 10), "root", "turn-3"), legacy(counters(50, 10))
+  ]);
+  const timeline = await readRolloutTimeline(file);
+  assert.equal(timeline.invalidTokenRecords, 0);
+  assert.deepEqual(timeline.tokens.map(row => [row.usage.totalTokens, row.epoch]), [[120, 0], [120, 0], [60, 1]]);
+});
+
+test("durable child records and their mirrors do not charge the parent", async () => {
+  const file = await rollout(await temporaryDirectory(), "durable-owner", [
+    event("session_meta", { id: "root" }),
+    event("turn_context", { model: "gpt-6-astra", turn_id: "child-turn" }),
+    durable("response-child", counters(100, 20), counters(100, 20), "child", "child-turn"), legacy(counters(100, 20)),
+    event("turn_context", { model: "gpt-6-astra", turn_id: "turn-1" }), durable("response-root", counters(50, 10))
+  ]);
+  const timeline = await readRolloutTimeline(file);
+  assert.equal(timeline.invalidTokenRecords, 0);
+  assert.deepEqual(timeline.tokens.map(row => row.usage.totalTokens), [60]);
+});
+
+test("conflicting durable duplicates and missing coverage are incomplete, not invented totals", async () => {
+  const file = await rollout(await temporaryDirectory(), "durable-gap", [
+    durable("response-1", counters(50, 10), counters(150, 30)),
+    durable("response-1", counters(60, 12), counters(160, 32))
+  ]);
+  const timeline = await readRolloutTimeline(file);
+  assert.equal(timeline.invalidTokenRecords, 2);
+  assert.deepEqual(timeline.tokens.map(row => row.usage.totalTokens), [60]);
+});
+
+test("malformed durable counters do not corrupt the next valid observation", async () => {
+  const bad = counters(100, 20);
+  bad.cached_input_tokens = 101;
+  const file = await rollout(await temporaryDirectory(), "durable-invalid", [
+    durable("bad", bad), durable("good", counters(50, 10))
+  ]);
+  const timeline = await readRolloutTimeline(file);
+  assert.equal(timeline.invalidTokenRecords, 1);
+  assert.deepEqual(timeline.tokens.map(row => row.usage.totalTokens), [60]);
+});
+
+test("a later durable mirror cannot rewrite usage inside an already closed prefix", async () => {
+  const directory = await temporaryDirectory();
+  const at = "2026-09-05T12:00:00Z";
+  const later = "2026-09-05T12:00:01Z";
+  const timed = (line: string, timestamp: string) => JSON.stringify({ ...JSON.parse(line), timestamp });
+  const prefix = [timed(event("turn_context", { model: "gpt-6-astra", turn_id: "turn-1" }), at), timed(legacy(counters(100, 20)), at)];
+  const file = await rollout(directory, "durable-prefix", prefix);
+  const before = await readRolloutTimeline(file, { identityEndMs: Date.parse(at) });
+  await writeFile(file, [...prefix, timed(durable("response-1", counters(100, 20)), later)].join("\n") + "\n");
+  const after = await readRolloutTimeline(file, { identityEndMs: Date.parse(at) });
+  assert.deepEqual(after.prefix, before.prefix);
+  assert.deepEqual(after.tokens.filter(row => row.observedAtMs! <= Date.parse(at)), before.tokens);
+});
+
 test("attributes cumulative token deltas to the active model", async () => {
   const directory = await temporaryDirectory();
   const file = await rollout(directory, "mixed", [

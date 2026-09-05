@@ -1468,7 +1468,7 @@ export function isCodexHostOperator(
     && (runtime.executableSource === "cli-process" || runtime.executableSource === "desktop-process");
 }
 
-/** Host-only 0.148 probe. Never constructs a child App Server. */
+/** Host-only capability probe. Never constructs a child App Server. */
 export function probeCodexHostAdapter(
   runtime: Pick<ResolvedCodexRuntime, "surface"> = resolveCodexRuntime()
 ): CodexHostAdapterProbe {

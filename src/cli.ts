@@ -107,7 +107,7 @@ Usage:
   synod bundle export <destination> [--cwd <directory>] [--include-untracked] [--include-local-docs] [--json]
   synod bundle verify <bundle> [--json]
   synod bundle restore <bundle> --cwd <directory> [--include-local-docs] [--json]
-  synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--planned-read <path>] [--planned-write <path>] [--planned-read-tree <path>] [--planned-write-tree <path>] [--correction-limit <n>] [--cwd <directory>] [--json]
+  synod task add <task-id> --objective <text> --executor <id> --acceptance <criterion> --verification <command> [--depends-on <task-id>] [--blocked-by <task-id>] [--planned-read <path>] [--planned-write <path>] [--planned-read-tree <path>] [--planned-write-tree <path>] [--correction-limit <n>] [--cwd <directory>] [--json]
   synod task transition <task-id> <state> --revision <n> [--evidence <reference>] [--reason <text>] [--actor <id>] [--cwd <directory>] [--json]
   synod task approve <task-id> --role <reviewer|verifier> --decision <approved|rejected> --revision <n> --proposal-bundle-id <bundle> --owner-thread <thread-id> --evidence <reference> [--actor <id>] [--cwd <directory>] [--json]
   synod task correct <task-id> --revision <n> --reason <text> --evidence <reference> [--actor <id>] [--cwd <directory>] [--json]
@@ -178,6 +178,7 @@ Options:
   --session   Select any thread in a session tree. Defaults to the latest session in --cwd.
   --cwd       Select the project directory used to find the latest session.
   --by-model  Group consumption by model (the default and currently supported view).
+  --blocked-by Declare a repeatable blocker; VERIFIED or DONE releases the dependent task.
   --since-event
               Start marginal usage immediately after an exact canonical event.
   --since-checkpoint
@@ -343,9 +344,12 @@ function createInitProfileSelector(
         doctorDependenciesForCli(dependencies)
       );
       const preferred = result.profiles.find(item => item.id === PREFERRED_PROFILE);
-      if (preferred?.modelCompatible) {
+      // Profiles are ordered by preference. Keep the previous tiered profile
+      // available when Astra is absent instead of collapsing workers to portable.
+      const selected = result.profiles.find(item => item.id !== FALLBACK_PROFILE && item.modelCompatible);
+      if (selected) {
         return {
-          profile: PREFERRED_PROFILE,
+          profile: selected.id,
           source: "capability",
           reason: "model-compatible",
           details: {
@@ -1211,6 +1215,7 @@ export async function run(
         ...("lease" in result ? { lease: result.lease } : { reservation: result.reservation }),
         ...(ownerCleanup ? { ownerCleanup: { ownerThread, ...ownerCleanup } } : {}),
         ...("writeAuthorized" in result ? { writeAuthorized: result.writeAuthorized } : {}),
+        ...("worktree" in result ? { worktree: result.worktree } : {}),
         ...(options.action === "bind" && "lease" in result ? {
           activation: {
             taskId: result.task.id,

@@ -2,50 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { classifyCodexVersion, CODEX_COMPATIBILITY, compareVersions, parseVersion } from "../src/compatibility.js";
 
-test("classifies the supported disjoint minor lines and rejects gaps", () => {
-  assert.equal(
-    CODEX_COMPATIBILITY.supported,
-    ">=0.148.0-0 <0.149.0 || >=0.150.0-0 <0.151.0 (all 0.148.x and 0.150.x variants)"
-  );
-  assert.equal(classifyCodexVersion("0.148.0-alpha.9").status, "known-good");
-  assert.equal(classifyCodexVersion("0.148.0-alpha.9+ci.1").status, "known-good");
-  assert.deepEqual(classifyCodexVersion("0.148.0-alpha.1"), {
-    status: "supported",
-    reason: "preview_inside_supported_range"
-  });
-  assert.deepEqual(classifyCodexVersion("0.148.0"), {
-    status: "supported",
-    reason: "inside_supported_range"
-  });
-  assert.deepEqual(classifyCodexVersion("0.148.1+ci.1"), {
-    status: "supported",
-    reason: "inside_supported_range"
-  });
-  assert.equal(classifyCodexVersion("0.148.10-alpha.6.5").status, "supported");
-  assert.deepEqual(classifyCodexVersion("0.150.0-alpha.1"), {
-    status: "supported",
-    reason: "preview_inside_supported_range"
-  });
-  assert.deepEqual(classifyCodexVersion("0.150.0"), {
-    status: "supported",
-    reason: "inside_supported_range"
-  });
-  assert.deepEqual(classifyCodexVersion("0.150.1+ci.1"), {
-    status: "supported",
-    reason: "inside_supported_range"
-  });
-  assert.equal(classifyCodexVersion("0.150.10-alpha.6.5+ci.1").status, "supported");
-  assert.equal(classifyCodexVersion("0.147.999").status, "unsupported");
-  assert.equal(classifyCodexVersion("0.147.999-alpha.1").status, "unsupported");
-  assert.equal(classifyCodexVersion("0.149.0").status, "unsupported");
-  assert.equal(classifyCodexVersion("0.149.0-alpha.1").status, "unsupported");
-  assert.equal(classifyCodexVersion("0.149.0+ci.1").status, "unsupported");
-  assert.equal(classifyCodexVersion("0.149.1").status, "unsupported");
-  assert.equal(classifyCodexVersion("0.151.0").status, "unsupported");
-  assert.equal(classifyCodexVersion("1.0.0").status, "unsupported");
-  assert.equal(classifyCodexVersion("0.148").status, "unsupported");
-  assert.equal(classifyCodexVersion("0.148.0-01").status, "unsupported");
-  assert.equal(compareVersions("0.147.0", "0.142.0"), 1);
+test("maintains two minor lines with exact surface-specific validated patches", () => {
+  assert.equal(CODEX_COMPATIBILITY.policy, "current-and-previous-validated");
+  assert.equal(CODEX_COMPATIBILITY.currentLine, "0.153");
+  assert.equal(CODEX_COMPATIBILITY.previousLine, "0.152");
+  for (const version of ["0.153.4", "0.152.1"]) {
+    assert.deepEqual(classifyCodexVersion(version, "cli"), { status: "known-good", reason: "validated_patch" });
+  }
+  assert.equal(classifyCodexVersion("0.153.4", "desktop").status, "known-good");
+  assert.equal(classifyCodexVersion("0.152.1", "desktop").reason, "surface_version_unvalidated");
+  assert.equal(classifyCodexVersion("0.153.4", "unknown").reason, "surface_unavailable");
+  for (const version of ["0.148.0-alpha.9", "0.150.0", "0.151.999", "0.152.0", "0.152.2", "0.153.0", "0.153.3", "0.153.5", "0.154.0", "1.0.0", "0.153.4-alpha.1", "0.153.4+custom", "0.153", "0.153.4-01"]) {
+    assert.equal(classifyCodexVersion(version).status, "unsupported", version);
+  }
 });
 
 test("uses full semantic-version precedence", () => {

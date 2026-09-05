@@ -541,6 +541,26 @@ try {
     throw new Error(`Expected version ${expectedVersion}, received ${installedVersion}.`);
   }
 
+  // Exercise the packed migration independently of the existing portable fixtures.
+  const astraDirectory = path.join(consumerDirectory, "astra-project");
+  mkdirSync(astraDirectory, { recursive: true });
+  runSynod(["init", astraDirectory, "--profile", "synod-5.6", "--json"], { cwd: consumerDirectory, capture: true });
+  const astraConfigPath = path.join(astraDirectory, ".codex", "config.toml");
+  const previousConfig = readFileSync(astraConfigPath, "utf8");
+  const previousState = readFileSync(path.join(astraDirectory, ".synod", "state.json"), "utf8");
+  runSynod(["upgrade", astraDirectory, "--profile", "synod-astra", "--dry-run", "--json"], { cwd: consumerDirectory, capture: true });
+  if (readFileSync(astraConfigPath, "utf8") !== previousConfig) throw new Error("Astra dry-run modified the config.");
+  runSynod(["upgrade", astraDirectory, "--profile", "synod-astra", "--json"], { cwd: consumerDirectory, capture: true });
+  const astraConfig = readFileSync(astraConfigPath, "utf8");
+  const astraWorker = readFileSync(path.join(astraDirectory, ".codex", "agents", "synod-implementer.toml"), "utf8");
+  if (!astraConfig.includes('model = "gpt-6-astra"')
+    || !astraConfig.includes('model_reasoning_effort = "high"')
+    || !astraWorker.includes('model = "gpt-5.6-luna"')
+    || readFileSync(path.join(astraDirectory, ".synod", "state.json"), "utf8") !== previousState) {
+    throw new Error("Packed Astra migration did not preserve worker routing and canonical state.");
+  }
+  runSynod(["check", astraDirectory, "--json"], { cwd: consumerDirectory, capture: true });
+
   const v07Directory = path.join(consumerDirectory, "v0.7-project");
   mkdirSync(v07Directory, { recursive: true });
   const releasedEnvironment = { ...process.env };

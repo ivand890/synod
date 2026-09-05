@@ -253,6 +253,7 @@ export interface TaskAddOptions extends TaskCommonOptions {
   acceptance: string[];
   verification: string[];
   dependsOn: string[];
+  blockedBy?: string[];
   plannedRead: string[];
   plannedWrite: string[];
   plannedReadTree: string[];
@@ -1279,6 +1280,7 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   const acceptance: string[] = [];
   const verification: string[] = [];
   const dependsOn: string[] = [];
+  const blockedBy: string[] = [];
   const plannedRead: string[] = [];
   const plannedWrite: string[] = [];
   const plannedReadTree: string[] = [];
@@ -1297,7 +1299,7 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
     }
     const valueOptions = [
       "--cwd", "--objective", "--executor", "--actor", "--reason",
-      "--acceptance", "--verification", "--depends-on", "--evidence", "--revision",
+      "--acceptance", "--verification", "--depends-on", "--blocked-by", "--evidence", "--revision",
       "--correction-limit", "--additional-rounds", "--approver", "--reference", "--replacement",
       "--role", "--decision", "--proposal-bundle-id", "--owner-thread",
       "--planned-read", "--planned-write", "--planned-read-tree", "--planned-write-tree"
@@ -1312,6 +1314,7 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
       else if (arg === "--acceptance") acceptance.push(value);
       else if (arg === "--verification") verification.push(value);
       else if (arg === "--depends-on") dependsOn.push(value);
+      else if (arg === "--blocked-by") blockedBy.push(value);
       else if (arg === "--planned-read") plannedRead.push(value);
       else if (arg === "--planned-write") plannedWrite.push(value);
       else if (arg === "--planned-read-tree") plannedReadTree.push(value);
@@ -1363,6 +1366,7 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
       acceptance,
       verification,
       dependsOn,
+      ...(blockedBy.length > 0 ? { blockedBy } : {}),
       plannedRead,
       plannedWrite,
       plannedReadTree,
@@ -1372,7 +1376,7 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   }
   if (action === "approve" || action === "approval" || action === "record-approval") {
     if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
-      || dependsOn.length > 0 || correctionLimit !== undefined || additionalRounds !== undefined
+      || dependsOn.length > 0 || blockedBy.length > 0 || correctionLimit !== undefined || additionalRounds !== undefined
       || approver !== undefined || reference !== undefined || replacements.length > 0 || reason !== undefined
       || plannedRead.length > 0 || plannedWrite.length > 0 || plannedReadTree.length > 0 || plannedWriteTree.length > 0) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task approval received an unrelated task option.");
@@ -1397,7 +1401,7 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   }
   if (action === "override") {
     if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
-      || dependsOn.length > 0 || revision !== undefined || correctionLimit !== undefined || replacements.length > 0
+      || dependsOn.length > 0 || blockedBy.length > 0 || revision !== undefined || correctionLimit !== undefined || replacements.length > 0
       || role !== undefined || decision !== undefined || proposalBundleId !== undefined || ownerThread !== undefined
       || plannedRead.length > 0 || plannedWrite.length > 0 || plannedReadTree.length > 0 || plannedWriteTree.length > 0) {
       throw new SynodError(ERROR_CODES.UNKNOWN_OPTION, "Task override received an unrelated task option.");
@@ -1409,7 +1413,7 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   }
   if (action === "correct") {
     if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
-      || dependsOn.length > 0 || correctionLimit !== undefined || additionalRounds !== undefined
+      || dependsOn.length > 0 || blockedBy.length > 0 || correctionLimit !== undefined || additionalRounds !== undefined
       || approver !== undefined || reference !== undefined || replacements.length > 0
       || role !== undefined || decision !== undefined || proposalBundleId !== undefined || ownerThread !== undefined
       || plannedRead.length > 0 || plannedWrite.length > 0 || plannedReadTree.length > 0 || plannedWriteTree.length > 0) {
@@ -1422,7 +1426,7 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
   }
   if (action === "split") {
     if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0
-      || dependsOn.length > 0 || revision !== undefined || correctionLimit !== undefined || additionalRounds !== undefined
+      || dependsOn.length > 0 || blockedBy.length > 0 || revision !== undefined || correctionLimit !== undefined || additionalRounds !== undefined
       || approver !== undefined || reference !== undefined || role !== undefined || decision !== undefined
       || proposalBundleId !== undefined || ownerThread !== undefined
       || plannedRead.length > 0 || plannedWrite.length > 0 || plannedReadTree.length > 0 || plannedWriteTree.length > 0) {
@@ -1433,7 +1437,7 @@ export function parseTaskArgs(args: string[]): TaskOptions | HelpOptions {
     }
     return { action, id, directory, json, actor, replacements, reason, evidence };
   }
-  if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0 || dependsOn.length > 0
+  if (objective !== undefined || executor !== undefined || acceptance.length > 0 || verification.length > 0 || dependsOn.length > 0 || blockedBy.length > 0
     || correctionLimit !== undefined || additionalRounds !== undefined || approver !== undefined || reference !== undefined || replacements.length > 0
     || role !== undefined || decision !== undefined || proposalBundleId !== undefined || ownerThread !== undefined
     || plannedRead.length > 0 || plannedWrite.length > 0 || plannedReadTree.length > 0 || plannedWriteTree.length > 0) {

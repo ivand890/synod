@@ -243,6 +243,57 @@ test("init emits versioned JSON for success and conflicts", async () => {
   }
 });
 
+test("fresh implicit init selects Astra from model capabilities before mutation", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-profile-preferred-test-"));
+  const { messages, output } = capturedOutput();
+  const efforts = ["low", "medium", "high", "xhigh", "max"];
+  const models = [
+    { id: "gpt-6-astra", supportedReasoningEfforts: efforts },
+    { id: "gpt-5.6-sol", supportedReasoningEfforts: efforts },
+    { id: "gpt-5.6-luna", supportedReasoningEfforts: efforts },
+    { id: "gpt-5.6-terra", supportedReasoningEfforts: efforts }
+  ];
+  let discoveredBeforeMutation = false;
+
+  try {
+    const status = await run(["init", directory, "--json"], output, {
+      doctorRuntimeResolver: () => ({ surface: "cli", executable: "codex", resolved: true }),
+      doctorClientFactory: () => ({
+        async start() {},
+        async probeCapabilities() {},
+        async listModels() {
+          await assert.rejects(readFile(path.join(directory, "AGENTS.md")), { code: "ENOENT" });
+          discoveredBeforeMutation = true;
+          return models;
+        },
+        async close() {},
+        getDiagnostics() {
+          return {
+            codexVersion: "0.149.0",
+            codexSurface: "cli",
+            appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
+          };
+        },
+        getWarnings() { return []; }
+      })
+    });
+    const envelope = JSON.parse(takeMessage(messages));
+    assert.equal(status, 0);
+    assert.equal(discoveredBeforeMutation, true);
+    assert.equal(envelope.data.profile, "synod-astra");
+    assert.deepEqual(envelope.data.profileSelection, {
+      profile: "synod-astra",
+      source: "capability",
+      reason: "model-compatible",
+      details: { modelCompatible: true, codexStatus: "unsupported", codexVersion: "0.149.0" }
+    });
+    assert.ok(!envelope.warnings.some((item: { code?: unknown }) => item.code === WARNING_CODES.PROFILE_FALLBACK));
+    assert.equal(JSON.parse(await readFile(path.join(directory, ".synod/manifest.json"), "utf8")).profile, "synod-astra");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("fresh implicit init selects synod-5.6 from model capabilities before mutation", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "synod-cli-profile-preferred-test-"));
   const { messages, output } = capturedOutput();
@@ -323,13 +374,13 @@ test("fresh implicit init falls back to portable with structured provenance", as
     const fallbackWarning = envelope.warnings.find((item: { code?: unknown }) => item.code === WARNING_CODES.PROFILE_FALLBACK);
     assert.ok(fallbackWarning);
     assert.deepEqual(fallbackWarning.details, {
-      preferredProfile: "synod-5.6",
+      preferredProfile: "synod-astra",
       fallbackProfile: "portable",
       reason: "model-capabilities-unavailable",
       modelCompatible: false,
       missing: [
         { role: "default_subagent", model: "gpt-5.6-terra", capability: "model" },
-        { role: "supervisor", model: "gpt-5.6-sol", capability: "model" },
+        { role: "supervisor", model: "gpt-6-astra", capability: "model" },
         { role: "implementer", model: "gpt-5.6-luna", capability: "model" },
         { role: "explorer", model: "gpt-5.6-terra", capability: "model" },
         { role: "reviewer", model: "gpt-5.6-terra", capability: "model" },
@@ -884,6 +935,34 @@ test("task add parses explicit planned file and tree lanes", () => {
   });
 });
 
+test("task add parses repeatable blocked-by references", () => {
+  assert.deepEqual(parseTaskArgs([
+    "add", "T-DEPENDENT",
+    "--objective", "Wait for two blockers",
+    "--executor", "synod_implementer",
+    "--acceptance", "The blockers are honored",
+    "--verification", "pnpm test",
+    "--blocked-by", "T-FIRST",
+    "--blocked-by", "T-SECOND"
+  ]), {
+    action: "add",
+    id: "T-DEPENDENT",
+    objective: "Wait for two blockers",
+    executor: "synod_implementer",
+    acceptance: ["The blockers are honored"],
+    verification: ["pnpm test"],
+    dependsOn: [],
+    blockedBy: ["T-FIRST", "T-SECOND"],
+    plannedRead: [],
+    plannedWrite: [],
+    plannedReadTree: [],
+    plannedWriteTree: [],
+    directory: ".",
+    json: false,
+    actor: "supervisor"
+  });
+});
+
 test("recognized nested help wins before positional validation and mutation", async () => {
   const parserCases = [
     { parser: parseLeaseArgs, actions: ["reserve", "bind", "cancel", "acquire", "heartbeat", "release", "expire", "revoke", "recover"] },
@@ -1156,7 +1235,7 @@ test("doctor text identifies the Desktop executable, version, and shared Codex h
             codexExecutable: executable,
             codexHome: "/Users/test/.codex",
             codexSurface: "desktop",
-            codexVersion: "0.148.0-alpha.9",
+            codexVersion: "0.153.4",
             appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
           };
         }
@@ -1164,7 +1243,7 @@ test("doctor text identifies the Desktop executable, version, and shared Codex h
     });
 
     assert.equal(status, 0);
-    assert.match(messages[0] ?? "", /Codex Desktop: 0\.148\.0-alpha\.9 \(known-good; desktop\)/);
+    assert.match(messages[0] ?? "", /Codex Desktop: 0\.153\.4 \(known-good; desktop\)/);
     assert.match(messages[0] ?? "", /Codex executable: \/Applications\/ChatGPT\.app\/Contents\/Resources\/codex \(desktop-process\)/);
     assert.match(messages[0] ?? "", /Codex home: \/Users\/test\/\.codex/);
   } finally {
@@ -1204,7 +1283,7 @@ test("shared client factories receive the doctor runtime executable", async () =
             return {
               codexExecutable: executable,
               codexSurface: "cli",
-              codexVersion: "0.148.0-alpha.9",
+              codexVersion: "0.153.4",
               appServer: { capabilities: { initialize: true, threadList: true, modelList: true } }
             };
           }
