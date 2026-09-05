@@ -132,10 +132,10 @@ test("CI installs the pinned toolchain and smokes compiled packages on every sup
   assert.match(workflow, /os: ubuntu-latest\n\s+node-version: 24/);
   assert.match(workflow, /os: macos-latest\n\s+node-version: 24/);
   assert.match(workflow, /os: windows-latest\n\s+node-version: 24/);
-  assert.match(workflow, /codex-version: "0\.148\.0-alpha\.1"\n\s+expected-status: supported/);
-  assert.match(workflow, /codex-version: "0\.148\.0-alpha\.9"\n\s+expected-status: known-good/);
-  assert.match(workflow, /codex-version: "0\.150\.0"\n\s+expected-status: supported/);
-  assert.doesNotMatch(workflow, /codex-version: "0\.14(?:1|2|5|7)\.0"/);
+  assert.match(workflow, /codex-version: "0\.152\.1"\n\s+expected-status: known-good/);
+  assert.match(workflow, /codex-version: "0\.153\.4"\n\s+expected-status: known-good/);
+  assert.doesNotMatch(workflow, /codex-version: "0\.1(?:4[0-9]|50)\./);
+  assert.match(workflow, /SYNOD_CODEX_BIN/);
   assert.match(workflow, /run: pnpm test:package/);
   assert.match(workflow, /release-closeout:\n\s+name: Release closeout\n\s+runs-on: ubuntu-latest\n\s+timeout-minutes: 30[\s\S]*fetch-depth: 0[\s\S]*pnpm install --frozen-lockfile/);
   assert.match(workflow, /name: Validate pending closeout locally[\s\S]*--phase pre-tag[\s\S]*--json/);
@@ -273,7 +273,7 @@ test("release source, roadmap/history, and product/docs contract stay explicit",
   const archived095Closeout = parseJson(archived095CloseoutText);
   assert.ok(isRecord(packageJson));
   assert.ok(isRecord(closeout));
-  assert.equal(packageJson.version, "0.12.2");
+  assert.equal(packageJson.version, "0.13.0");
   assert.equal(closeout.schemaVersion, 1);
   assert.equal(closeout.package, "@ivand890/synod");
   assert.equal(closeout.version, "0.9.3");
@@ -336,17 +336,13 @@ test("release source, roadmap/history, and product/docs contract stay explicit",
     archivedV012CloseoutSha256,
     "v0.12.0 closeout archive must remain byte-stable",
   );
-  assert.equal(currentCloseout.version, "0.12.2");
-  assert.equal(currentCloseout.tag, "v0.12.2");
-  assert.ok(isRecord(currentCloseout.sourcePreparation));
-  assert.equal(currentCloseout.sourcePreparation.status, "closed");
-  assert.equal(currentCloseout.sourcePreparation.tagSha, "0ae623f4537daaa62278e70ae077b3231578a88e");
-  assert.ok(isRecord(currentCloseout.publicVerification));
-  assert.equal(currentCloseout.publicVerification.status, "verified");
-  assert.ok(isRecord(currentCloseout.documentation));
-  assert.equal(currentCloseout.documentation.status, "verified");
-  assert.equal(closeoutText, archivedReleaseCloseoutText, "verified v0.12.2 root and archive must stay byte-identical");
-  assert.deepEqual(currentCloseout, archivedReleaseCloseout);
+  assert.equal(currentCloseout.version, "0.13.0");
+  assert.equal(currentCloseout.tag, "v0.13.0");
+  validateReleaseCloseout(currentCloseout, { phase: "pre-tag", expectedVersion: "0.13.0", expectedTag: "v0.13.0" });
+  assert.ok(isRecord(archivedReleaseCloseout));
+  assert.equal(archivedReleaseCloseout.version, "0.12.2");
+  assert.ok(isRecord(archivedReleaseCloseout.sourcePreparation));
+  assert.equal(archivedReleaseCloseout.sourcePreparation.tagSha, "0ae623f4537daaa62278e70ae077b3231578a88e");
   assert.ok(isRecord(archivedLatestCloseout));
   assert.equal(archivedLatestCloseout.version, "0.12.1");
   assert.equal(archivedLatestCloseout.tag, "v0.12.1");
@@ -439,7 +435,7 @@ test("release source, roadmap/history, and product/docs contract stay explicit",
   assert.match(changelog, /Project-local `status` now accepts the `--task`, `--active-only`, and/);
   assert.match(changelog, /^## \[0\.9\.3\] - 2026-08-14$/m);
   assert.match(changelog, /^## \[0\.9\.4\] - 2026-08-15$/m);
-  assert.match(changelog, /\[Unreleased\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.12\.2\.\.\.HEAD/);
+  assert.match(changelog, /\[Unreleased\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.13\.0\.\.\.HEAD/);
   assert.match(changelog, /\[0\.12\.2\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.12\.1\.\.\.v0\.12\.2/);
   assert.match(changelog, /\[0\.12\.1\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.12\.0\.\.\.v0\.12\.1/);
   assert.match(changelog, /\[0\.12\.0\]: https:\/\/github\.com\/ivand890\/synod\/compare\/v0\.11\.0\.\.\.v0\.12\.0/);
@@ -452,7 +448,7 @@ test("release source, roadmap/history, and product/docs contract stay explicit",
   assert.match(roadmap, /North-star metric:[\s\S]*zero protocol-level human intervention/);
   assert.match(roadmap, /Current release truth:/);
   assert.match(roadmap, /Current public release: `v0\.12\.2`/);
-  assert.match(roadmap, /Current source release: `v0\.12\.2`/);
+  assert.match(roadmap, /Current source release: `v0\.13\.0`/);
   assert.match(roadmap, /Last verified public release at this update: `v0\.12\.2`/);
   assert.match(roadmap, /signed tag commit[\s\S]*0ae623f4537daaa62278e70ae077b3231578a88e/);
   assert.match(roadmap, /\[RELEASE-CLOSEOUT\.json\]\(RELEASE-CLOSEOUT\.json\)/);
@@ -470,7 +466,7 @@ test("release source, roadmap/history, and product/docs contract stay explicit",
   assert.match(roadmap, /## 4\. Agent Teams/);
   assert.match(roadmap, /v1 exit gate:/);
   assert.match(roadmap, /Current blocked-by\/worktree continuation is source-only/);
-  assert.match(roadmap, /publish it in a pinned `@ivand890\/synod@0\.12\.x` package before pilots start/);
+  assert.match(roadmap, /publish it in a pinned `@ivand890\/synod@0\.13\.0` package before pilots start/);
   assert.match(roadmap, /source-checkout behavior alone is not pilot evidence/);
   assert.equal(roadmap.match(/Current blocked-by\/worktree continuation is source-only/g)?.length, 1, "ROADMAP must own the source-only publication prerequisite once");
   assert.equal(roadmap.match(/source-checkout behavior alone is not pilot evidence/g)?.length, 1, "ROADMAP must state the source/public proof boundary once");
@@ -619,7 +615,7 @@ test("release source, roadmap/history, and product/docs contract stay explicit",
   assert.match(readme, /untested[\s\S]*`0\.149\.x` gap fails closed/);
   assert.match(readme, /public and pinned `@ivand890\/synod@0\.12\.2`/);
   assert.match(readme, /signed tag\s+commit[\s\S]*externally immutable/);
-  assert.match(readme, /Matching records:[\s\S]*RELEASE-CLOSEOUT\.json[\s\S]*release-closeouts\/v0\.12\.2\.json/);
+  assert.match(readme, /Prepared source:[\s\S]*RELEASE-CLOSEOUT\.json[\s\S]*release-closeouts\/v0\.12\.2\.json/);
   assert.match(readme, /See \[RELEASING\.md\]\(RELEASING\.md\) for the protected release procedure/);
   assert.equal(readme.match(/\[release-closeouts\/v0\.12\.2\.json\]\(/g)?.length, 1, "README must link the current versioned closeout once");
   assert.match(readme, /Local tarball smoke[\s\S]*source-preparation evidence only; they do not prove external publication/);
@@ -696,7 +692,7 @@ test("release source, roadmap/history, and product/docs contract stay explicit",
   assert.match(releasing, /`release-closeouts\/v0\.12\.0\.json`/);
   assert.match(releasing, /`release-closeouts\/v0\.11\.0\.json`/);
   assert.match(releasing, /(?:prior|earlier)\s+`v0\.9\.5` evidence[\s\S]*`release-closeouts\/v0\.9\.5\.json`/);
-  assert.match(releasing, /root `RELEASE-CLOSEOUT\.json` is the matching verified closeout record for\s+`v0\.12\.2`/);
+  assert.match(releasing, /root `RELEASE-CLOSEOUT\.json` prepares `v0\.13\.0`/);
   assert.doesNotMatch(releasing, /pre-tag candidate record/);
   assert.match(releasing, /registry-installed package result/);
   assert.match(releasing, /local tarball smoke belongs under\s+`sourcePreparation\.localPackageSmoke`/);
@@ -776,7 +772,8 @@ test("release closeout validation is strict across pre-tag and post-publication 
     readFile(archivedLatestCloseoutPath, "utf8"),
     readFile(archivedReleaseCloseoutPath, "utf8"),
   ]);
-  const root = parseJson(rootText);
+  validateReleaseCloseout(parseJson(rootText), { phase: "pre-tag", expectedVersion: "0.13.0" });
+  const root = parseJson(archivedReleaseText);
   const archived = parseJson(archivedText);
   const archivedPrevious = parseJson(archivedPreviousText);
   const archivedCurrent = parseJson(archivedCurrentText);

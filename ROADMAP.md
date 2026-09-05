@@ -1,6 +1,6 @@
 # Synod Roadmap
 
-Last updated: 2026-08-30
+Last updated: 2026-09-05
 
 Operator promise: a human states the outcome once. Synod gives the harness a bounded, recoverable path from request to independently verified local delivery; the agent carries protocol mechanics while humans retain product decisions and all external authority.
 
@@ -11,12 +11,12 @@ North-star metric: the share of substantial outcomes completed and independently
 Current release truth:
 
 - Current public release: `v0.12.2`.
-- Current source release: `v0.12.2`.
+- Current source release: `v0.13.0` (publication pending).
 - Last verified public release at this update: `v0.12.2`.
 - The signed tag commit is `0ae623f4537daaa62278e70ae077b3231578a88e`; the matching GitHub Release is externally immutable (`isImmutable: true`).
-- Matching records are [RELEASE-CLOSEOUT.json](RELEASE-CLOSEOUT.json) and [release-closeouts/v0.12.2.json](release-closeouts/v0.12.2.json).
+- Source preparation is [RELEASE-CLOSEOUT.json](RELEASE-CLOSEOUT.json); verified public evidence remains [release-closeouts/v0.12.2.json](release-closeouts/v0.12.2.json).
 - Public proof covers npm/GitHub/registry-installed package parity, attestation/provenance, clean consumer install, and a separate public CLI check; source preparation is not public proof.
-- The runtime requires Node `>=22` and supports Codex numeric minor lines `0.148` and `0.150`; the untested `0.149.x` gap fails closed, and `0.148.0-alpha.9` is known-good.
+- The public v0.12.2 runtime requires Node `>=22` and supports Codex numeric minor lines `0.148` and `0.150`; the untested `0.149.x` gap fails closed, and `0.148.0-alpha.9` is known-good.
 - See [RELEASING.md](RELEASING.md) for release procedure and [docs/ROADMAP-HISTORY.md](docs/ROADMAP-HISTORY.md) for dated release archaeology.
 
 This is the forward roadmap. It does not turn source preparation into a published runtime or treat a historical task ID as a new commitment. Delivered v0.6 through v0.12 chronology, release-specific task tables, compatibility notes, closeout facts, and provenance are preserved in [docs/ROADMAP-HISTORY.md](docs/ROADMAP-HISTORY.md).
@@ -39,7 +39,7 @@ Capabilities:
 v1 exit gate:
 
 - Three real production-shaped pilots run on released, pinned package artifacts across at least three repositories: this repository, a different domain, and at least one repository operated by someone other than the author.
-- Current blocked-by/worktree continuation is source-only: publish it in a pinned `@ivand890/synod@0.12.x` package before pilots start; source-checkout behavior alone is not pilot evidence. Pilots exercise that artifact, including a forced interruption and recovery in a new root session.
+- Current blocked-by/worktree continuation is source-only: publish it in a pinned `@ivand890/synod@0.13.0` package before pilots start; source-checkout behavior alone is not pilot evidence. Pilots exercise that artifact, including a forced interruption and recovery in a new root session.
 - Independent verification reproduces the reviewed result and exact relevant worktree identity for every pilot; adversarial ownership and recovery cases fail closed.
 - A security review covers leases, recovery bundles, write scopes, uninstall-preservation boundaries, and the no-telemetry default.
 - All three pilots complete with zero protocol-level human intervention: no manual fence copying, lease repair, owner substitution, or undocumented supervisor implementation. Product decisions, review decisions, and external approvals remain human-controlled and are not protocol interventions.

@@ -56,7 +56,7 @@ Public evidence must bind the exact tag SHA to:
 - the registry-installed package result: a clean consumer install of the exact registry spec followed by `pnpm exec synod --version`; and
 - a separate public `pnpm dlx @ivand890/synod@$release_version --version` check.
 
-Only then may `sourcePreparation` be `closed`, `publicVerification` be `verified`, and matching `README.md`, `ROADMAP.md`, and `RELEASING.md` claims advance together. The root `RELEASE-CLOSEOUT.json` is the matching verified closeout record for `v0.12.2`; the root and matching versioned closeouts must be byte-identical.
+Only then may `sourcePreparation` be `closed`, `publicVerification` be `verified`, and matching `README.md`, `ROADMAP.md`, and `RELEASING.md` claims advance together. The root `RELEASE-CLOSEOUT.json` prepares `v0.13.0`; public proof remains at `v0.12.2` until verification succeeds. After closeout, the root and matching versioned closeouts must be byte-identical.
 
 ## Failure and recovery
 
@@ -67,4 +67,4 @@ Only then may `sourcePreparation` be `closed`, `publicVerification` be `verified
 
 ## Historical evidence
 
-Current `v0.12.2` evidence is in `RELEASE-CLOSEOUT.json` and `release-closeouts/v0.12.2.json`. The prior `v0.9.5` evidence is in `release-closeouts/v0.9.5.json`, bound to signed tag commit `494f1ebd85b1c51dde522e7a7ec6e334dadc4e30`; other historical pointers are `release-closeouts/v0.12.1.json`, `release-closeouts/v0.12.0.json`, and `release-closeouts/v0.11.0.json`. These pointers are historical evidence, not instructions to rerun old tag or publication commands.
+Current public `v0.12.2` evidence is in `release-closeouts/v0.12.2.json`; `RELEASE-CLOSEOUT.json` is pending source preparation for `v0.13.0`. The prior `v0.9.5` evidence is in `release-closeouts/v0.9.5.json`, bound to signed tag commit `494f1ebd85b1c51dde522e7a7ec6e334dadc4e30`; other historical pointers are `release-closeouts/v0.12.1.json`, `release-closeouts/v0.12.0.json`, and `release-closeouts/v0.11.0.json`. These pointers are historical evidence, not instructions to rerun old tag or publication commands.

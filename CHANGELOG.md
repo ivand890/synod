@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-09-05
+
+### Added
+
+- Added dependency-aware task scheduling with repeatable `--blocked-by` edges,
+  independent ready-leaf dispatch, and explicit worktree continuation.
+
+- Added the capability-selected `synod-astra` profile with GPT-6 Astra as advisor
+  at high effort (xhigh planning), preserving GPT-5.6 worker models and efforts.
+  Existing profiles remain selectable and implicit upgrades preserve them.
+- Added an advisor efficiency policy and project-wide instruction/hook audit,
+  with separate model availability and Codex runtime validation.
+- Added durable per-response token usage with legacy-event deduplication,
+  response identity, child ownership, and incomplete-coverage detection.
+- Added persisted worker model/effort checks on the current Codex line. Missing
+  previous-line metadata is explicitly unavailable; current-line mismatches fail.
+
+### Changed
+
+- Fresh profile selection and doctor prefer Astra when its required capabilities
+  are present, retaining the GPT-5.6 tiered profile ahead of the portable fallback.
+- Advisor templates use compact evidence, current next-action receipts,
+  change-driven waits, bounded checks, and existing action authorization.
+- Maintain current and previous Codex minor lines using exact validated patches:
+  CLI 0.153.4 and 0.152.1, Desktop 0.153.4. Other runtime patches fail closed for
+  Synod-owned CLI execution; read-only diagnostics and historical usage remain
+  accessible. CLI CI probes both versions on Linux and macOS with isolated state.
+
 ## [0.12.2] - 2026-08-27
 
 ### Added
@@ -370,7 +398,8 @@ recovery (PR #39).
 - Published the CLI as the public npm package `@ivand890/synod` while preserving the `synod` executable name.
 - Added project initialization and recursive Codex session usage reporting.
 
-[Unreleased]: https://github.com/ivand890/synod/compare/v0.12.2...HEAD
+[Unreleased]: https://github.com/ivand890/synod/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/ivand890/synod/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/ivand890/synod/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/ivand890/synod/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/ivand890/synod/compare/v0.11.0...v0.12.0
