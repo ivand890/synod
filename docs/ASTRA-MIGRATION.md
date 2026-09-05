@@ -1,7 +1,7 @@
 # GPT-6 Astra migration and advisor policy
 
-Reviewed 2026-09-05. This is an unreleased source change; published Synod
-`0.12.2` does not include the `synod-astra` profile.
+Released with Synod `0.13.0`, verified 2026-09-05. Synod `0.12.2`
+does not include the `synod-astra` profile.
 
 ## Model policy
 
@@ -102,8 +102,8 @@ estimate. See the [Astra pricing reference](https://developers.openai.com/api/do
 For an installed consumer project, use a release that contains this change:
 
 ```bash
-pnpm dlx @ivand890/synod@<astra-release-version> upgrade --profile synod-astra --dry-run
-pnpm dlx @ivand890/synod@<astra-release-version> upgrade --profile synod-astra
+pnpm dlx @ivand890/synod@0.13.0 upgrade --profile synod-astra --dry-run
+pnpm dlx @ivand890/synod@0.13.0 upgrade --profile synod-astra
 ```
 
 Review conflicts before applying; modified managed files still require an explicit

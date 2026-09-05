@@ -338,7 +338,8 @@ test("release source, roadmap/history, and product/docs contract stay explicit",
   );
   assert.equal(currentCloseout.version, "0.13.0");
   assert.equal(currentCloseout.tag, "v0.13.0");
-  validateReleaseCloseout(currentCloseout, { phase: "pre-tag", expectedVersion: "0.13.0", expectedTag: "v0.13.0" });
+  assert.equal(closeoutText, await readFile(new URL("../release-closeouts/v0.13.0.json", import.meta.url), "utf8"), "verified root and versioned closeouts must be byte-identical");
+  validateReleaseCloseout(currentCloseout, { phase: "post-publication", expectedVersion: "0.13.0", expectedTag: "v0.13.0", expectedTagSha: "e0696cdd2387395c73a5b8497cc085c041737c2d" });
   assert.ok(isRecord(archivedReleaseCloseout));
   assert.equal(archivedReleaseCloseout.version, "0.12.2");
   assert.ok(isRecord(archivedReleaseCloseout.sourcePreparation));
@@ -447,32 +448,32 @@ test("release source, roadmap/history, and product/docs contract stay explicit",
   assert.match(roadmap, /Category: local trust layer for consequential agent work/);
   assert.match(roadmap, /North-star metric:[\s\S]*zero protocol-level human intervention/);
   assert.match(roadmap, /Current release truth:/);
-  assert.match(roadmap, /Current public release: `v0\.12\.2`/);
+  assert.match(roadmap, /Current public release: `v0\.13\.0`/);
   assert.match(roadmap, /Current source release: `v0\.13\.0`/);
-  assert.match(roadmap, /Last verified public release at this update: `v0\.12\.2`/);
-  assert.match(roadmap, /signed tag commit[\s\S]*0ae623f4537daaa62278e70ae077b3231578a88e/);
+  assert.match(roadmap, /Last verified public release at this update: `v0\.13\.0`/);
+  assert.match(roadmap, /signed tag commit[\s\S]*e0696cdd2387395c73a5b8497cc085c041737c2d/);
   assert.match(roadmap, /\[RELEASE-CLOSEOUT\.json\]\(RELEASE-CLOSEOUT\.json\)/);
-  assert.match(roadmap, /\[release-closeouts\/v0\.12\.2\.json\]\(release-closeouts\/v0\.12\.2\.json\)/);
+  assert.match(roadmap, /\[release-closeouts\/v0\.13\.0\.json\]\(release-closeouts\/v0\.13\.0\.json\)/);
   assert.match(roadmap, /\[RELEASING\.md\]\(RELEASING\.md\)/);
   assert.match(roadmap, /\[docs\/ROADMAP-HISTORY\.md\]\(docs\/ROADMAP-HISTORY\.md\)/);
-  assert.equal(roadmap.match(/\[release-closeouts\/v0\.12\.2\.json\]\(/g)?.length, 1, "ROADMAP must own the current closeout link once");
+  assert.equal(roadmap.match(/\[release-closeouts\/v0\.13\.0\.json\]\(/g)?.length, 1, "ROADMAP must own the current closeout link once");
   assert.match(roadmap, /Public proof covers[\s\S]*source preparation is not public proof/);
   assert.doesNotMatch(roadmap, /release-closeouts\/v0\.12\.1\.json|release-closeouts\/v0\.12\.0\.json|release-closeouts\/v0\.11\.0\.json|release-closeouts\/v0\.9\.5\.json/);
   assert.match(roadmap, /runtime requires Node `>=22`/);
-  assert.match(roadmap, /supports Codex numeric minor lines\s+`0\.148` and `0\.150`/);
+  assert.match(roadmap, /Codex[\s\S]*`0\.153\.4`[\s\S]*`0\.152\.1`[\s\S]*Desktop `0\.153\.4`/);
   assert.match(roadmap, /## 1\. Invisible Loop — v1/);
   assert.match(roadmap, /## 2\. Programs/);
   assert.match(roadmap, /## 3\. Portable Trust/);
   assert.match(roadmap, /## 4\. Agent Teams/);
   assert.match(roadmap, /v1 exit gate:/);
-  assert.match(roadmap, /Current blocked-by\/worktree continuation is source-only/);
-  assert.match(roadmap, /publish it in a pinned `@ivand890\/synod@0\.13\.0` package before pilots start/);
+  assert.match(roadmap, /Blocked-by\/worktree continuation is available/);
+  assert.match(roadmap, /available in the pinned `@ivand890\/synod@0\.13\.0` package/);
   assert.match(roadmap, /source-checkout behavior alone is not pilot evidence/);
-  assert.equal(roadmap.match(/Current blocked-by\/worktree continuation is source-only/g)?.length, 1, "ROADMAP must own the source-only publication prerequisite once");
+  assert.equal(roadmap.match(/Blocked-by\/worktree continuation is available/g)?.length, 1, "ROADMAP must own the source-only publication prerequisite once");
   assert.equal(roadmap.match(/source-checkout behavior alone is not pilot evidence/g)?.length, 1, "ROADMAP must state the source/public proof boundary once");
   const invisibleLoopDependencyRow = roadmap.match(/^\| Invisible Loop \(v1\) \|.*$/m)?.[0];
   assert.ok(invisibleLoopDependencyRow, "ROADMAP must include the Invisible Loop dependency row");
-  assert.match(invisibleLoopDependencyRow, /Verified v0\.12\.2 contract and the pinned-publication condition above/);
+  assert.match(invisibleLoopDependencyRow, /Verified v0\.13\.0 contract and the pinned artifact above/);
   assert.doesNotMatch(invisibleLoopDependencyRow, /Invisible Loop exit gate/);
   assert.doesNotMatch(roadmap, /released source-only blocker\/worktree behavior/);
   assert.match(roadmap, /Three real production-shaped pilots[\s\S]*at least three repositories/);
@@ -587,7 +588,7 @@ test("release source, roadmap/history, and product/docs contract stay explicit",
     "When work is interrupted",
     "Install and upgrade",
     "The supervised loop",
-    "Source-only capabilities",
+    "Released capabilities",
     "Recovery and local evidence",
     "Usage and JSON",
     "Compatibility",
@@ -603,21 +604,21 @@ test("release source, roadmap/history, and product/docs contract stay explicit",
   assert.match(readme, /`?DONE`? is not a commit, push, PR, deploy, spend, or production mutation/);
   assert.match(readme, /Interruption is an expected supervision path/);
   assert.match(readme, /resume, reassign, and supersede/);
-  assert.match(readme, /pnpm dlx @ivand890\/synod@0\.12\.2 init/);
+  assert.match(readme, /pnpm dlx @ivand890\/synod@0\.13\.0 init/);
   assert.match(readme, /pnpm dlx @ivand890\/synod@<version> upgrade --dry-run/);
-  assert.match(readme, /`--blocked-by` dispatch[\s\S]*worktree[\s\S]*source-only/);
+  assert.match(readme, /`--blocked-by`[\s\S]*dispatch[\s\S]*worktree/);
   assert.match(readme, /source\s+checkout behavior alone is not pilot evidence/i);
   assert.match(readme, /include-local-docs/);
   assert.match(readme, /Usage reports are read-only/);
   assert.match(readme, /Every `--json` command emits a versioned envelope/);
-  assert.match(readme, /v0\.12\.2 release requires Node\.js `>=22`/);
-  assert.match(readme, /supports Codex numeric minor lines `0\.148\.x` and `0\.150\.x`/);
-  assert.match(readme, /untested[\s\S]*`0\.149\.x` gap fails closed/);
-  assert.match(readme, /public and pinned `@ivand890\/synod@0\.12\.2`/);
+  assert.match(readme, /v0\.13\.0 release requires Node\.js `>=22`/);
+  assert.match(readme, /Codex[\s\S]*`0\.153\.4`[\s\S]*`0\.152\.1`[\s\S]*Desktop `0\.153\.4`/);
+  assert.match(readme, /Other patches fail[\s\S]*closed for Synod-owned execution/);
+  assert.match(readme, /public and pinned `@ivand890\/synod@0\.13\.0`/);
   assert.match(readme, /signed tag\s+commit[\s\S]*externally immutable/);
-  assert.match(readme, /Prepared source:[\s\S]*RELEASE-CLOSEOUT\.json[\s\S]*release-closeouts\/v0\.12\.2\.json/);
+  assert.match(readme, /Matching records:[\s\S]*RELEASE-CLOSEOUT\.json[\s\S]*release-closeouts\/v0\.13\.0\.json/);
   assert.match(readme, /See \[RELEASING\.md\]\(RELEASING\.md\) for the protected release procedure/);
-  assert.equal(readme.match(/\[release-closeouts\/v0\.12\.2\.json\]\(/g)?.length, 1, "README must link the current versioned closeout once");
+  assert.equal(readme.match(/\[release-closeouts\/v0\.13\.0\.json\]\(/g)?.length, 1, "README must link the current versioned closeout once");
   assert.match(readme, /Local tarball smoke[\s\S]*source-preparation evidence only; they do not prove external publication/);
   assert.equal(readme.match(/source-preparation evidence only/g)?.length, 1, "README must state the local/public proof boundary once");
   assert.doesNotMatch(readme, /release-closeouts\/v0\.12\.1\.json|release-closeouts\/v0\.12\.0\.json|release-closeouts\/v0\.11\.0\.json|release-closeouts\/v0\.9\.5\.json/);
@@ -684,15 +685,15 @@ test("release source, roadmap/history, and product/docs contract stay explicit",
     assert.doesNotMatch(product, new RegExp(phrase, "i"), `PRODUCT.md must not carry ${phrase} implementation detail`);
   }
 
-  assert.match(releasing, /public `v0\.12\.2` source is anchored by signed tag commit/);
+  assert.match(releasing, /public `v0\.13\.0` source is anchored by signed tag commit/);
   assert.match(releasing, /externally immutable GitHub\s+Release \(`isImmutable: true`\)/);
-  assert.match(releasing, /signed tag commit\s+`0ae623f4537daaa62278e70ae077b3231578a88e`/);
-  assert.match(releasing, /`release-closeouts\/v0\.12\.2\.json`/);
+  assert.match(releasing, /signed tag commit\s+`e0696cdd2387395c73a5b8497cc085c041737c2d`/);
+  assert.match(releasing, /`release-closeouts\/v0\.13\.0\.json`/);
   assert.match(releasing, /`release-closeouts\/v0\.12\.1\.json`/);
   assert.match(releasing, /`release-closeouts\/v0\.12\.0\.json`/);
   assert.match(releasing, /`release-closeouts\/v0\.11\.0\.json`/);
   assert.match(releasing, /(?:prior|earlier)\s+`v0\.9\.5` evidence[\s\S]*`release-closeouts\/v0\.9\.5\.json`/);
-  assert.match(releasing, /root `RELEASE-CLOSEOUT\.json` prepares `v0\.13\.0`/);
+  assert.match(releasing, /root `RELEASE-CLOSEOUT\.json` is the matching verified closeout record for `v0\.13\.0`/);
   assert.doesNotMatch(releasing, /pre-tag candidate record/);
   assert.match(releasing, /registry-installed package result/);
   assert.match(releasing, /local tarball smoke belongs under\s+`sourcePreparation\.localPackageSmoke`/);
@@ -772,7 +773,7 @@ test("release closeout validation is strict across pre-tag and post-publication 
     readFile(archivedLatestCloseoutPath, "utf8"),
     readFile(archivedReleaseCloseoutPath, "utf8"),
   ]);
-  validateReleaseCloseout(parseJson(rootText), { phase: "pre-tag", expectedVersion: "0.13.0" });
+  validateReleaseCloseout(parseJson(rootText), { phase: "post-publication", expectedVersion: "0.13.0", expectedTagSha: "e0696cdd2387395c73a5b8497cc085c041737c2d" });
   const root = parseJson(archivedReleaseText);
   const archived = parseJson(archivedText);
   const archivedPrevious = parseJson(archivedPreviousText);

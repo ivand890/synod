@@ -1,6 +1,6 @@
 # Codex compatibility: current and previous minor lines
 
-Unreleased source policy, reviewed 2026-09-05. Published Synod `0.12.2` retains
+Synod `0.13.0` policy, verified 2026-09-05. Earlier Synod `0.12.2` retains
 its original compatibility contract. `0.153.x` and `0.152.x` are minor lines;
 the semantic major is still `0`.
 

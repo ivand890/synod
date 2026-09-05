@@ -6,7 +6,7 @@ Synod publishes `@ivand890/synod` and its matching GitHub Release from GitHub Ac
 
 Release authority is exact Git state, the phase-appropriate closeout record, and the protected workflow or closeout pull request that verifies it. Local tests, a tarball, a tag, or a green workflow are not public proof. Published tags and npm versions are immutable; corrections require a new patch version.
 
-The public `v0.12.2` source is anchored by signed tag commit `0ae623f4537daaa62278e70ae077b3231578a88e` and its externally immutable GitHub Release (`isImmutable: true`). Two-phase closeout has three checkpoints: prepare source, let the protected tag workflow publish it, then independently verify public evidence. The tag workflow validates phase 1 only; phase-2 live verifier runs on the protected closeout PR, not the tag workflow. The commands below are the protected release procedure for a future version.
+The public `v0.13.0` source is anchored by signed tag commit `e0696cdd2387395c73a5b8497cc085c041737c2d` and its externally immutable GitHub Release (`isImmutable: true`). Two-phase closeout has three checkpoints: prepare source, let the protected tag workflow publish it, then independently verify public evidence. The tag workflow validates phase 1 only; phase-2 live verifier runs on the protected closeout PR, not the tag workflow. The commands below are the protected release procedure for a future version.
 
 ## Phase 1: Prepare source
 
@@ -56,7 +56,7 @@ Public evidence must bind the exact tag SHA to:
 - the registry-installed package result: a clean consumer install of the exact registry spec followed by `pnpm exec synod --version`; and
 - a separate public `pnpm dlx @ivand890/synod@$release_version --version` check.
 
-Only then may `sourcePreparation` be `closed`, `publicVerification` be `verified`, and matching `README.md`, `ROADMAP.md`, and `RELEASING.md` claims advance together. The root `RELEASE-CLOSEOUT.json` prepares `v0.13.0`; public proof remains at `v0.12.2` until verification succeeds. After closeout, the root and matching versioned closeouts must be byte-identical.
+Only then may `sourcePreparation` be `closed`, `publicVerification` be `verified`, and matching `README.md`, `ROADMAP.md`, and `RELEASING.md` claims advance together. The root `RELEASE-CLOSEOUT.json` is the matching verified closeout record for `v0.13.0`; the root and matching versioned closeouts must be byte-identical.
 
 ## Failure and recovery
 
@@ -67,4 +67,4 @@ Only then may `sourcePreparation` be `closed`, `publicVerification` be `verified
 
 ## Historical evidence
 
-Current public `v0.12.2` evidence is in `release-closeouts/v0.12.2.json`; `RELEASE-CLOSEOUT.json` is pending source preparation for `v0.13.0`. The prior `v0.9.5` evidence is in `release-closeouts/v0.9.5.json`, bound to signed tag commit `494f1ebd85b1c51dde522e7a7ec6e334dadc4e30`; other historical pointers are `release-closeouts/v0.12.1.json`, `release-closeouts/v0.12.0.json`, and `release-closeouts/v0.11.0.json`. These pointers are historical evidence, not instructions to rerun old tag or publication commands.
+Current `v0.13.0` evidence is in `RELEASE-CLOSEOUT.json` and `release-closeouts/v0.13.0.json`; previous `v0.12.2` evidence remains in `release-closeouts/v0.12.2.json`. The prior `v0.9.5` evidence is in `release-closeouts/v0.9.5.json`, bound to signed tag commit `494f1ebd85b1c51dde522e7a7ec6e334dadc4e30`; other historical pointers are `release-closeouts/v0.12.1.json`, `release-closeouts/v0.12.0.json`, and `release-closeouts/v0.11.0.json`. These pointers are historical evidence, not instructions to rerun old tag or publication commands.
