@@ -138,10 +138,10 @@ test("ordinary usage text and JSON-shaped data remain monetary-free by default",
   assert.equal("help" in priced ? undefined : priced.priceFile, "prices.json");
 });
 
-test("packaged OpenAI price sample covers every exact built-in profile model", () => {
+test("dated OpenAI price sample preserves coverage of the pre-Astra profiles", () => {
   const sample = JSON.parse(readFileSync(new URL("../examples/openai-api-prices-2026-08-27.json", import.meta.url), "utf8"));
   const prices = validatePriceFile(sample);
-  const builtInModels = new Set(listProfiles().flatMap(profile => [
+  const builtInModels = new Set(listProfiles().filter(profile => profile.id !== "synod-astra").flatMap(profile => [
     profile.defaultSubagent.model,
     ...Object.values(profile.roles).map(role => role.model)
   ]));
@@ -156,4 +156,17 @@ test("packaged OpenAI price sample covers every exact built-in profile model", (
   assert.equal(prices.currency, "USD");
   assert.equal(prices.asOf, "2026-08-27");
   assert.match(prices.source, /developers\.openai\.com\/api\/docs\/models/);
+});
+
+test("Astra stays unpriced with the historical sample instead of inheriting Sol rates", () => {
+  const prices = validatePriceFile(JSON.parse(readFileSync(new URL("../examples/openai-api-prices-2026-08-27.json", import.meta.url), "utf8")));
+  const input = usage();
+  input.capturedAt = "2026-09-05T12:00:00.000Z";
+  input.models = [{ ...input.models[0]!, model: "gpt-6-astra" }, { ...input.models[1]!, model: "gpt-5.6-luna" }];
+  const report = projectUsageCost(input, prices);
+  assert.equal(report.status, "partial");
+  assert.deepEqual(report.unpricedModels, ["gpt-6-astra"]);
+  assert.equal(report.rows[0]?.priced, false);
+  assert.equal(report.rows[1]?.priced, true);
+  assert.equal(report.total, undefined);
 });

@@ -344,6 +344,26 @@ test("upgrade dry-run is non-mutating and profile changes preserve durable state
   assert.equal(manifest.profile, "synod-5.6");
 });
 
+test("explicit Astra upgrade preserves canonical records and user notes; implicit upgrade retains it", async () => {
+  const directory = await temporaryProject();
+  await initProject({ directory, profile: "synod-5.6" });
+  const protectedPaths = [".synod/state.json", ".synod/events.jsonl", ".synod/checkpoint.json", "docs/synod/STATUS.md", "docs/synod/GOAL.md"];
+  const before = await Promise.all(protectedPaths.map(file => readFile(path.join(directory, file), "utf8")));
+  const configPath = path.join(directory, ".codex/config.toml");
+  const oldConfig = await readFile(configPath, "utf8");
+  const implicit = await upgradeProject({ directory });
+  assert.equal(implicit.profile, "synod-5.6");
+  const preview = await upgradeProject({ directory, profile: "synod-astra", dryRun: true });
+  assert.equal(preview.conflicts.length, 0);
+  assert.equal(await readFile(configPath, "utf8"), oldConfig);
+  const applied = await upgradeProject({ directory, profile: "synod-astra" });
+  assert.equal(applied.conflicts.length, 0);
+  assert.match(await readFile(configPath, "utf8"), /model = "gpt-6-astra"/);
+  assert.deepEqual(await Promise.all(protectedPaths.map(file => readFile(path.join(directory, file), "utf8"))), before);
+  assert.equal((await upgradeProject({ directory })).profile, "synod-astra");
+  assert.equal((await checkProject({ directory })).healthy, true);
+});
+
 test("upgrade creates the v0.8 worktree registry and rejects template downgrade", async () => {
   const directory = await temporaryProject();
   await initProject({ directory, profile: "portable" });

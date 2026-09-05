@@ -344,9 +344,12 @@ function createInitProfileSelector(
         doctorDependenciesForCli(dependencies)
       );
       const preferred = result.profiles.find(item => item.id === PREFERRED_PROFILE);
-      if (preferred?.modelCompatible) {
+      // Profiles are ordered by preference. Keep the previous tiered profile
+      // available when Astra is absent instead of collapsing workers to portable.
+      const selected = result.profiles.find(item => item.id !== FALLBACK_PROFILE && item.modelCompatible);
+      if (selected) {
         return {
-          profile: PREFERRED_PROFILE,
+          profile: selected.id,
           source: "capability",
           reason: "model-compatible",
           details: {

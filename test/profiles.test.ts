@@ -28,6 +28,35 @@ test("keeps the GPT-5.6 spawn fallback separate from Luna role overrides", () =>
   assert.deepEqual(profile.roles.mechanical, { model: "gpt-5.6-luna", effort: "medium" });
 });
 
+test("Astra changes only the advisor and preserves worker routing and effort", () => {
+  const astra = getProfile("synod-astra");
+  const previous = getProfile("synod-5.6");
+  assert.deepEqual(astra.roles.supervisor, { model: "gpt-6-astra", effort: "high", planEffort: "xhigh" });
+  assert.deepEqual(astra.defaultSubagent, previous.defaultSubagent);
+  for (const role of ["implementer", "explorer", "reviewer", "verifier", "mechanical"] as const) {
+    assert.deepEqual(astra.roles[role], previous.roles[role]);
+  }
+  assert.deepEqual(resolveDelegationProfile("synod-astra", "reviewer"), {
+    profile: "synod-astra", role: "reviewer", model: "gpt-5.6-terra", effort: "high"
+  });
+  assert.deepEqual(resolveImplementerProfile("synod-astra"), {
+    profile: "synod-astra", model: "gpt-5.6-luna", effort: "max"
+  });
+});
+
+test("Astra requires both advisor efforts and every worker capability", () => {
+  const profile = getProfile("synod-astra");
+  const workers = [model("gpt-5.6-terra", ["medium", "high", "max"]), model("gpt-5.6-luna", ["medium", "max"])];
+  assert.deepEqual(evaluateProfile(profile, workers).missing, [
+    { role: "supervisor", model: "gpt-6-astra", capability: "model" }
+  ]);
+  assert.deepEqual(evaluateProfile(profile, [...workers, model("gpt-6-astra", ["high"])]).missing, [
+    { role: "supervisor", model: "gpt-6-astra", effort: "xhigh", capability: "plan_reasoning_effort" }
+  ]);
+  assert.equal(evaluateProfile(profile, [...workers, model("gpt-6-astra", ["high", "xhigh"])]).compatible, true);
+  assert.equal(evaluateProfile(profile, [model("gpt-6-astra", ["high", "xhigh"])]).compatible, false);
+});
+
 test("resolves the installed implementer role without a model or effort override", () => {
   assert.deepEqual(resolveImplementerProfile("synod-5.6"), {
     profile: "synod-5.6",
@@ -107,14 +136,15 @@ test("built-in profiles require the current supported Codex minor line", () => {
   assert.deepEqual(
     listProfiles().map(profile => ({ id: profile.id, minimumCodexVersion: profile.minimumCodexVersion })),
     [
-      { id: "synod-5.6", minimumCodexVersion: "0.148.0" },
-      { id: "portable", minimumCodexVersion: "0.148.0" }
+      { id: "synod-astra", minimumCodexVersion: "0.152.1" },
+      { id: "synod-5.6", minimumCodexVersion: "0.152.1" },
+      { id: "portable", minimumCodexVersion: "0.152.1" }
     ]
   );
 });
 
 test("profile APIs expose portable only as an explicit fallback and require an ID", () => {
-  assert.equal(PREFERRED_PROFILE, "synod-5.6");
+  assert.equal(PREFERRED_PROFILE, "synod-astra");
   assert.equal(PORTABLE_PROFILE, "portable");
   assert.equal(FALLBACK_PROFILE, PORTABLE_PROFILE);
   assert.throws(

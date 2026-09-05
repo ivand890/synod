@@ -26,6 +26,7 @@ import { normalizeLeaseScopePath, type LeaseScope } from "./leases.js";
 import { isDelegationRole, resolveDelegationProfile, type DelegationProfile, type DelegationRole } from "./profiles.js";
 import { isRecord } from "./validation.js";
 import type { WaitLossCause } from "./wait.js";
+import { classifyCodexVersion, CODEX_PROTOCOL_LABEL } from "./compatibility.js";
 
 const activeWriterScopes = new Set<string>();
 
@@ -83,6 +84,10 @@ export interface CliAppServerTurnEvidence {
     usedThreadResume: false;
     completion: "not-claimed";
     status: CliAppServerRuntimeStatus;
+    profileValidation: "verified" | "unavailable";
+    profileSource: "persisted-turn-context" | "loaded-settings" | "unavailable";
+    model?: string;
+    reasoningEffort?: string;
   };
 }
 
@@ -807,6 +812,12 @@ function assertCliSurface(diagnostics: AppServerDiagnostics, constructed: boolea
       { surface: diagnostics.codexSurface ?? null, constructedAppServer: constructed }
     );
   }
+  const compatibility = classifyCodexVersion(diagnostics.codexVersion, "cli");
+  if (compatibility.status === "unsupported") {
+    throw adapterError(ERROR_CODES.APP_SERVER_UNSUPPORTED, "CLI App Server version has not been validated by this Synod release.", {
+      version: diagnostics.codexVersion ?? null, reason: compatibility.reason, constructedAppServer: constructed
+    });
+  }
   const argv = launchedArgv(diagnostics);
   if (hasMultiAgentV2(argv)) {
     throw adapterError(
@@ -849,7 +860,7 @@ function effectiveMetadata(threadStartResponse: unknown, settingsNotifications: 
     if (!isRecord(notification) || !isRecord(notification.threadSettings)) {
       throw adapterError(
         ERROR_CODES.APP_SERVER_UNSUPPORTED,
-        "thread/settings/updated notification did not match the Codex 0.148 schema.",
+        `thread/settings/updated notification did not match the ${CODEX_PROTOCOL_LABEL} schema.`,
         { constructedAppServer: true }
       );
     }
@@ -863,7 +874,7 @@ function effectiveMetadata(threadStartResponse: unknown, settingsNotifications: 
       || !["readOnly", "workspaceWrite", "externalSandbox", "dangerFullAccess"].includes(String(settings.sandboxPolicy.type))) {
       throw adapterError(
         ERROR_CODES.APP_SERVER_UNSUPPORTED,
-        "thread/settings/updated notification did not match the Codex 0.148 ThreadSettings schema.",
+        `thread/settings/updated notification did not match the ${CODEX_PROTOCOL_LABEL} ThreadSettings schema.`,
         { constructedAppServer: true }
       );
     }
@@ -908,7 +919,7 @@ async function waitForTurnCompleted(
     if (malformed()) {
       throw adapterError(
         ERROR_CODES.APP_SERVER_UNSUPPORTED,
-        "turn/completed notification did not match the Codex 0.148 schema.",
+        `turn/completed notification did not match the ${CODEX_PROTOCOL_LABEL} schema.`,
         { threadId, turnId, constructedAppServer: true }
       );
     }
@@ -941,7 +952,7 @@ async function waitForTurnCompleted(
     if (malformed()) {
       throw adapterError(
         ERROR_CODES.APP_SERVER_UNSUPPORTED,
-        "turn/completed notification did not match the Codex 0.148 schema.",
+        `turn/completed notification did not match the ${CODEX_PROTOCOL_LABEL} schema.`,
         { threadId, turnId, constructedAppServer: true }
       );
     }
@@ -951,7 +962,7 @@ async function waitForTurnCompleted(
   if (!ids.threadId || !ids.turnId || !ids.status) {
     throw adapterError(
       ERROR_CODES.APP_SERVER_UNSUPPORTED,
-      "turn/completed notification did not match the Codex 0.148 schema.",
+      `turn/completed notification did not match the ${CODEX_PROTOCOL_LABEL} schema.`,
       { threadId, turnId, constructedAppServer: true }
     );
   }
@@ -1144,6 +1155,31 @@ function rowStatus(rows: unknown[], threadId: string): CliAppServerRuntimeStatus
   return "unknown";
 }
 
+function workerProfileEvidence(
+  rows: unknown[], threadId: string, expected: DelegationProfile, version: string | null | undefined
+): Pick<CliAppServerTurnEvidence["restartLineage"], "profileValidation" | "profileSource" | "model" | "reasoningEffort"> {
+  const row = rows.find(row => threadIdentity(row) === threadId);
+  const record = recordFrom(row);
+  const model = typeof record.model === "string" ? record.model : undefined;
+  const effort = typeof record.reasoningEffort === "string" ? record.reasoningEffort : undefined;
+  // The previous line lacks these fields. Missing metadata is explicit evidence
+  // unavailability, never inferred from the requested profile or old live settings.
+  if (version === "0.152.1" && record.model == null && record.reasoningEffort == null) {
+    return { profileValidation: "unavailable", profileSource: "unavailable" };
+  }
+  if (model !== expected.model || effort !== expected.effort) {
+    throw adapterError(ERROR_CODES.APP_SERVER_UNSUPPORTED, "Worker thread model or reasoning effort did not match the installed role profile.", {
+      threadId, role: expected.role, expectedModel: expected.model, expectedReasoningEffort: expected.effort,
+      observedModel: model ?? null, observedReasoningEffort: effort ?? null, constructedAppServer: true
+    });
+  }
+  return {
+    profileValidation: "verified",
+    profileSource: normalizeRuntimeStatus(record.status) === "notLoaded" ? "persisted-turn-context" : "loaded-settings",
+    model, reasoningEffort: effort
+  };
+}
+
 /**
  * CLI Path A adapter: Synod owns one App Server for read-only observer turns.
  * Writer leases stay host-owned (Path B or an injected adapter). Desktop must
@@ -1306,7 +1342,7 @@ export function createCliAppServerAdapter(
       if (!isRecord(response) || response.turn !== undefined || response.turnId !== undefined) {
         throw adapterError(
           ERROR_CODES.APP_SERVER_UNSUPPORTED,
-          "thread/start response did not match the Codex 0.148 ThreadStartResponse schema.",
+          `thread/start response did not match the ${CODEX_PROTOCOL_LABEL} ThreadStartResponse schema.`,
           { constructedAppServer: true }
         );
       }
@@ -1463,7 +1499,7 @@ export function createCliAppServerAdapter(
         || Object.keys(turnResponse).some(key => key !== "turn")) {
         throw adapterError(
           ERROR_CODES.APP_SERVER_UNSUPPORTED,
-          "turn/start response did not match the Codex 0.148 TurnStartResponse schema.",
+          `turn/start response did not match the ${CODEX_PROTOCOL_LABEL} TurnStartResponse schema.`,
           { constructedAppServer: true }
         );
       }
@@ -1544,35 +1580,38 @@ export function createCliAppServerAdapter(
       ]);
 
       let restartStatus: CliAppServerRuntimeStatus = "unknown";
+      let restartProfile: ReturnType<typeof workerProfileEvidence> = { profileValidation: "unavailable", profileSource: "unavailable" };
       if (detachedOwner) {
         // The detached owner is already the authoritative App Server. Starting
         // a second owner here would lose the exact thread identity and create
         // an unbounded orphan. Query the retained owner directly instead.
-        const listed = await session.client.request("thread/list", {
+        let listed = await session.client.request("thread/list", {
           archived: false,
           limit: 100,
           cwd
         });
         restartStatus = rowStatus(threadRows(listed), session.ownerThread);
         if (restartStatus === "unknown") {
-          const unscoped = await session.client.request("thread/list", { archived: false, limit: 100 });
-          restartStatus = rowStatus(threadRows(unscoped), session.ownerThread);
+          listed = await session.client.request("thread/list", { archived: false, limit: 100 });
+          restartStatus = rowStatus(threadRows(listed), session.ownerThread);
         }
+        if (restartStatus !== "unknown") restartProfile = workerProfileEvidence(threadRows(listed), session.ownerThread, session.implementer, session.client.getDiagnostics().codexVersion);
       } else {
         const restarted = createClient();
         try {
           await restarted.start();
           assertCliSurface(restarted.getDiagnostics(), true);
-          const listed = await restarted.request("thread/list", {
+          let listed = await restarted.request("thread/list", {
             archived: false,
             limit: 100,
             cwd
           });
           restartStatus = rowStatus(threadRows(listed), session.ownerThread);
           if (restartStatus === "unknown") {
-            const unscoped = await restarted.request("thread/list", { archived: false, limit: 100 });
-            restartStatus = rowStatus(threadRows(unscoped), session.ownerThread);
+            listed = await restarted.request("thread/list", { archived: false, limit: 100 });
+            restartStatus = rowStatus(threadRows(listed), session.ownerThread);
           }
+          if (restartStatus !== "unknown") restartProfile = workerProfileEvidence(threadRows(listed), session.ownerThread, session.implementer, restarted.getDiagnostics().codexVersion);
         } finally {
           await closeClient(restarted);
         }
@@ -1603,7 +1642,8 @@ export function createCliAppServerAdapter(
           queryMethod: "thread/list",
           usedThreadResume: false,
           completion: "not-claimed",
-          status: restartStatus
+          status: restartStatus,
+          ...restartProfile
         }
       };
       if (!detachedOwner) await startWaitEndpoint(session, false);

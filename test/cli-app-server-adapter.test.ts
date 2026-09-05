@@ -30,7 +30,7 @@ function threadRecord(
   status: { type: "idle" | "notLoaded" | "systemError" } = { type: "idle" }
 ): Record<string, unknown> {
   return {
-    cliVersion: "0.148.0",
+    cliVersion: "0.152.1",
     createdAt: 0,
     cwd: "/tmp/project",
     ephemeral: false,
@@ -49,6 +49,7 @@ function diagnostics(overrides: Record<string, unknown> = {}): AppServerDiagnost
   return {
     codexExecutable: "codex",
     codexSurface: "cli",
+    codexVersion: "0.152.1",
     appServer: {
       capabilities: { initialize: true, threadList: false, modelList: false }
     },
@@ -411,6 +412,49 @@ test("CLI adapter rejects a non-implementer executor before constructing the App
   assert.equal(client.calls.length, 0);
 });
 
+test("current-line restart verifies persisted worker metadata without resuming the thread", async () => {
+  for (const metadata of [
+    { model: "gpt-5.6-luna", reasoningEffort: "max", status: { type: "notLoaded" } },
+    { model: "gpt-5.6-luna", reasoningEffort: "max", status: { type: "idle" } },
+    { model: "gpt-6-astra", reasoningEffort: "max" },
+    { model: "gpt-5.6-luna", reasoningEffort: "high" },
+    { model: null, reasoningEffort: null },
+    {}
+  ]) {
+    const first = new FakeClient({ codexVersion: "0.153.4" });
+    const second = new FakeClient({ codexVersion: "0.153.4" });
+    second.listResponse = { data: [{ ...threadRecord(), ...metadata }], nextCursor: null };
+    let created = 0;
+    const adapter = createCliAppServerAdapter({ runtime: { surface: "cli", executable: "codex" },
+      profile: "synod-astra", directory: "/tmp/project", clientFactory: () => ++created === 1 ? first : second });
+    await adapter.spawn(spawnRequest());
+    if (metadata.model === "gpt-5.6-luna" && metadata.reasoningEffort === "max") {
+      const receipt = await adapter.authorize(authorizeRequest());
+      assert.ok(isRecord(receipt) && isRecord(receipt.restartLineage));
+      assert.equal(receipt.restartLineage.profileValidation, "verified");
+      assert.equal(receipt.restartLineage.profileSource, metadata.status?.type === "notLoaded" ? "persisted-turn-context" : "loaded-settings");
+      assert.equal(receipt.restartLineage.model, "gpt-5.6-luna");
+      assert.equal(receipt.restartLineage.reasoningEffort, "max");
+    } else {
+      await assert.rejects(adapter.authorize(authorizeRequest()), error =>
+        error instanceof SynodError && error.code === ERROR_CODES.APP_SERVER_UNSUPPORTED);
+    }
+    assert.equal(second.calls.some(call => call.method === "thread/resume"), false);
+    assert.equal(second.closed, 1);
+    await adapter.close?.();
+  }
+});
+
+test("unvalidated CLI patches fail before thread creation", async () => {
+  for (const version of ["0.153.5", "0.151.0", "0.154.0", null]) {
+    const client = new FakeClient({ codexVersion: version });
+    const adapter = cliAdapter(client, () => client);
+    await assert.rejects(adapter.spawn(spawnRequest()), error =>
+      error instanceof SynodError && error.code === ERROR_CODES.APP_SERVER_UNSUPPORTED);
+    assert.equal(client.calls.some(call => call.method === "thread/start"), false);
+  }
+});
+
 test("authorize runs one read-only turn after bind and does not treat wait as wait --task", async () => {
   const spawnClient = new FakeClient();
   const restartClient = new FakeClient();
@@ -444,6 +488,7 @@ test("authorize runs one read-only turn after bind and does not treat wait as wa
   assert.equal((authorized as { restartLineage: { usedThreadResume: boolean } }).restartLineage.usedThreadResume, false);
   assert.equal((authorized as { restartLineage: { completion: string } }).restartLineage.completion, "not-claimed");
   assert.equal((authorized as { restartLineage: { status: string } }).restartLineage.status, "notLoaded");
+  assert.equal((authorized as { restartLineage: { profileValidation: string } }).restartLineage.profileValidation, "unavailable");
   const turnCall = spawnClient.calls.find(call => call.method === "turn/start");
   assert.equal(turnCall?.params.threadId, "thread-from-appserver");
   assert.equal(turnCall?.params.cwd, "/tmp/project");
@@ -1192,12 +1237,12 @@ test("production Path A keeps a detached owner for sequential wait", async () =>
   await writeFile(fakeCodex, `#!/usr/bin/env node
 import readline from "node:readline";
 const threadId = ${JSON.stringify(threadId)};
-const thread = () => ({ id: threadId, cliVersion: "0.148.0", cwd: process.cwd(), status: { type: "idle" }, turns: [] });
+const thread = () => ({ id: threadId, cliVersion: "0.152.1", cwd: process.cwd(), status: { type: "idle" }, turns: [] });
 const reply = (id, result) => process.stdout.write(JSON.stringify({ id, result }) + "\\n");
 const notify = (method, params) => process.stdout.write(JSON.stringify({ method, params }) + "\\n");
 readline.createInterface({ input: process.stdin }).on("line", line => {
   const message = JSON.parse(line);
-  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.148.0", codexHome: "/tmp" });
+  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.152.1", codexHome: "/tmp" });
   else if (message.method === "thread/start") reply(message.id, { thread: { ...thread(), model: "gpt-5.6-luna", reasoningEffort: "max", sandbox: { type: "readOnly" } } });
   else if (message.method === "turn/start") {
     reply(message.id, { turn: { id: "turn-1", status: "inProgress", items: [] } });
@@ -1249,7 +1294,7 @@ const reply = (id, result) => process.stdout.write(JSON.stringify({ id, result }
 const reject = id => process.stdout.write(JSON.stringify({ id, error: { code: "FAKE_RPC_REJECTION", message: "thread start rejected by fake App Server" } }) + "\\n");
 readline.createInterface({ input: process.stdin }).on("line", line => {
   const message = JSON.parse(line);
-  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.148.0", codexHome: "/tmp" });
+  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.152.1", codexHome: "/tmp" });
   else if (message.method === "thread/start") reject(message.id);
 });
 `, "utf8");
@@ -1284,7 +1329,7 @@ import readline from "node:readline";
 const reply = (id, result) => process.stdout.write(JSON.stringify({ id, result }) + "\\n");
 readline.createInterface({ input: process.stdin }).on("line", line => {
   const message = JSON.parse(line);
-  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.148.0", codexHome: "/tmp" });
+  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.152.1", codexHome: "/tmp" });
 });
 `, "utf8");
   await chmod(fakeCodex, 0o755);
@@ -1324,8 +1369,8 @@ process.once("SIGINT", stop);
 const reply = (id, result) => process.stdout.write(JSON.stringify({ id, result }) + "\\n");
 readline.createInterface({ input: process.stdin }).on("line", line => {
   const message = JSON.parse(line);
-  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.148.0", codexHome: "/tmp" });
-  else if (message.method === "thread/start") reply(message.id, { thread: { id: threadId, cliVersion: "0.148.0", cwd: process.cwd(), status: { type: "idle" }, turns: [] } });
+  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.152.1", codexHome: "/tmp" });
+  else if (message.method === "thread/start") reply(message.id, { thread: { id: threadId, cliVersion: "0.152.1", cwd: process.cwd(), status: { type: "idle" }, turns: [] } });
 });
 `, "utf8");
   await chmod(fakeCodex, 0o755);
@@ -1393,12 +1438,12 @@ const stop = () => {
 };
 process.once("SIGTERM", stop);
 process.once("SIGINT", stop);
-const thread = () => ({ id: threadId, cliVersion: "0.148.0", cwd: process.cwd(), status: { type: "idle" }, turns: [] });
+const thread = () => ({ id: threadId, cliVersion: "0.152.1", cwd: process.cwd(), status: { type: "idle" }, turns: [] });
 const reply = (id, result) => process.stdout.write(JSON.stringify({ id, result }) + "\\n");
 const notify = (method, params) => process.stdout.write(JSON.stringify({ method, params }) + "\\n");
 readline.createInterface({ input: process.stdin }).on("line", line => {
   const message = JSON.parse(line);
-  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.148.0", codexHome: "/tmp" });
+  if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.152.1", codexHome: "/tmp" });
   else if (message.method === "thread/start") reply(message.id, { thread: { ...thread(), model: "gpt-5.6-luna", reasoningEffort: "max", sandbox: { type: "readOnly" } } });
   else if (message.method === "turn/start") {
     reply(message.id, { turn: { id: "turn-1", status: "inProgress", items: [] } });
@@ -1505,12 +1550,12 @@ const stop = () => {
 };
 process.once("SIGTERM", stop);
 process.once("SIGINT", stop);
-  const thread = () => ({ id: threadId, cliVersion: "0.148.0", cwd: process.cwd(), status: { type: "idle" }, turns: [] });
+  const thread = () => ({ id: threadId, cliVersion: "0.152.1", cwd: process.cwd(), status: { type: "idle" }, turns: [] });
   const reply = (id, result) => process.stdout.write(JSON.stringify({ id, result }) + "\\n");
   const notify = (method, params) => process.stdout.write(JSON.stringify({ method, params }) + "\\n");
   readline.createInterface({ input: process.stdin }).on("line", line => {
     const message = JSON.parse(line);
-    if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.148.0", codexHome: "/tmp" });
+    if (message.method === "initialize") reply(message.id, { userAgent: "codex-cli/0.152.1", codexHome: "/tmp" });
     else if (message.method === "thread/start") reply(message.id, { thread: { ...thread(), model: "gpt-5.6-luna", reasoningEffort: "max", sandbox: { type: "readOnly" } } });
     else if (message.method === "turn/start") {
       reply(message.id, { turn: { id: "turn-1", status: "inProgress", items: [] } });
